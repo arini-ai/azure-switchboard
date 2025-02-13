@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
 
-"""Switchboard is library for distributing LLM inference requests across multiple Azure OpenAI deployments."""
+"""
+Switchboard
+
+Switchboard is a library for distributing LLM inference workloads across
+multiple Azure OpenAI deployments.
+
+"""
 
 import asyncio
-from contextlib import asynccontextmanager
-from email.message import Message
+import logging
 import os
+import random
 import time
+from contextlib import asynccontextmanager
 from typing import Dict, List, Optional
 
-import logging
-
-import openai
-from openai import AsyncAzureOpenAI, AsyncOpenAI
+from openai import AsyncAzureOpenAI
 from openai.types.chat import ChatCompletion
+from openai.types.chat.chat_completion import Choice
+from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from pydantic import BaseModel
 from tenacity import (
     AsyncRetrying,
@@ -22,8 +28,6 @@ from tenacity import (
     stop_after_attempt,
     wait_random_exponential,
 )
-
-import random
 
 logger = logging.getLogger("switchboard")
 
@@ -37,17 +41,25 @@ class AzureDeployment(BaseModel):
     timeout: float = 60.0
     max_rpm: int | None = None
     max_tpm: int | None = None
-    mock: bool = False  # for ease of testing
 
 
 class Deployment:
-    def __init__(self, config: AzureDeployment):
+    def __init__(self, config: AzureDeployment, mock: bool = False) -> None:
         self.config = config
-        self.is_healthy = True
-        self.last_error_time = 0.0
-        self._client: Optional[AsyncAzureOpenAI] = None  # Initialize lazily
+
+        self._client: AsyncAzureOpenAI | None = None
+        self._retry_policy = AsyncRetrying(
+            retry=retry_if_exception_type((TimeoutError,)),
+            stop=stop_after_attempt(self.config.max_retries),
+            wait=wait_random_exponential(multiplier=1, max=60),
+        )
+        self._is_mock = mock
+
         self._request_count = 0
         self._last_request_time = 0.0
+
+        self.is_healthy = True
+        self.last_error_time = 0.0
 
     async def _get_client(self) -> AsyncAzureOpenAI:
         if self._client is None:
@@ -58,31 +70,39 @@ class Deployment:
             )
         return self._client
 
-    async def create_chat_completion(self, *args, **kwargs):
-        client = await self._get_client()
-        retries = AsyncRetrying(
-            retry=retry_if_exception_type((TimeoutError,)),
-            stop=stop_after_attempt(self.config.max_retries),
-            wait=wait_random_exponential(multiplier=1, max=60),
-            # TODO: Add before/after hooks for logging/metrics
+    async def _mock_completion_response(self, sleep_for: float) -> ChatCompletion:
+        await asyncio.sleep(sleep_for)
+
+        return ChatCompletion(
+            id="mock_id",
+            model="mock_model",
+            object="chat.completion",
+            created=int(time.time()),
+            choices=[
+                Choice(
+                    finish_reason="stop",
+                    index=0,
+                    message=ChatCompletionMessage(
+                        role="assistant",
+                        content="mock response",
+                    ),
+                )
+            ],
         )
 
+    async def create_chat_completion(self, *args, **kwargs):
+        client = await self._get_client()
         try:
-            async for attempt in retries:
+            async for attempt in self._retry_policy:
                 with attempt:
                     self._request_count += 1
                     self._last_request_time = time.monotonic()
-                    if not self.config.mock:
+
+                    if not self._is_mock:
                         response = await client.chat.completions.create(*args, **kwargs)
                     else:
-                        await asyncio.sleep(0.1)
-                        response = ChatCompletion(
-                            id="mock_id",
-                            model="mock_model",
-                            object="chat.completion",
-                            created=int(time.time()),
-                            choices=[Choice(message=Message(content="mock response"))],
-                        )
+                        response = await self._mock_completion_response(0.1)
+
                     self._request_count -= 1
                     return response
 
@@ -215,7 +235,7 @@ class Switchboard:
                 messages=messages, model=model, **kwargs
             )
             return response
-        except Exception as e:
+        except Exception:
             # if we get here, retries on the deployment failed
             logger.info("Switchboard level failover")
             # remove from session map
