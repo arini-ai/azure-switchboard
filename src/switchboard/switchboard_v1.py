@@ -20,7 +20,7 @@ from openai import AsyncAzureOpenAI
 from openai.types.chat import ChatCompletion
 from openai.types.chat.chat_completion import Choice
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
-from pydantic import BaseModel
+from pydantic import AnyHttpUrl, BaseModel, SecretStr
 from tenacity import (
     AsyncRetrying,
     RetryError,
@@ -34,8 +34,8 @@ logger = logging.getLogger("switchboard")
 
 class AzureDeployment(BaseModel):
     name: str
-    api_base: str
-    api_key: str
+    api_base: AnyHttpUrl
+    api_key: SecretStr
     api_version: str = "2024-10-21"
     max_retries: int = 3
     timeout: float = 60.0
@@ -64,9 +64,9 @@ class Deployment:
     async def _get_client(self) -> AsyncAzureOpenAI:
         if self._client is None:
             self._client = AsyncAzureOpenAI(
-                api_key=self.config.api_key,
+                api_key=self.config.api_key.get_secret_value(),
                 api_version=self.config.api_version,
-                azure_endpoint=self.config.api_base,
+                azure_endpoint=str(self.config.api_base),
             )
         return self._client
 

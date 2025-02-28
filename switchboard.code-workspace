@@ -11,6 +11,9 @@
             "source.organizeImports.ruff": "always",
             "source.fixAll.ruff": "always"
         },
+        "ruff.lint.ignore": [
+            "F401"
+        ],
         "[python]": {
             "editor.formatOnSave": true,
             "editor.defaultFormatter": "charliermarsh.ruff",
@@ -18,7 +21,7 @@
                 88
             ],
             "editor.tabSize": 4,
-            "editor.insertSpaces": true
+            "editor.insertSpaces": true,
         },
         "python.analysis.typeCheckingMode": "basic",
         "python.testing.pytestEnabled": true,
