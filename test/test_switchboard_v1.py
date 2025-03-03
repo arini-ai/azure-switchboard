@@ -24,14 +24,14 @@ def make_test_deployments(n: int = 3):
     ]
 
 
-@pytest.mark.skipped
-@pytest.fixture
-async def default_switchboard():
-    deployments = [AzureDeployment.model_validate(d) for d in TEST_DEPLOYMENTS]
-    # speed things up for the tests
-    test_params = {"health_check_interval": 0.1, "cooldown_period": 0.5}
-    async with get_switchboard(deployments, **test_params) as sb:
-        yield sb
+# @pytest.mark.skipped
+# @pytest.fixture
+# async def default_switchboard():
+#     deployments = [AzureDeployment.model_validate(d) for d in TEST_DEPLOYMENTS]
+#     # speed things up for the tests
+#     test_params = {"health_check_interval": 0.1, "cooldown_period": 0.5}
+#     async with get_switchboard(deployments, **test_params) as sb:
+#         yield sb
 
 
 @pytest.mark.skipped

@@ -127,7 +127,7 @@ class Deployment:
                 messages=[{"role": "user", "content": "ping"}],
             )
             self.is_healthy = True  # If no exception, it's healthy
-        except Exception:
+        except Exception as e:
             logger.error(f"Deployment {self.config.name} failed to ping: {e}")
             pass
 

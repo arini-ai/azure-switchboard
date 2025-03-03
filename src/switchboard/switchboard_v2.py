@@ -2,7 +2,7 @@ import asyncio
 import random
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Annotated, Any, Callable, Dict, List, Optional
 
 import opentelemetry.trace as trace
 from openai import AsyncAzureOpenAI
@@ -11,6 +11,12 @@ from pydantic import BaseModel, Field, HttpUrl
 
 # Tracer for OpenTelemetry
 tracer = trace.get_tracer("switchboard")
+
+test_client = AsyncAzureOpenAI(
+    azure_endpoint="https://hireai-openai-east.openai.azure.com/",
+    api_key="72532109eae542c399b88dd5c017c6ef",
+    api_version="2024-10-21",
+)
 
 
 class AzureDeployment(BaseModel):
@@ -21,8 +27,9 @@ class AzureDeployment(BaseModel):
     api_key: str
     api_version: str = "2024-10-21"
     timeout: float = 60.0
-    max_tpm: int = Field(..., description="Tokens per minute limit")
-    max_rpm: int = Field(..., description="Requests per minute limit")
+    max_tpm: Annotated[int, Field(description="Tokens per minute limit")] = 0
+    max_rpm: Annotated[int, Field(description="Requests per minute limit")] = 0
+    healthcheck_interval: int = 30
 
 
 @dataclass
@@ -71,9 +78,10 @@ class Switchboard:
     def __init__(
         self,
         deployments: List[AzureDeployment],
-        client_factory: Callable[[AzureDeployment], Any] = default_client_factory,
+        client_factory: Callable[
+            [AzureDeployment], AsyncAzureOpenAI
+        ] = default_client_factory,
         health_check_interval: int = 30,
-        auto_start_health_checks: bool = True,
     ):
         self.client_factory = client_factory
         self.deployments = [
@@ -82,8 +90,7 @@ class Switchboard:
         self.health_check_interval = health_check_interval
         self._health_check_task = None
 
-        if auto_start_health_checks:
-            self.start_health_checks()
+        # self.start_health_checks()
 
     def start_health_checks(self):
         """Start background health check task"""
@@ -94,6 +101,7 @@ class Switchboard:
         """Stop the health check task"""
         if self._health_check_task:
             self._health_check_task.cancel()
+            self._health_check_task
             self._health_check_task = None
 
     async def _health_check_loop(self):
@@ -107,9 +115,7 @@ class Switchboard:
                         # Simple ping to check if deployment is responsive
                         with tracer.start_as_current_span(
                             "health_check",
-                            attributes={
-                                "deployment": deployment.config.deployment_name
-                            },
+                            attributes={"deployment": deployment.config.name},
                         ):
                             await deployment.client.models.list()
                             deployment.healthy = True
@@ -138,8 +144,12 @@ class Switchboard:
             )
 
             # Use the maximum of token and request utilization as the load metric
-            d1_load = max(d1.token_utilization, d1.request_utilization)
-            d2_load = max(d2.token_utilization, d2.request_utilization)
+            d1_load = max(
+                d1.tpm_usage / d1.config.max_tpm, d1.rpm_usage / d1.config.max_rpm
+            )
+            d2_load = max(
+                d2.tpm_usage / d2.config.max_tpm, d2.rpm_usage / d2.config.max_rpm
+            )
 
             span = trace.get_current_span()
             span.set_attribute("d1_load", d1_load)
@@ -151,46 +161,15 @@ class Switchboard:
     def __getattr__(self, name: str):
         """Dynamic dispatch to the selected deployment client"""
 
-        async def method(*args, **kwargs):
-            with tracer.start_as_current_span(
-                f"azure_openai.{name}", kind=SpanKind.CLIENT
-            ) as span:
-                # Select deployment before each call
-                deployment = self._select_deployment()
+        deployment = self._select_deployment()
+        print(f"Using {deployment}")
+        return getattr(deployment.client, name)
 
-                span.set_attribute("deployment", deployment.config.deployment_name)
-                span.set_attribute("endpoint", deployment.config.endpoint)
-
-                # Get the method from the client
-                client_method = getattr(deployment.client, name)
-
-                # Track the request
-                deployment.rpm_usage += 1
-
-                try:
-                    # Call the method
-                    result = await client_method(*args, **kwargs)
-
-                    # Handle token tracking for chat.completions.create
-                    if name == "chat.completions.create":
-                        # Extract token counts from the response
-                        input_tokens = result.usage.prompt_tokens
-                        output_tokens = result.usage.completion_tokens
-                        total_tokens = result.usage.total_tokens
-
-                        # Update metrics
-                        deployment.tpm_usage += total_tokens
-
-                        # Record telemetry
-                        span.set_attribute("input_tokens", input_tokens)
-                        span.set_attribute("output_tokens", output_tokens)
-                        span.set_attribute("total_tokens", total_tokens)
-
-                    return result
-                except Exception as e:
-                    # Mark deployment as unhealthy on error
-                    deployment.healthy = False
-                    span.record_exception(e)
-                    raise
-
-        return method
+    async def chat_completion(self, **kwargs):
+        """Chat completion"""
+        deployment = self._select_deployment()
+        if kwargs.get("stream", False):
+            response = await deployment.client.chat.completions.create(**kwargs)
+        else:
+            response = await deployment.client.chat.completions.create(**kwargs)
+            return response.choices[0].message.content
