@@ -45,28 +45,45 @@ BASIC_CHAT_COMPLETION_ARGS = {
 
 
 @pytest.mark.asyncio
-async def test_client_basic(mock_client):
-    client = Client(TEST_DEPLOYMENT_1, mock_client)
+async def test_client_basic():
+    mock_client = AsyncMock()
+    client = Client(TEST_DEPLOYMENT_1, client=mock_client)
     assert client.healthy
 
     # test basic liveness check
     mock_client.models.list = AsyncMock()
     await client.check_liveness()
-    mock_client.models.list.assert_called_once()
+    assert mock_client.models.list.call_count == 1
+    assert client.healthy
+
+    # test basic liveness check failure
+    mock_client.models.list.side_effect = Exception("test")
+    # don't raise the exception, just mark the client as unhealthy
+    await client.check_liveness()
+    assert not client.healthy
+    assert mock_client.models.list.call_count == 2
+
+    # assert liveness check allows recovery
+    mock_client.models.list.side_effect = None
+    await client.check_liveness()
+    assert mock_client.models.list.call_count == 3
+    assert client.healthy
 
     # test basic chat completion
-    mock_client.chat.completions.create = AsyncMock()
+    chat_completion_mock = AsyncMock()
+    mock_client.chat.completions.create = chat_completion_mock
     _ = await client.chat_completion(**BASIC_CHAT_COMPLETION_ARGS)
-    mock_client.chat.completions.create.assert_called()
+    assert chat_completion_mock.call_count == 1
 
     # test that passing arbitrary kwargs works
     _ = await client.chat_completion(**BASIC_CHAT_COMPLETION_ARGS, stream=True)
-    mock_client.chat.completions.create.assert_called_with(
+    chat_completion_mock.assert_called_with(
         **BASIC_CHAT_COMPLETION_ARGS, stream=True, timeout=TEST_DEPLOYMENT_1.timeout
     )
 
     # test that we mark unhealthy if the client raises an exception
-    mock_client.chat.completions.create.side_effect = Exception("test")
+    chat_completion_mock.side_effect = Exception("test")
     with pytest.raises(Exception, match="test"):
         _ = await client.chat_completion(**BASIC_CHAT_COMPLETION_ARGS)
     assert not client.healthy
+    assert chat_completion_mock.call_count == 3

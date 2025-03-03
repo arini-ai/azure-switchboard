@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import random
 from typing import Annotated, Callable, List
@@ -35,7 +36,13 @@ class Client:
         return f"Client(name={self.name}, healthy={self.healthy})"
 
     async def check_liveness(self):
-        await self.client.models.list()
+        try:
+            logger.debug(f"{self}: checking liveness")
+            await self.client.models.list()
+            self.healthy = True
+        except Exception:
+            logger.exception(f"{self}: liveness check failed")
+            self.healthy = False
 
     async def chat_completion(self, **kwargs):
         try:
@@ -44,7 +51,7 @@ class Client:
             )
             return response
         except Exception:
-            logger.exception(f"Chat completion failed for {self}")
+            logger.exception(f"{self}: chat completion failed")
             self.healthy = False
             raise
 
@@ -54,13 +61,21 @@ class Switchboard:
         self,
         deployments: List[AzureDeployment],
         client_factory: Callable[[AzureDeployment], AsyncAzureOpenAI] | None = None,
+        healthcheck_interval: int = 10,
     ):
         self.client_factory = client_factory or self._default_client_factory
+        self.healthcheck_interval = healthcheck_interval
 
         self.deployments = {
             deployment.name: Client(deployment, self.client_factory(deployment))
             for deployment in deployments
         }
+
+        self.healthcheck_task = (
+            asyncio.create_task(self.run_healthchecks())
+            if self.healthcheck_interval > 0
+            else None
+        )
 
     def _default_client_factory(self, deployment: AzureDeployment) -> AsyncAzureOpenAI:
         return AsyncAzureOpenAI(
@@ -69,13 +84,14 @@ class Switchboard:
             api_version=deployment.api_version,
         )
 
+    async def run_healthchecks(self):
+        while True:
+            await self.check_liveness()
+            await asyncio.sleep(self.healthcheck_interval)
+
     async def check_liveness(self):
-        for name, deployment in self.deployments.items():
-            try:
-                await deployment.check_liveness()
-            except Exception:
-                logger.exception(f"Liveness check failed for {name}")
-                deployment.healthy = False
+        tasks = [client.check_liveness() for client in self.deployments.values()]
+        await asyncio.gather(*tasks)
 
     def _select_deployment(self) -> Client:
         # simple random for now
