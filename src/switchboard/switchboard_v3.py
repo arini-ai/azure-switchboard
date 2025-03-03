@@ -1,15 +1,19 @@
 import asyncio
 import logging
 import random
-from typing import Annotated, Callable, List
+from typing import Annotated, AsyncGenerator, Callable, List
 
-from openai import AsyncAzureOpenAI
+from openai import AsyncAzureOpenAI, AsyncStream
+from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from pydantic import BaseModel, Field
+from tenacity import AsyncRetrying, RetryError, stop_after_attempt
 
 logger = logging.getLogger("switchboard")
 
 
-class AzureDeployment(BaseModel):
+class Deployment(BaseModel):
+    """Metadata about the Azure deployment"""
+
     name: str
     api_base: str
     api_key: str
@@ -23,7 +27,7 @@ class AzureDeployment(BaseModel):
 class Client:
     """Runtime state of a deployment"""
 
-    def __init__(self, config: AzureDeployment, client: AsyncAzureOpenAI):
+    def __init__(self, config: Deployment, client: AsyncAzureOpenAI):
         self.name = config.name
         self.config = config
         self.client = client
@@ -44,59 +48,91 @@ class Client:
             logger.exception(f"{self}: liveness check failed")
             self.healthy = False
 
-    async def chat_completion(self, **kwargs):
-        try:
-            response = await self.client.chat.completions.create(
-                **kwargs, timeout=self.config.timeout
-            )
-            return response
-        except Exception:
-            logger.exception(f"{self}: chat completion failed")
-            self.healthy = False
-            raise
+    async def chat_completion(
+        self, **kwargs
+    ) -> ChatCompletion | AsyncStream[ChatCompletionChunk]:
+        response = await self.client.chat.completions.create(
+            **kwargs, timeout=self.config.timeout
+        )
+        return response
 
 
 class Switchboard:
     def __init__(
         self,
-        deployments: List[AzureDeployment],
-        client_factory: Callable[[AzureDeployment], AsyncAzureOpenAI] | None = None,
+        deployments: List[Deployment],
+        client_factory: Callable[[Deployment], Client] | None = None,
         healthcheck_interval: int = 10,
     ):
         self.client_factory = client_factory or self._default_client_factory
-        self.healthcheck_interval = healthcheck_interval
-
         self.deployments = {
-            deployment.name: Client(deployment, self.client_factory(deployment))
+            deployment.name: self.client_factory(deployment)
             for deployment in deployments
         }
 
+        self.healthcheck_interval = healthcheck_interval
         self.healthcheck_task = (
             asyncio.create_task(self.run_healthchecks())
             if self.healthcheck_interval > 0
             else None
         )
 
-    def _default_client_factory(self, deployment: AzureDeployment) -> AsyncAzureOpenAI:
-        return AsyncAzureOpenAI(
-            azure_endpoint=deployment.api_base,
-            api_key=deployment.api_key,
-            api_version=deployment.api_version,
+        self.fallback_policy = AsyncRetrying(
+            stop=stop_after_attempt(2),
+        )
+
+    def _default_client_factory(self, deployment: Deployment) -> Client:
+        return Client(
+            config=deployment,
+            client=AsyncAzureOpenAI(
+                azure_endpoint=deployment.api_base,
+                api_key=deployment.api_key,
+                api_version=deployment.api_version,
+            ),
         )
 
     async def run_healthchecks(self):
+        async def check_health(client: Client):
+            try:
+                await asyncio.sleep(
+                    random.uniform(0, 1)
+                )  # splay outbound requests by a little bit
+                await client.check_liveness()
+            except Exception:
+                logger.exception(f"{client}: healthcheck failed")
+
         while True:
-            await self.check_liveness()
+            await asyncio.gather(
+                *[check_health(client) for client in self.deployments.values()]
+            )
             await asyncio.sleep(self.healthcheck_interval)
 
-    async def check_liveness(self):
-        tasks = [client.check_liveness() for client in self.deployments.values()]
-        await asyncio.gather(*tasks)
+    def select_deployment(self, session_id: str | None = None) -> Client:
+        healthy_deployments = []
+        # simple random for now, use session_id to select a specific deployment
+        for name, client in self.deployments.items():
+            if session_id == name:
+                return client
 
-    def _select_deployment(self) -> Client:
-        # simple random for now
-        return random.choice(list(self.deployments.values()))
+            if client.healthy:
+                healthy_deployments.append(client)
 
-    async def chat_completion(self, **kwargs):
-        client = self._select_deployment()
-        return await client.chat_completion(**kwargs)
+        if not healthy_deployments:
+            raise RuntimeError("No healthy deployments")
+
+        return random.choice(healthy_deployments)
+
+    async def completion(
+        self, session_id: str | None = None, stream: bool = False, **kwargs
+    ) -> ChatCompletion | AsyncStream[ChatCompletionChunk] | None:
+        try:
+            async for attempt in self.fallback_policy:
+                with attempt:
+                    client = self.select_deployment(session_id)
+                    if stream:
+                        return await client.chat_completion(stream=True, **kwargs)
+                    else:
+                        return await client.chat_completion(**kwargs)
+        except RetryError as e:
+            logger.exception("All chat_completion attempts failed.")
+            raise e

@@ -9,9 +9,9 @@ import pytest
 from openai import AsyncAzureOpenAI
 
 # Import the code that will be tested
-from switchboard import AzureDeployment, Deployment, Switchboard, default_client_factory
+from switchboard import Deployment, Switchboard, default_client_factory
 
-DEPLOYMENT_1 = AzureDeployment(
+DEPLOYMENT_1 = Deployment(
     name="deployment1",
     api_base="https://hireai-openai-east.openai.azure.com/",
     api_key="72532109eae542c399b88dd5c017c6ef",
@@ -19,7 +19,7 @@ DEPLOYMENT_1 = AzureDeployment(
     max_rpm=5,
 )
 
-DEPLOYMENT_2 = AzureDeployment(
+DEPLOYMENT_2 = Deployment(
     name="deployment2",
     api_base="https://hireai-openai-east.openai.azure.com/",
     api_key="72532109eae542c399b88dd5c017c6ef",
@@ -27,7 +27,7 @@ DEPLOYMENT_2 = AzureDeployment(
     max_rpm=5,
 )
 
-DEPLOYMENT_3 = AzureDeployment(
+DEPLOYMENT_3 = Deployment(
     name="deployment3",
     api_base="https://hireai-openai-east.openai.azure.com/",
     api_key="72532109eae542c399b88dd5c017c6ef",
