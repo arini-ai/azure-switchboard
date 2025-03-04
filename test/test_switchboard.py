@@ -178,12 +178,74 @@ async def test_load_distribution_large_scale(mock_switchboard: Switchboard):
 
     await asyncio.gather(*tasks)
 
-    # Get usage stats
-    usage = mock_switchboard.get_usage()
-
-    # Calculate the expected distribution based on TPM ratios
-    # test1:test2:test3 = 100:200:300 = 1:2:3
     total_requests = sum(
         client.ratelimit_requests for client in mock_switchboard.deployments.values()
     )
     assert total_requests == 1000
+
+
+async def test_load_distribution_with_recovery(
+    mock_switchboard: Switchboard, mock_client
+):
+    """Test that deployments that become unhealthy mid-operation are skipped but then can recover"""
+
+    # Reset usage counters
+    mock_switchboard.reset_usage()
+
+    # Make initial requests to establish baseline usage
+    for _ in range(50):
+        await mock_switchboard.completion(**BASIC_CHAT_COMPLETION_ARGS)
+
+    # Mark one deployment as unhealthy mid-operation
+    mock_switchboard.deployments["test1"]._last_request_status = False
+
+    # Make additional requests while one deployment is unhealthy
+    for _ in range(50):
+        await mock_switchboard.completion(**BASIC_CHAT_COMPLETION_ARGS)
+
+    # Verify that the unhealthy deployment wasn't used during the second batch
+    assert mock_switchboard.deployments["test1"].ratelimit_requests < 40
+    assert mock_switchboard.deployments["test2"].ratelimit_requests > 40
+    assert mock_switchboard.deployments["test3"].ratelimit_requests > 40
+
+    # Reset the unhealthy deployment and make more requests
+    await mock_switchboard.deployments["test1"].check_health()
+    mock_client.models.list.assert_called()
+    for _ in range(50):
+        await mock_switchboard.completion(**BASIC_CHAT_COMPLETION_ARGS)
+
+    # Verify that the unhealthy deployment was skipped during its unhealthy state
+    assert mock_switchboard.deployments["test1"].ratelimit_requests > 40
+
+
+async def test_load_distribution_proportional_to_ratelimits(
+    mock_switchboard: Switchboard,
+):
+    """Test that deployments with uneven ratelimits are used proportionally"""
+
+    # Reset usage counters
+    mock_switchboard.reset_usage()
+
+    # Set different ratelimits for each deployment
+    d1 = mock_switchboard.deployments["test1"]
+    d2 = mock_switchboard.deployments["test2"]
+    d3 = mock_switchboard.deployments["test3"]
+
+    d1.config.tpm_ratelimit = 1000
+    d1.config.rpm_ratelimit = 6
+    d2.config.tpm_ratelimit = 2000
+    d2.config.rpm_ratelimit = 12
+    d3.config.tpm_ratelimit = 3000
+    d3.config.rpm_ratelimit = 18
+
+    # Make 100 requests
+    for _ in range(100):
+        await mock_switchboard.completion(**BASIC_CHAT_COMPLETION_ARGS)
+
+    # Verify that the deployments were used proportionally, 5% error margin
+    def within_margin(a, b, margin):
+        return a * (1 - margin) <= b <= a * (1 + margin)
+
+    assert within_margin(100 * (1 / 6), d1.ratelimit_requests, margin=0.05)
+    assert within_margin(100 * (2 / 6), d2.ratelimit_requests, margin=0.05)
+    assert within_margin(100 * (3 / 6), d3.ratelimit_requests, margin=0.05)
