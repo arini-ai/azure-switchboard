@@ -13,7 +13,7 @@ def mock_switchboard():
         TEST_DEPLOYMENTS,
         client_factory=lambda x: Client(x, mock_client),
         healthcheck_interval=0,  # disable healthchecks
-        usage_reset_interval=0,  # disable usage resets
+        ratelimit_window=0,  # disable usage resets
     )
 
 

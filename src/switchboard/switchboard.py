@@ -17,14 +17,14 @@ class Switchboard:
         deployments: list[Deployment],
         client_factory: Callable[[Deployment], Client] = default_client_factory,
         healthcheck_interval: int = 10,
-        usage_reset_interval: int = 60,  # Reset usage counters every minute
+        ratelimit_window: int = 60,  # Reset usage counters every minute
     ) -> None:
         self.deployments: Dict[str, Client] = {
             deployment.name: client_factory(deployment) for deployment in deployments
         }
 
         self.healthcheck_interval = healthcheck_interval
-        self.usage_reset_interval = usage_reset_interval
+        self.ratelimit_window = ratelimit_window
 
         # Start background tasks if intervals are positive
         self.healthcheck_task = (
@@ -33,9 +33,9 @@ class Switchboard:
             else None
         )
 
-        self.usage_reset_task = (
+        self.ratelimit_reset_task = (
             asyncio.create_task(self.periodically_reset_counters())
-            if self.usage_reset_interval > 0
+            if self.ratelimit_window > 0
             else None
         )
 
@@ -140,21 +140,14 @@ class Switchboard:
             for name, deployment in self.deployments.items()
         }
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f"Switchboard(deployments={self.deployments})"
 
     async def close(self):
-        """Clean up resources when shutting down"""
-        if self.healthcheck_task:
-            self.healthcheck_task.cancel()
-            try:
-                await self.healthcheck_task
-            except asyncio.CancelledError:
-                pass
-
-        if self.usage_reset_task:
-            self.usage_reset_task.cancel()
-            try:
-                await self.usage_reset_task
-            except asyncio.CancelledError:
-                pass
+        for task in [self.healthcheck_task, self.ratelimit_reset_task]:
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass

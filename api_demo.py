@@ -58,6 +58,8 @@ async def main():
 
     rprint(switchboard.usage())
 
+    rprint(switchboard)
+
     await switchboard.close()
 
 
