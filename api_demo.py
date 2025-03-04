@@ -51,13 +51,14 @@ BASIC_ARGS = {
 
 async def main() -> None:
     switchboard = Switchboard([d1, d2, d3])
+    switchboard.start()
 
     await basic_completion(switchboard)
     await basic_stream(switchboard)
     await distribute_N(switchboard, 10)
     # await distribute_N(switchboard, 100)
 
-    await switchboard.close()
+    await switchboard.stop()
 
 
 async def basic_completion(switchboard: Switchboard) -> None:
@@ -78,11 +79,10 @@ async def basic_stream(switchboard: Switchboard) -> None:
     stream = switchboard.stream(**BASIC_ARGS)
 
     print("response: ", end="")
-    if response := await stream:
-        async for chunk in response:
-            if chunk.choices and chunk.choices[0].delta.content:
-                print(chunk.choices[0].delta.content, end="")
-        print()
+    async for chunk in stream:
+        if chunk.choices and chunk.choices[0].delta.content:
+            print(chunk.choices[0].delta.content, end="")
+    print()
 
     rprint(switchboard)
 

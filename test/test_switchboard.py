@@ -40,8 +40,23 @@ async def test_switchboard_selection_basic(mock_switchboard: Switchboard):
     assert client.name in mock_switchboard.deployments
 
     # test that we can select a specific deployment
-    client = mock_switchboard.select_deployment(session_id="test2")
-    assert client.name == "test2"
+    client_1 = mock_switchboard.select_deployment(session_id="test")
+    client_2 = mock_switchboard.select_deployment(session_id="test")
+    assert client_1.name == client_2.name
+
+    # test that we fall back to load balancing if the selected deployment is unhealthy
+    client_1._last_request_status = False
+    client_3 = mock_switchboard.select_deployment(session_id="test")
+    assert client_3.name != client_1.name
+
+    # test that sessions support failover
+    client_4 = mock_switchboard.select_deployment(session_id="test")
+    assert client_4.name == client_3.name
+
+    # test that recovery doesn't affect sessions
+    client_1._last_request_status = True
+    client_5 = mock_switchboard.select_deployment(session_id="test")
+    assert client_5.name == client_3.name
 
 
 async def test_switchboard_completion(mock_switchboard: Switchboard, mock_client):
@@ -129,13 +144,12 @@ async def test_load_distribution_with_session_affinity(mock_switchboard: Switchb
     # Check that each session consistently went to the same deployment
     # This is harder to test directly, but we can verify that the distribution
     # is not perfectly balanced, which would indicate session affinity is working
-    requests_per_deployment = [
-        client.ratelimit_requests for client in mock_switchboard.deployments.values()
-    ]
+    requests_per_deployment = sorted(
+        [client.ratelimit_requests for client in mock_switchboard.deployments.values()]
+    )
 
-    # If session affinity is working, the distribution won't be perfectly even
-    # With 5 sessions and 3 deployments, we expect some variation
-    assert all(r > 15 for r in requests_per_deployment)
+    # If session affinity is working, the distribution will be 10:20:20 instead of 33:33:34
+    assert requests_per_deployment == [10, 20, 20]
 
 
 async def test_load_distribution_with_unhealthy_deployment(

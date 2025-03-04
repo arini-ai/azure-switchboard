@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import random
-from functools import lru_cache
 from typing import AsyncGenerator, Callable, Dict
 
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
@@ -31,6 +30,13 @@ class Switchboard:
         self.healthcheck_interval = healthcheck_interval
         self.ratelimit_window = ratelimit_window
 
+        self.fallback_policy = AsyncRetrying(
+            stop=stop_after_attempt(2),
+        )
+
+        self._sessions = {}
+
+    def start(self) -> None:
         # Start background tasks if intervals are positive
         self.healthcheck_task = (
             asyncio.create_task(self.periodically_check_health())
@@ -44,9 +50,14 @@ class Switchboard:
             else None
         )
 
-        self.fallback_policy = AsyncRetrying(
-            stop=stop_after_attempt(2),
-        )
+    async def stop(self):
+        for task in [self.healthcheck_task, self.ratelimit_reset_task]:
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
     async def periodically_check_health(self):
         """Periodically check the health of all deployments"""
@@ -68,7 +79,17 @@ class Switchboard:
         This is pretty naive but it will suffice for now."""
         while True:
             await asyncio.sleep(self.ratelimit_window)
+            logger.debug("Resetting usage counters")
             self.reset_usage()
+
+    def reset_usage(self) -> None:
+        for client in self.deployments.values():
+            client.reset_counters()
+
+    def get_usage(self) -> dict[str, dict]:
+        return {
+            name: client.get_counters() for name, client in self.deployments.items()
+        }
 
     def select_deployment(self, session_id: str | None = None) -> Client:
         """
@@ -76,20 +97,18 @@ class Switchboard:
         If session_id is provided, try to use that specific deployment first.
         """
         # Handle session-based routing first
-        if session_id and session_id in self.deployments:
-            client = self.deployments[session_id]
+        if session_id and session_id in self._sessions:
+            client = self._sessions[session_id]
             if client.healthy:
-                logger.debug(f"Using session-specific deployment: {client}")
+                logger.debug(f"Using client {client} for session {session_id}")
                 return client
-            # If the requested client isn't healthy, fall back to load balancing
-            logger.warning(
-                f"Session-specific deployment {client} is unhealthy, falling back to load balancing"
-            )
+
+            logger.warning(f"Client {client} is unhealthy, falling back to selection")
 
         # Get healthy deployments
         healthy_deployments = [c for c in self.deployments.values() if c.healthy]
         if not healthy_deployments:
-            raise RuntimeError("No healthy deployments available")
+            raise SwitchboardError("No healthy deployments available")
 
         if len(healthy_deployments) == 1:
             return healthy_deployments[0]
@@ -100,6 +119,10 @@ class Switchboard:
         # Select the client with the lower weight (lower weight = better choice)
         selected = min(choices, key=lambda c: c.util)
         logger.debug(f"Selected deployment {selected} with weight {selected.util}")
+
+        if session_id:
+            self._sessions[session_id] = selected
+
         return selected
 
     async def completion(
@@ -119,7 +142,7 @@ class Switchboard:
         self, session_id: str | None = None, **kwargs
     ) -> AsyncGenerator[ChatCompletionChunk, None]:
         """
-        Send a chat completion request to the selected deployment, with automatic fallback.
+        Send a streaming completion request to the selected deployment, with automatic fallback.
         """
         async for attempt in self.fallback_policy:
             with attempt:
@@ -128,23 +151,5 @@ class Switchboard:
                 async for chunk in client.stream(**kwargs):
                     yield chunk
 
-    def reset_usage(self) -> None:
-        for client in self.deployments.values():
-            client.reset_counters()
-
-    def get_usage(self) -> dict[str, dict]:
-        return {
-            name: client.get_counters() for name, client in self.deployments.items()
-        }
-
     def __repr__(self) -> str:
         return f"Switchboard({self.get_usage()})"
-
-    async def close(self):
-        for task in [self.healthcheck_task, self.ratelimit_reset_task]:
-            if task:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
