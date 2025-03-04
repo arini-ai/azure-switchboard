@@ -1,3 +1,6 @@
-from .switchboard_v3 import Client, Deployment, Switchboard
+import logging
+
+from .client import Client, Deployment
+from .switchboard import Switchboard
 
 __all__ = ["Deployment", "Client", "Switchboard"]

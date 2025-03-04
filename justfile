@@ -10,7 +10,7 @@ bootstrap:
 
 
 test:
-  uv run pytest -s -v test/test_switchboard_v3.py
+  uv run pytest -s -v
 
 run:
   uv run --env-file .env api_demo.py

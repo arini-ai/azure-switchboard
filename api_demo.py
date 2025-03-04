@@ -4,9 +4,11 @@ import asyncio
 import logging
 import os
 
+from rich import print as rprint
 from rich.logging import RichHandler
 
-from switchboard import Deployment, Switchboard
+from switchboard.client import Deployment
+from switchboard.switchboard import Switchboard
 
 logger = logging.getLogger(__name__)
 
@@ -20,33 +22,43 @@ deployment = Deployment(
     name="demo_1",
     api_base=API_BASE,
     api_key=API_KEY,
-    max_rpm=10,
-    max_tpm=60,
+    rpm_ratelimit=10,
+    tpm_ratelimit=60,
 )
 
 
 async def main():
     switchboard = Switchboard([deployment])
 
-    response = await switchboard.completion(
+    completion = switchboard.completion(
         model="gpt-4o-mini",
         messages=[
-            {"role": "user", "content": "Hello, how are you?"},
+            {"role": "user", "content": "Hello, who are you?"},
         ],
     )
 
-    logger.info(response)
+    if response := await completion:
+        print(response.choices[0].message.content)
 
-    stream = await switchboard.completion(
+    rprint(switchboard.usage())
+
+    stream = switchboard.stream(
         model="gpt-4o-mini",
         messages=[
-            {"role": "user", "content": "Hello, how are you?"},
+            {"role": "user", "content": "Hello, who are you?"},
         ],
-        stream=True,
     )
 
-    async for chunk in stream:
-        logger.info(chunk)
+    if response := await stream:
+        async for chunk in response:
+            # rprint(chunk)
+            if chunk.choices and chunk.choices[0].delta.content:
+                print(chunk.choices[0].delta.content, end="")
+        print()
+
+    rprint(switchboard.usage())
+
+    await switchboard.close()
 
 
 if __name__ == "__main__":
