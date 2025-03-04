@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import random
+from functools import lru_cache
 from typing import AsyncGenerator, Callable, Dict
 
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
@@ -9,6 +10,10 @@ from tenacity import AsyncRetrying, stop_after_attempt
 from .client import Client, Deployment, default_client_factory
 
 logger = logging.getLogger(__name__)
+
+
+class SwitchboardError(Exception):
+    pass
 
 
 class Switchboard:
@@ -112,23 +117,16 @@ class Switchboard:
 
     async def stream(
         self, session_id: str | None = None, **kwargs
-    ) -> AsyncGenerator[ChatCompletionChunk, None] | None:
+    ) -> AsyncGenerator[ChatCompletionChunk, None]:
         """
         Send a chat completion request to the selected deployment, with automatic fallback.
         """
-
         async for attempt in self.fallback_policy:
             with attempt:
                 client = self.select_deployment(session_id)
-                logger.debug(f"Sending streaming request to{client}")
-                return client.stream(**kwargs)
-
-    def __getattr__(self, name: str):
-        """
-        Delegate all other methods to the selected deployment.
-        """
-        client = self.select_deployment()
-        return getattr(client, name)
+                logger.debug(f"Sending streaming request to {client}")
+                async for chunk in client.stream(**kwargs):
+                    yield chunk
 
     def reset_usage(self) -> None:
         for client in self.deployments.values():

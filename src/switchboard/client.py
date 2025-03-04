@@ -129,7 +129,7 @@ class Client:
             if hasattr(response, "usage"):
                 self.ratelimit_tokens += response.usage.total_tokens
 
-            self.last_request_status = True
+            self._last_request_status = True
             return response
         except Exception as e:
             self._last_request_status = False
@@ -146,16 +146,14 @@ class Client:
         stream = await self.client.chat.completions.create(stream=True, **kwargs)
 
         try:
+            self._last_request_status = True
             async for chunk in stream:
                 if chunk.usage:  # last chunk has usage info
                     self.ratelimit_tokens += chunk.usage.total_tokens
 
-                # otherwise transparently yield the chunk
                 yield chunk
-
-            self.last_request_status = True
         except Exception as e:
-            self.last_request_status = False
+            self._last_request_status = False
             raise e
 
 
