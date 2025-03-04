@@ -14,23 +14,23 @@ TEST_DEPLOYMENT_1 = Deployment(
     name="test1",
     api_base="https://test1.openai.azure.com/",
     api_key="test1",
-    tpm_ratelimit=100,
-    rpm_ratelimit=100,
+    tpm_ratelimit=1000,
+    rpm_ratelimit=6,
 )
 
 TEST_DEPLOYMENT_2 = Deployment(
     name="test2",
     api_base="https://test2.openai.azure.com/",
     api_key="test2",
-    tpm_ratelimit=200,
-    rpm_ratelimit=200,
+    tpm_ratelimit=1000,
+    rpm_ratelimit=6,
 )
 TEST_DEPLOYMENT_3 = Deployment(
     name="test3",
     api_base="https://test3.openai.azure.com/",
     api_key="test3",
-    tpm_ratelimit=300,
-    rpm_ratelimit=300,
+    tpm_ratelimit=1000,
+    rpm_ratelimit=6,
 )
 
 MOCK_COMPLETION = ChatCompletion(
@@ -121,28 +121,28 @@ MOCK_STREAM_CHUNKS = [
 
 
 @pytest.fixture
-def mock_client():
+def mock_client() -> Client:
     client_mock = AsyncMock()
     return Client(TEST_DEPLOYMENT_1, client=client_mock)
 
 
-async def test_client_basic(mock_client):
-    # test basic liveness check
+async def test_client_healthcheck(mock_client: Client):
+    # test basic healthcheck
     mock_client.client.models.list = AsyncMock()
-    await mock_client.check_liveness()
+    await mock_client.check_health()
     assert mock_client.client.models.list.call_count == 1
     assert mock_client.healthy
 
-    # test basic liveness check failure
+    # test basic healthcheck failure
     mock_client.client.models.list.side_effect = Exception("test")
     # don't raise the exception, just mark the client as unhealthy
-    await mock_client.check_liveness()
+    await mock_client.check_health()
     assert not mock_client.healthy
     assert mock_client.client.models.list.call_count == 2
 
-    # assert liveness check allows recovery
+    # test healthcheck allows recovery
     mock_client.client.models.list.side_effect = None
-    await mock_client.check_liveness()
+    await mock_client.check_health()
     assert mock_client.client.models.list.call_count == 3
     assert mock_client.healthy
 
@@ -153,7 +153,7 @@ BASIC_CHAT_COMPLETION_ARGS = {
 }
 
 
-async def test_client_basic_completion(mock_client):
+async def test_client_completion(mock_client: Client):
     # Create a mock response with usage information
 
     # test basic chat completion
@@ -187,7 +187,7 @@ async def _collect_chunks(stream):
     return received_chunks, content
 
 
-async def test_client_basic_stream(mock_client):
+async def test_client_stream(mock_client: Client):
     # Create a mock async generator for streaming
     async def mock_stream():
         for chunk in MOCK_STREAM_CHUNKS:
@@ -231,12 +231,23 @@ async def test_client_basic_stream(mock_client):
     assert mock_client.ratelimit_requests == 2
 
 
-async def test_client_reset_counters(mock_client):
+async def test_client_counters(mock_client: Client):
+    # Reset counters
+    mock_client.reset_counters()
+
+    # Verify counters were reset
+    assert mock_client.ratelimit_tokens == 0
+    assert mock_client.ratelimit_requests == 0
+
     # Set some initial usage values
     mock_client.ratelimit_tokens = 100
     mock_client.ratelimit_requests = 5
 
     # Reset counters
+    counters = mock_client.get_counters()
+    assert counters["tokens"] == 100
+    assert counters["requests"] == 5
+
     mock_client.reset_counters()
 
     # Verify counters were reset
@@ -247,7 +258,7 @@ async def test_client_reset_counters(mock_client):
     assert mock_client.last_reset > 0
 
 
-async def test_client_utilization(mock_client):
+async def test_client_util(mock_client: Client):
     mock_client.reset_counters()
 
     # Get initial utilization (nonzero bc random splay)
@@ -255,21 +266,21 @@ async def test_client_utilization(mock_client):
     assert 0 < initial_util < 0.02
 
     # Test with some token usage
-    mock_client.ratelimit_tokens = 50  # 50% of TPM limit (100)
+    mock_client.ratelimit_tokens = 500  # 50% of TPM limit (1000)
     util_with_tokens = mock_client.util
     assert 0.5 <= util_with_tokens < 0.52  # 50% plus small random factor
 
     # Test with some request usage
     mock_client.ratelimit_tokens = 0
-    mock_client.ratelimit_requests = 50  # 50% of RPM limit (100)
+    mock_client.ratelimit_requests = 3  # 50% of RPM limit (6)
     util_with_requests = mock_client.util
     assert 0.5 <= util_with_requests < 0.52  # 50% plus small random factor
 
     # Test with both token and request usage (should take max)
-    mock_client.ratelimit_tokens = 30  # 30% of TPM
-    mock_client.ratelimit_requests = 70  # 70% of RPM
+    mock_client.ratelimit_tokens = 600  # 60% of TPM
+    mock_client.ratelimit_requests = 3  # 50% of RPM
     util_with_both = mock_client.util
-    assert 0.7 <= util_with_both < 0.72  # 70% (max) plus small random factor
+    assert 0.6 <= util_with_both < 0.62  # 60% (max) plus small random factor
 
     # Test with unhealthy client (should be infinity)
     mock_client._last_request_status = False

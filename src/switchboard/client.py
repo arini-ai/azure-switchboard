@@ -86,15 +86,15 @@ class Client:
 
         # Use the higher of the two utilizations as the weight
         # Add a small random factor to prevent oscillation
-        return max(token_util, request_util) + random.uniform(0, 0.01)
+        return round(max(token_util, request_util) + random.uniform(0, 0.01), 3)
 
-    async def check_liveness(self):
+    async def check_health(self):
         try:
-            logger.debug(f"{self}: checking liveness")
+            logger.debug(f"{self}: checking health")
             await self.client.models.list()
             self._last_request_status = True
         except Exception:
-            logger.exception(f"{self}: liveness check failed")
+            logger.exception(f"{self}: health check failed")
             self._last_request_status = False
 
     def reset_counters(self):
@@ -105,10 +105,11 @@ class Client:
         self.ratelimit_requests = 0
         self.last_reset = time.time()
 
-    def get_counters(self) -> dict[str, int]:
+    def get_counters(self) -> dict[str, int | float | str]:
         return {
             "tokens": self.ratelimit_tokens,
             "requests": self.ratelimit_requests,
+            "util": self.util,
         }
 
     async def completion(self, **kwargs) -> ChatCompletion:
@@ -128,9 +129,10 @@ class Client:
             if hasattr(response, "usage"):
                 self.ratelimit_tokens += response.usage.total_tokens
 
+            self.last_request_status = True
             return response
         except Exception as e:
-            self._last_request_status = e
+            self._last_request_status = False
             raise e
 
     async def stream(self, **kwargs) -> AsyncGenerator[ChatCompletionChunk, None]:
@@ -143,12 +145,18 @@ class Client:
         self.ratelimit_requests += 1
         stream = await self.client.chat.completions.create(stream=True, **kwargs)
 
-        async for chunk in stream:
-            if chunk.usage:  # last chunk has usage info
-                self.ratelimit_tokens += chunk.usage.total_tokens
+        try:
+            async for chunk in stream:
+                if chunk.usage:  # last chunk has usage info
+                    self.ratelimit_tokens += chunk.usage.total_tokens
 
-            # otherwise transparently yield the chunk
-            yield chunk
+                # otherwise transparently yield the chunk
+                yield chunk
+
+            self.last_request_status = True
+        except Exception as e:
+            self.last_request_status = False
+            raise e
 
 
 def azure_client_factory(deployment: Deployment) -> AsyncAzureOpenAI:

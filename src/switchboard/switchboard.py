@@ -46,22 +46,21 @@ class Switchboard:
     async def periodically_check_health(self):
         """Periodically check the health of all deployments"""
 
-        async def check_health(client: Client):
-            try:
-                # splay outbound requests by a little bit
-                await asyncio.sleep(random.uniform(0, 1))
-                await client.check_liveness()
-            except Exception:
-                logger.exception(f"{client}: healthcheck failed")
+        async def _check_health(client: Client):
+            # splay outbound requests by a little bit
+            await asyncio.sleep(random.uniform(0, 1))
+            await client.check_health()
 
         while True:
             await asyncio.sleep(self.healthcheck_interval)
             await asyncio.gather(
-                *[check_health(client) for client in self.deployments.values()]
+                *[_check_health(client) for client in self.deployments.values()]
             )
 
     async def periodically_reset_usage(self):
-        """Periodically reset usage counters on all clients"""
+        """Periodically reset usage counters on all clients.
+
+        This is pretty naive but it will suffice for now."""
         while True:
             await asyncio.sleep(self.ratelimit_window)
             self.reset_usage()
@@ -135,7 +134,7 @@ class Switchboard:
         for client in self.deployments.values():
             client.reset_counters()
 
-    def get_usage(self) -> dict[str, dict[str, int]]:
+    def get_usage(self) -> dict[str, dict]:
         return {
             name: client.get_counters() for name, client in self.deployments.items()
         }
