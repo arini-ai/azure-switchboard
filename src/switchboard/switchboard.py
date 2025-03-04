@@ -34,7 +34,7 @@ class Switchboard:
         )
 
         self.ratelimit_reset_task = (
-            asyncio.create_task(self.periodically_reset_counters())
+            asyncio.create_task(self.periodically_reset_usage())
             if self.ratelimit_window > 0
             else None
         )
@@ -60,12 +60,11 @@ class Switchboard:
                 *[check_health(client) for client in self.deployments.values()]
             )
 
-    async def periodically_reset_counters(self):
+    async def periodically_reset_usage(self):
         """Periodically reset usage counters on all clients"""
         while True:
-            await asyncio.sleep(self.usage_reset_interval)
-            for client in self.deployments.values():
-                await client.reset_counters()
+            await asyncio.sleep(self.ratelimit_window)
+            self.reset_usage()
 
     def select_deployment(self, session_id: str | None = None) -> Client:
         """
@@ -95,10 +94,8 @@ class Switchboard:
         choices = random.sample(healthy_deployments, min(2, len(healthy_deployments)))
 
         # Select the client with the lower weight (lower weight = better choice)
-        selected = min(choices, key=lambda c: c.utilization)
-        logger.debug(
-            f"Selected deployment {selected} with weight {selected.utilization}"
-        )
+        selected = min(choices, key=lambda c: c.util)
+        logger.debug(f"Selected deployment {selected} with weight {selected.util}")
         return selected
 
     async def completion(
@@ -124,24 +121,27 @@ class Switchboard:
         async for attempt in self.fallback_policy:
             with attempt:
                 client = self.select_deployment(session_id)
-                logger.debug(f"Sending streaming request to {client}")
+                logger.debug(f"Sending streaming request to{client}")
                 return client.stream(**kwargs)
 
     def __getattr__(self, name: str):
+        """
+        Delegate all other methods to the selected deployment.
+        """
         client = self.select_deployment()
         return getattr(client, name)
 
-    def usage(self):
+    def reset_usage(self) -> None:
+        for client in self.deployments.values():
+            client.reset_counters()
+
+    def get_usage(self) -> dict[str, dict[str, int]]:
         return {
-            name: {
-                "tokens": deployment.ratelimit_tokens,
-                "requests": deployment.ratelimit_requests,
-            }
-            for name, deployment in self.deployments.items()
+            name: client.get_counters() for name, client in self.deployments.items()
         }
 
-    def __str__(self) -> str:
-        return f"Switchboard(deployments={self.deployments})"
+    def __repr__(self) -> str:
+        return f"Switchboard({self.get_usage()})"
 
     async def close(self):
         for task in [self.healthcheck_task, self.ratelimit_reset_task]:

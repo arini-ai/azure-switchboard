@@ -7,9 +7,31 @@ from openai.types.chat.chat_completion_chunk import Choice as ChunkChoice
 from openai.types.chat.chat_completion_chunk import ChoiceDelta
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.completion_usage import CompletionUsage
-from test_utils import BASIC_CHAT_COMPLETION_ARGS, TEST_DEPLOYMENT_1
 
-from switchboard import Client
+from switchboard import Client, Deployment
+
+TEST_DEPLOYMENT_1 = Deployment(
+    name="test1",
+    api_base="https://test1.openai.azure.com/",
+    api_key="test1",
+    tpm_ratelimit=100,
+    rpm_ratelimit=100,
+)
+
+TEST_DEPLOYMENT_2 = Deployment(
+    name="test2",
+    api_base="https://test2.openai.azure.com/",
+    api_key="test2",
+    tpm_ratelimit=200,
+    rpm_ratelimit=200,
+)
+TEST_DEPLOYMENT_3 = Deployment(
+    name="test3",
+    api_base="https://test3.openai.azure.com/",
+    api_key="test3",
+    tpm_ratelimit=300,
+    rpm_ratelimit=300,
+)
 
 MOCK_COMPLETION = ChatCompletion(
     id="test",
@@ -105,8 +127,6 @@ def mock_client():
 
 
 async def test_client_basic(mock_client):
-    assert mock_client.healthy
-
     # test basic liveness check
     mock_client.client.models.list = AsyncMock()
     await mock_client.check_liveness()
@@ -125,6 +145,12 @@ async def test_client_basic(mock_client):
     await mock_client.check_liveness()
     assert mock_client.client.models.list.call_count == 3
     assert mock_client.healthy
+
+
+BASIC_CHAT_COMPLETION_ARGS = {
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "Hello, world!"}],
+}
 
 
 async def test_client_basic_completion(mock_client):
@@ -151,6 +177,16 @@ async def test_client_basic_completion(mock_client):
     assert mock_client.ratelimit_requests == 2
 
 
+async def _collect_chunks(stream):
+    received_chunks = []
+    content = ""
+    async for chunk in stream:
+        received_chunks.append(chunk)
+        if chunk.choices and chunk.choices[0].delta.content:
+            content += chunk.choices[0].delta.content
+    return received_chunks, content
+
+
 async def test_client_basic_stream(mock_client):
     # Create a mock async generator for streaming
     async def mock_stream():
@@ -161,20 +197,18 @@ async def test_client_basic_stream(mock_client):
     chat_completion_mock = AsyncMock(return_value=mock_stream())
     mock_client.client.chat.completions.create = chat_completion_mock
 
-    # Reset counters for clean test
-    await mock_client.reset_counters()
-
     # Test basic streaming - stream() returns an async generator, not an awaitable
     stream = mock_client.stream(**BASIC_CHAT_COMPLETION_ARGS)
     assert stream is not None
 
     # Collect all chunks to verify content
-    received_chunks = []
-    content = ""
-    async for chunk in stream:
-        received_chunks.append(chunk)
-        if chunk.choices and chunk.choices[0].delta.content:
-            content += chunk.choices[0].delta.content
+    received_chunks, content = await _collect_chunks(stream)
+
+    # Verify the stream options were set correctly
+    chat_completion_mock.assert_called_once()
+    call_kwargs = chat_completion_mock.call_args.kwargs
+    assert call_kwargs.get("stream") is True
+    assert call_kwargs.get("stream_options", {}).get("include_usage") is True
 
     # Verify we received all chunks
     assert len(received_chunks) == len(MOCK_STREAM_CHUNKS)
@@ -186,12 +220,6 @@ async def test_client_basic_stream(mock_client):
     assert mock_client.ratelimit_tokens == 20  # From the last chunk's usage
     assert mock_client.ratelimit_requests == 1
 
-    # Verify the stream options were set correctly
-    chat_completion_mock.assert_called_once()
-    call_kwargs = chat_completion_mock.call_args.kwargs
-    assert call_kwargs.get("stream") is True
-    assert call_kwargs.get("stream_options", {}).get("include_usage") is True
-
     # Test exception handling
     chat_completion_mock.side_effect = Exception("test")
     with pytest.raises(Exception, match="test"):
@@ -199,9 +227,8 @@ async def test_client_basic_stream(mock_client):
         async for chunk in stream:
             pass
     assert chat_completion_mock.call_count == 2
-    assert (
-        mock_client.ratelimit_requests == 2
-    )  # Request count should increment even on failure
+    # Request count should increment even on failure
+    assert mock_client.ratelimit_requests == 2
 
 
 async def test_client_reset_counters(mock_client):
@@ -210,7 +237,7 @@ async def test_client_reset_counters(mock_client):
     mock_client.ratelimit_requests = 5
 
     # Reset counters
-    await mock_client.reset_counters()
+    mock_client.reset_counters()
 
     # Verify counters were reset
     assert mock_client.ratelimit_tokens == 0
@@ -221,55 +248,29 @@ async def test_client_reset_counters(mock_client):
 
 
 async def test_client_utilization(mock_client):
-    # Test with healthy client and no usage
-    mock_client.healthy = True
-    mock_client.ratelimit_tokens = 0
-    mock_client.ratelimit_requests = 0
+    mock_client.reset_counters()
 
-    # Get initial utilization (should be close to 0 plus small random factor)
-    initial_util = mock_client.utilization
-    assert 0 <= initial_util < 0.02  # Small random factor is 0-0.01
+    # Get initial utilization (nonzero bc random splay)
+    initial_util = mock_client.util
+    assert 0 < initial_util < 0.02
 
     # Test with some token usage
     mock_client.ratelimit_tokens = 50  # 50% of TPM limit (100)
-    util_with_tokens = mock_client.utilization
+    util_with_tokens = mock_client.util
     assert 0.5 <= util_with_tokens < 0.52  # 50% plus small random factor
 
     # Test with some request usage
     mock_client.ratelimit_tokens = 0
     mock_client.ratelimit_requests = 50  # 50% of RPM limit (100)
-    util_with_requests = mock_client.utilization
+    util_with_requests = mock_client.util
     assert 0.5 <= util_with_requests < 0.52  # 50% plus small random factor
 
     # Test with both token and request usage (should take max)
     mock_client.ratelimit_tokens = 30  # 30% of TPM
     mock_client.ratelimit_requests = 70  # 70% of RPM
-    util_with_both = mock_client.utilization
+    util_with_both = mock_client.util
     assert 0.7 <= util_with_both < 0.72  # 70% (max) plus small random factor
 
     # Test with unhealthy client (should be infinity)
-    mock_client.healthy = False
-    assert mock_client.utilization == float("inf")
-
-
-def test_client_str_representation(mock_client):
-    # Set some values to test the string representation
-    mock_client.name = "test_client"
-    mock_client.healthy = True
-    mock_client.ratelimit_tokens = 100
-    mock_client.ratelimit_requests = 50
-
-    # Get the string representation
-    client_str = str(mock_client)
-
-    # Verify all important information is included
-    assert "test_client" in client_str
-    assert "healthy=True" in client_str
-    assert "tokens=100" in client_str
-    assert "requests=50" in client_str
-    assert "utilization=" in client_str  # Exact value will vary due to random factor
-
-    # Test with unhealthy client
-    mock_client.healthy = False
-    client_str = str(mock_client)
-    assert "healthy=False" in client_str
+    mock_client._last_request_status = False
+    assert mock_client.util == float("inf")

@@ -1,7 +1,12 @@
 from unittest.mock import AsyncMock
 
 import pytest
-from test_utils import BASIC_CHAT_COMPLETION_ARGS, TEST_DEPLOYMENTS
+from test_client import (
+    BASIC_CHAT_COMPLETION_ARGS,
+    TEST_DEPLOYMENT_1,
+    TEST_DEPLOYMENT_2,
+    TEST_DEPLOYMENT_3,
+)
 
 from switchboard import Client, Switchboard
 
@@ -10,7 +15,7 @@ from switchboard import Client, Switchboard
 def mock_switchboard():
     mock_client = AsyncMock()
     return Switchboard(
-        TEST_DEPLOYMENTS,
+        [TEST_DEPLOYMENT_1, TEST_DEPLOYMENT_2, TEST_DEPLOYMENT_3],
         client_factory=lambda x: Client(x, mock_client),
         healthcheck_interval=0,  # disable healthchecks
         ratelimit_window=0,  # disable usage resets
@@ -20,7 +25,7 @@ def mock_switchboard():
 async def test_switchboard_basic(mock_switchboard: Switchboard):
     # test that we select a deployment
     client = mock_switchboard.select_deployment()
-    assert client.name in (t.name for t in TEST_DEPLOYMENTS)
+    assert client.name in mock_switchboard.deployments
 
     # test that we can select a specific deployment
     client = mock_switchboard.select_deployment(session_id="test2")

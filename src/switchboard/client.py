@@ -37,7 +37,7 @@ class Client:
             base_url=config.api_base,
             timeout=config.timeout,
         )
-        self.healthy = True
+        self._last_request_status = True  # assume healthy to start
 
         self.ratelimit_tokens = 0
         self.ratelimit_requests = 0
@@ -49,12 +49,19 @@ class Client:
             "healthy": self.healthy,
             "tokens": self.ratelimit_tokens,
             "requests": self.ratelimit_requests,
-            "utilization": self.utilization,
+            "util": self.util,
         }
         return f"Client({', '.join([f'{k}={v}' for k, v in ents.items()])})"
 
+    def __repr__(self) -> str:
+        return f"Client(name={self.name}, util={self.util})"
+
     @property
-    def utilization(self) -> float:
+    def healthy(self) -> bool:
+        return bool(self._last_request_status)
+
+    @property
+    def util(self) -> float:
         """
         Calculate the load weight of this client.
         Lower weight means this client is a better choice for new requests.
@@ -85,17 +92,24 @@ class Client:
         try:
             logger.debug(f"{self}: checking liveness")
             await self.client.models.list()
-            self.healthy = True
+            self._last_request_status = True
         except Exception:
             logger.exception(f"{self}: liveness check failed")
-            self.healthy = False
+            self._last_request_status = False
 
-    async def reset_counters(self):
+    def reset_counters(self):
         """Reset usage counters - should be called periodically"""
-        logger.debug(f"{self}: resetting usage counters")
+
+        logger.debug(f"{self}: resetting ratelimit counters")
         self.ratelimit_tokens = 0
         self.ratelimit_requests = 0
         self.last_reset = time.time()
+
+    def get_counters(self) -> dict[str, int]:
+        return {
+            "tokens": self.ratelimit_tokens,
+            "requests": self.ratelimit_requests,
+        }
 
     async def completion(self, **kwargs) -> ChatCompletion:
         """
@@ -108,12 +122,16 @@ class Client:
             kwargs["stream_options"] = {"include_usage": True}
 
         self.ratelimit_requests += 1
-        response = await self.client.chat.completions.create(**kwargs)
+        try:
+            response = await self.client.chat.completions.create(**kwargs)
 
-        if hasattr(response, "usage"):
-            self.ratelimit_tokens += response.usage.total_tokens
+            if hasattr(response, "usage"):
+                self.ratelimit_tokens += response.usage.total_tokens
 
-        return response
+            return response
+        except Exception as e:
+            self._last_request_status = e
+            raise e
 
     async def stream(self, **kwargs) -> AsyncGenerator[ChatCompletionChunk, None]:
         """
@@ -129,6 +147,7 @@ class Client:
             if chunk.usage:  # last chunk has usage info
                 self.ratelimit_tokens += chunk.usage.total_tokens
 
+            # otherwise transparently yield the chunk
             yield chunk
 
 
