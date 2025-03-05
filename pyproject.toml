@@ -1,6 +1,6 @@
 [project]
 name = "switchboard"
-version = "2025.3.2"
+version = "2025.3.3"
 description = "managed loadbalancing for azure openai"
 readme = "README.md"
 authors = [
@@ -38,7 +38,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
 [tool.bumpver]
-current_version = "2025.3.2"
+current_version = "2025.3.3"
 version_pattern = "YYYY.MM.INC0"
 commit_message = "bump version {old_version} -> {new_version}"
 tag_message = "{new_version}"
