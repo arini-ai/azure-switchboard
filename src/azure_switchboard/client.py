@@ -141,6 +141,7 @@ class Client:
                 stream_options = kwargs.pop("stream_options", {})
                 stream_options["include_usage"] = True
 
+                logging.debug("Creating chat completion stream")
                 response = await self.client.chat.completions.create(
                     stream=True,
                     stream_options=stream_options,
@@ -150,8 +151,10 @@ class Client:
                 return WrappedAsyncStream(response, self)
 
             else:
+                logging.debug("Creating chat completion")
                 response = await self.client.chat.completions.create(**kwargs)
                 if response.usage:
+                    logging.debug("Chat completion usage: %s", response.usage)
                     self.ratelimit_tokens += response.usage.total_tokens
 
                 return response
