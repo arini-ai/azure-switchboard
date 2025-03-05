@@ -11,42 +11,43 @@
 # ///
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
 from azure_switchboard import Deployment, Switchboard
 
+# use demo parameters from environment if available
+if not (api_base := os.getenv("AZURE_OPENAI_ENDPOINT")):
+    api_base = "https://your-deployment1.openai.azure.com/"
+if not (api_key := os.getenv("AZURE_OPENAI_API_KEY")):
+    api_key = "your-api-key"
+
 # Define deployments
 deployments = [
     Deployment(
-        name="d1",
-        api_base="https://your-deployment1.openai.azure.com/",
-        api_key="your-api-key",
-        # optionally specify ratelimits
-        rpm_ratelimit=60,
-        tpm_ratelimit=100000,
+        name="east",
+        api_base=api_base,
+        api_key=api_key,
     ),
     Deployment(
-        name="d2",
-        api_base="https://your-deployment2.openai.azure.com/",
-        api_key="your-api-key2",
-        rpm_ratelimit=60,
-        tpm_ratelimit=100000,
+        name="west",
+        # re-use the keys here since the switchboard
+        # implementation doesn't know about it
+        api_base=api_base,
+        api_key=api_key,
     ),
     Deployment(
-        name="d3",
-        api_base="https://your-deployment3.openai.azure.com/",
-        api_key="your-api-key3",
-        rpm_ratelimit=60,
-        tpm_ratelimit=100000,
+        name="south",
+        api_base=api_base,
+        api_key=api_key,
     ),
 ]
 
 @asynccontextmanager
 async def init_switchboard():
-    """Wrap client initialization in a context manager for automatic cleanup.
-
-    Analogous to FastAPI dependency injection.
+    """Use a pattern analogous to FastAPI dependency
+    injection for automatic cleanup.
     """
 
     # Create Switchboard with deployments

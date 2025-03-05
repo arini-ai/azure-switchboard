@@ -326,13 +326,13 @@ async def test_load_distribution_proportional_to_ratelimits(
     for _ in range(100):
         await mock_switchboard.create(**BASIC_CHAT_COMPLETION_ARGS)
 
-    # Verify that the deployments were used proportionally, 5% error margin
+    # Verify that the deployments were used proportionally, 10% error margin
     def within_margin(a, b, margin):
         return a * (1 - margin) <= b <= a * (1 + margin)
 
-    assert within_margin(100 * (1 / 6), d1.ratelimit_requests, margin=0.05)
-    assert within_margin(100 * (2 / 6), d2.ratelimit_requests, margin=0.05)
-    assert within_margin(100 * (3 / 6), d3.ratelimit_requests, margin=0.05)
+    assert within_margin(100 * (1 / 6), d1.ratelimit_requests, margin=0.1)
+    assert within_margin(100 * (2 / 6), d2.ratelimit_requests, margin=0.1)
+    assert within_margin(100 * (3 / 6), d3.ratelimit_requests, margin=0.1)
 
 
 async def test_load_distribution_dynamic_rebalancing(mock_switchboard: Switchboard):

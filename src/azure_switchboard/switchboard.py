@@ -5,7 +5,7 @@ from typing import Callable, Dict, Literal, overload
 
 from openai import AsyncStream
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
-from tenacity import AsyncRetrying, stop_after_attempt
+from tenacity import AsyncRetrying, RetryError, stop_after_attempt
 
 from .client import Client, Deployment, default_client_factory
 
@@ -147,16 +147,19 @@ class Switchboard:
         Send a chat completion request to the selected deployment, with automatic fallback.
         """
 
-        async for attempt in self.fallback_policy:
-            with attempt:
-                client = self.select_deployment(session_id)
-                logger.debug(f"Sending completion request to {client}")
+        try:
+            async for attempt in self.fallback_policy:
+                with attempt:
+                    client = self.select_deployment(session_id)
+                    logger.debug(f"Sending completion request to {client}")
+                    return await client.create(stream=stream, **kwargs)
+        except RetryError as e:
+            raise SwitchboardError("All attempts failed") from e
+        except asyncio.CancelledError:
+            pass
 
-                return await client.create(stream=stream, **kwargs)
-
-        # in theory we should never get here because tenacity
-        # should raise RetryError if all attempts fail
-        raise SwitchboardError("All fallback attempts failed")
+        # we should never reach here
+        raise SwitchboardError("Unexpected error")
 
     async def stream(
         self, *, session_id: str | None = None, **kwargs

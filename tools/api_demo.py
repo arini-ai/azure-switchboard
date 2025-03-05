@@ -3,7 +3,7 @@
 # To run this, use:
 #   uv run readme-example.py
 #
-# ///
+# /// script
 # requires-python = ">=3.10"
 # dependencies = [
 #     "azure-switchboard",
