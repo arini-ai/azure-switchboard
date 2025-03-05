@@ -173,11 +173,37 @@ if __name__ == "__main__":
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `deployments` | List of Deployment objects | Required |
-| `client_factory` | Function to create clients from deployments | default_client_factory |
+| `client_factory` | Factory for creating AsyncAzureOpenAI clients | default_client_factory |
 | `healthcheck_interval` | Seconds between health checks | 10 |
 | `ratelimit_window` | Seconds before resetting usage counters | 60 |
+
+## Development
+
+This project uses [uv](https://github.com/astral-sh/uv) for package management,
+and [just](https://github.com/casey/just) for task automation. See the justfile
+for available commands.
+
+```bash
+# Clone the repository
+git clone https://github.com/abizer/azure-switchboard
+cd azure-switchboard
+
+just bootstrap
+```
+
+### Running tests
+
+```bash
+$ just test
+  uv run pytest -s -v
+```
+
+### Building the package
+
+```bash
+uv run python -m build
+```
 
 ## License
 
 MIT
-

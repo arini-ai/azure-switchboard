@@ -3,20 +3,26 @@ name = "azure-switchboard"
 version = "2025.3.5"
 description = "Batteries-included loadbalancing client for Azure OpenAI"
 readme = "README.md"
-authors = [
-    { name = "abizer", email = "abizer@abizer.me" }
-]
+license = { text = "MIT" }
+authors = [{ name = "abizer", email = "abizer@abizer.me" }]
 requires-python = ">=3.11"
-dependencies = [
-    "openai>=1.62.0",
-    "tenacity>=9.0.0",
-    "wrapt>=1.17.2",
+dependencies = ["openai>=1.62.0", "tenacity>=9.0.0", "wrapt>=1.17.2"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
+keywords = ["azure", "openai", "loadbalancing", "llm", "ai", "litellm"]
+
+[project.urls]
+Homepage = "https://github.com/abizer/switchboard"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.21.0"]
 build-backend = "hatchling.build"
-
 
 [dependency-groups]
 dev = [
@@ -49,6 +55,5 @@ push = false
 [tool.bumpver.file_patterns]
 "pyproject.toml" = [
     '^version = "{version}"',
-    '^current_version = "{version}"',
+    '^current_version = "{version}"'
 ]
-

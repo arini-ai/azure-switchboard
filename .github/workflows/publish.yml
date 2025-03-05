@@ -1,0 +1,47 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - "20[0-9][0-9].[0-9][0-9].*"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # For PyPI trusted publishing
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Extract version from tag
+        run: |
+          echo "PACKAGE_VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+
+      - name: Verify package version matches tag
+        run: |
+          CURRENT_VERSION=$(grep -m1 'current_version = ' pyproject.toml | cut -d'"' -f2)
+          echo "Current version in pyproject.toml: $CURRENT_VERSION"
+          echo "Tag version: ${{ env.PACKAGE_VERSION }}"
+          if [ "$CURRENT_VERSION" != "${{ env.PACKAGE_VERSION }}" ]; then
+            echo "::error::Version mismatch between tag and pyproject.toml"
+            exit 1
+          fi
+
+      - name: Build package
+        run: uv build
+
+      # - name: Publish to PyPI
+      #   uses: uv publish
