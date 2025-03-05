@@ -8,7 +8,7 @@ import time
 from rich import print as rprint
 from rich.logging import RichHandler
 
-from switchboard import Deployment, Switchboard
+from azure_switchboard import Deployment, Switchboard
 
 logger = logging.getLogger(__name__)
 
@@ -60,18 +60,18 @@ async def main() -> None:
     rprint("# Basic stream")
     await basic_stream(switchboard)
 
-    rprint("# Distribute 10 completions, 1:1:1 ratio")
-    await distribute_N(switchboard, 10)
-    rprint(switchboard.get_usage())
+    # rprint("# Distribute 10 completions, 1:1:1 ratio")
+    # await distribute_N(switchboard, 10)
+    # rprint(switchboard.get_usage())
 
-    rprint("# Distribute 100 completions, 1:2:3 ratio")
-    d2.tpm_ratelimit *= 2
-    d2.rpm_ratelimit *= 2
+    # rprint("# Distribute 100 completions, 1:2:3 ratio")
+    # d2.tpm_ratelimit *= 2
+    # d2.rpm_ratelimit *= 2
 
-    d3.tpm_ratelimit *= 3
-    d3.rpm_ratelimit *= 3
-    await distribute_N(switchboard, 100)
-    rprint(switchboard.get_usage())
+    # d3.tpm_ratelimit *= 3
+    # d3.rpm_ratelimit *= 3
+    # await distribute_N(switchboard, 100)
+    # rprint(switchboard.get_usage())
 
     rprint("# Session affinity")
     await session_affinity(switchboard)

@@ -6,7 +6,7 @@ from openai.types.chat.chat_completion_chunk import ChoiceDelta
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.completion_usage import CompletionUsage
 
-from switchboard import Deployment
+from azure_switchboard import Deployment
 
 MOCK_STREAM_CHUNKS = [
     ChatCompletionChunk(

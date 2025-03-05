@@ -1,17 +1,13 @@
-import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
 from fixtures import (
     BASIC_CHAT_COMPLETION_ARGS,
     MOCK_COMPLETION,
-    MOCK_COMPLETION_PARSED,
-    MOCK_COMPLETION_RAW,
-    MOCK_STREAM_CHUNKS,
     TEST_DEPLOYMENT_1,
 )
 
-from switchboard import Client, Switchboard
+from azure_switchboard import Client, Switchboard
 
 
 @pytest.fixture
@@ -22,7 +18,7 @@ def mock_client():
 
 @pytest.fixture
 def mock_switchboard(mock_client):
-    from switchboard.client import Deployment
+    from azure_switchboard.client import Deployment
 
     # Create three test deployments with the same mock client
     deployments = [

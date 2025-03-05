@@ -15,8 +15,8 @@ from fixtures import (
 from httpx import Response, TimeoutException
 from openai.types.chat import ChatCompletionChunk
 
-from switchboard import Client
-from switchboard.client import default_client_factory
+from azure_switchboard import Client
+from azure_switchboard.client import default_client_factory
 
 
 @pytest.fixture

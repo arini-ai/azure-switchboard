@@ -15,7 +15,7 @@ from openai.types.chat import ChatCompletionChunk
 from tenacity import AsyncRetrying, stop_after_attempt
 from test_client import _collect_chunks
 
-from switchboard import Client, Switchboard
+from azure_switchboard import Client, Switchboard
 
 
 @pytest.fixture
