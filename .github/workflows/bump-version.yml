@@ -32,7 +32,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Install dependencies
-        run: just install-ci
+        run: just install
 
       - name: Configure Git
         run: |
