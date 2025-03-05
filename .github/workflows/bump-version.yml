@@ -14,7 +14,7 @@ jobs:
       contents: write # For pushing tag and commit
 
     # Only run if push is from a human (not another workflow)
-    if: github.actor != 'github-actions[bot]' && github.event_name == 'push'
+    if: github.actor != 'github-actions[bot]' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
 
     steps:
       - uses: actions/checkout@v4
@@ -46,7 +46,7 @@ jobs:
           NEW_VERSION=$(grep -m1 'current_version = ' pyproject.toml | cut -d'"' -f2)
           echo "PACKAGE_VERSION=$NEW_VERSION" >> $GITHUB_ENV
 
-      - name: Push changes
+      - name: Push changes and tag
         run: |
           git push
           git push origin ${{ env.PACKAGE_VERSION }}
