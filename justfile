@@ -13,4 +13,4 @@ test:
   uv run pytest -s -v
 
 run:
-  uv run --env-file .env api_demo.py
+  uv run --env-file .env tools/api_demo.py
