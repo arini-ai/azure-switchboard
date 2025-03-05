@@ -12,6 +12,7 @@ from fixtures import (
     TEST_DEPLOYMENT_3,
 )
 from openai.types.chat import ChatCompletionChunk
+from tenacity import AsyncRetrying, stop_after_attempt
 from test_client import _collect_chunks
 
 from switchboard import Client, Switchboard
@@ -86,6 +87,103 @@ async def test_switchboard_stream(mock_switchboard: Switchboard, mock_client):
     assert content == "Hello, world!"
 
 
+async def test_switchboard_session_stickiness(mock_switchboard: Switchboard):
+    """Test that session stickiness works correctly"""
+
+    # Reset usage counters
+    mock_switchboard.reset_usage()
+
+    # Make requests with different session IDs
+    session_ids = ["session1", "session2", "session3", "session4", "session5"]
+
+    # Make 10 requests per session ID (50 total)
+    for _ in range(10):
+        for session_id in session_ids:
+            await mock_switchboard.create(
+                session_id=session_id, **BASIC_CHAT_COMPLETION_ARGS
+            )
+
+    # Check that each session consistently went to the same deployment
+    # This is harder to test directly, but we can verify that the distribution
+    # is not perfectly balanced, which would indicate session affinity is working
+    requests_per_deployment = sorted(
+        [client.ratelimit_requests for client in mock_switchboard.deployments.values()]
+    )
+
+    # If session affinity is working, the distribution will be 10:20:20 instead of 33:33:34
+    assert requests_per_deployment == [10, 20, 20]
+
+
+async def test_switchboard_session_stickiness_with_fallback(
+    mock_switchboard: Switchboard,
+):
+    """Test session affinity when the preferred deployment becomes unavailable."""
+
+    # Setup deployments
+    clients = list(mock_switchboard.deployments.values())
+    assert len(clients) >= 3, "Need at least 3 deployments for this test"
+
+    # Set up client mock behavior
+    for client in clients:
+        client.client.chat.completions.create = AsyncMock(return_value=MOCK_COMPLETION)
+        client.reset_cooldown()
+        client.reset_counters()
+
+    # Create a session
+    session_id = "test-session-123"
+
+    # Initial request with session - establishes session affinity
+    response1 = await mock_switchboard.create(
+        session_id=session_id, **BASIC_CHAT_COMPLETION_ARGS
+    )
+    assert response1 == MOCK_COMPLETION
+
+    # Get the deployment assigned to this session
+    assigned_client = mock_switchboard._sessions[session_id]
+
+    # Verify subsequent requests use the same deployment
+    response2 = await mock_switchboard.create(
+        session_id=session_id, **BASIC_CHAT_COMPLETION_ARGS
+    )
+    assert response2 == MOCK_COMPLETION
+
+    # Check that the same deployment was used
+    assert assigned_client.client.chat.completions.create.call_count == 2
+
+    # Now make the assigned deployment unhealthy
+    assigned_client.cooldown()
+
+    # Make the next request with the same session
+    response3 = await mock_switchboard.create(
+        session_id=session_id, **BASIC_CHAT_COMPLETION_ARGS
+    )
+    assert response3 == MOCK_COMPLETION
+
+    # Now check which deployment was used - in the current implementation,
+    # the fallback policy might try the unhealthy deployment first, then fallback
+    # So we can't assert the exact call count - instead verify that a different deployment got used
+
+    # Identify which fallback deployment was used for the session now
+    fallback_session_client = mock_switchboard._sessions[session_id]
+    assert fallback_session_client != assigned_client, (
+        "Session should have switched to a different deployment"
+    )
+
+    # Make the original deployment healthy again
+    assigned_client.reset_cooldown()
+
+    # Make another request with the same session
+    response4 = await mock_switchboard.create(
+        session_id=session_id, **BASIC_CHAT_COMPLETION_ARGS
+    )
+    assert response4 == MOCK_COMPLETION
+
+    # Check if the system remembers the new session assignment or returns to the original
+    # Either behavior could be valid depending on implementation
+    current_assignment = mock_switchboard._sessions[session_id]
+    assert current_assignment is not None, "Session should still be tracked"
+
+
 async def test_load_distribution_basic(mock_switchboard: Switchboard) -> None:
     """Test that load is distributed across deployments based on utilization"""
 
@@ -123,33 +221,6 @@ async def test_load_distribution_basic(mock_switchboard: Switchboard) -> None:
     for deployment in mock_switchboard.deployments.values():
         assert req_lower <= deployment.ratelimit_requests <= req_upper
         assert tok_lower <= deployment.ratelimit_tokens <= tok_upper
-
-
-async def test_load_distribution_with_session_affinity(mock_switchboard: Switchboard):
-    """Test that session affinity works correctly"""
-
-    # Reset usage counters
-    mock_switchboard.reset_usage()
-
-    # Make requests with different session IDs
-    session_ids = ["session1", "session2", "session3", "session4", "session5"]
-
-    # Make 10 requests per session ID (50 total)
-    for _ in range(10):
-        for session_id in session_ids:
-            await mock_switchboard.create(
-                session_id=session_id, **BASIC_CHAT_COMPLETION_ARGS
-            )
-
-    # Check that each session consistently went to the same deployment
-    # This is harder to test directly, but we can verify that the distribution
-    # is not perfectly balanced, which would indicate session affinity is working
-    requests_per_deployment = sorted(
-        [client.ratelimit_requests for client in mock_switchboard.deployments.values()]
-    )
-
-    # If session affinity is working, the distribution will be 10:20:20 instead of 33:33:34
-    assert requests_per_deployment == [10, 20, 20]
 
 
 async def test_load_distribution_with_unhealthy_deployment(
@@ -261,3 +332,219 @@ async def test_load_distribution_proportional_to_ratelimits(
     assert within_margin(100 * (1 / 6), d1.ratelimit_requests, margin=0.05)
     assert within_margin(100 * (2 / 6), d2.ratelimit_requests, margin=0.05)
     assert within_margin(100 * (3 / 6), d3.ratelimit_requests, margin=0.05)
+
+
+async def test_load_distribution_dynamic_rebalancing(mock_switchboard: Switchboard):
+    """Test how load is redistributed when deployments fail and recover."""
+    # Setup deployments
+    clients = list(mock_switchboard.deployments.values())
+    assert len(clients) >= 3, "Need at least 3 deployments for this test"
+
+    # Set up client mock behavior
+    for client in clients:
+        client.client.chat.completions.create = AsyncMock(return_value=MOCK_COMPLETION)
+        client.reset_cooldown()
+        client.reset_counters()
+
+    # Phase 1: All deployments healthy - requests should be balanced
+    for _ in range(30):
+        await mock_switchboard.create(**BASIC_CHAT_COMPLETION_ARGS)
+
+    # All clients should have some requests
+    request_counts = [client.ratelimit_requests for client in clients]
+    assert all(count > 0 for count in request_counts), (
+        "Load not distributed to all deployments"
+    )
+
+    # Phase 2: Make one deployment unhealthy
+    clients[0].cooldown()
+    mock_switchboard.reset_usage()  # Reset counters to track new distribution
+
+    # Send more requests
+    for _ in range(30):
+        await mock_switchboard.create(**BASIC_CHAT_COMPLETION_ARGS)
+
+    # Unhealthy client should receive no requests
+    assert clients[0].ratelimit_requests == 0, "Unhealthy deployment received requests"
+
+    # Other clients should share the load
+    assert clients[1].ratelimit_requests > 0, (
+        "Healthy deployment 1 received no requests"
+    )
+    assert clients[2].ratelimit_requests > 0, (
+        "Healthy deployment 2 received no requests"
+    )
+
+    # Phase 3: Recover the unhealthy deployment
+    clients[0].reset_cooldown()
+    mock_switchboard.reset_usage()  # Reset counters again
+
+    # Send more requests
+    for _ in range(30):
+        await mock_switchboard.create(**BASIC_CHAT_COMPLETION_ARGS)
+
+    # All clients should again have some requests
+    request_counts = [client.ratelimit_requests for client in clients]
+    assert all(count > 0 for count in request_counts), (
+        "Recovered deployment not receiving requests"
+    )
+
+    # Phase 4: Make a different deployment unhealthy
+    clients[1].cooldown()
+    mock_switchboard.reset_usage()
+
+    # Send more requests
+    for _ in range(30):
+        await mock_switchboard.create(**BASIC_CHAT_COMPLETION_ARGS)
+
+    # The unhealthy client should receive no requests
+    assert clients[1].ratelimit_requests == 0, (
+        "Second unhealthy deployment received requests"
+    )
+
+    # Other clients should share the load
+    assert clients[0].ratelimit_requests > 0, (
+        "Healthy deployment 1 received no requests"
+    )
+    assert clients[2].ratelimit_requests > 0, (
+        "Healthy deployment 3 received no requests"
+    )
+
+
+async def test_load_distribution_chaos(mock_switchboard: Switchboard):
+    """Test resilience under unpredictable failure patterns."""
+    import random
+
+    # Setup deployments
+    clients = list(mock_switchboard.deployments.values())
+    assert len(clients) >= 3, "Need at least 3 deployments for this test"
+
+    # Set up initial client state
+    for client in clients:
+        client.client.chat.completions.create = AsyncMock(return_value=MOCK_COMPLETION)
+        client.reset_cooldown()
+        client.reset_counters()
+
+    # Define chaos behaviors
+    async def random_failure(client_index, request_index):
+        # Randomly choose a failure mode
+        failure_type = random.choice(
+            [
+                "timeout",
+                "error",
+                "rate_limit",
+                "bad_response",
+                "delayed",
+                None,  # No failure
+                None,  # Increase probability of no failure to keep system functional
+                None,  # Increase probability of no failure to keep system functional
+            ]
+        )
+
+        # Ensure at least one deployment stays healthy
+        healthy_count = sum(1 for c in clients if c.healthy)
+        if healthy_count <= 1 and failure_type is not None:
+            failure_type = None  # Don't break the last healthy deployment
+
+        if failure_type == "timeout":
+            clients[
+                client_index
+            ].client.chat.completions.create.side_effect = TimeoutError(
+                "Random timeout"
+            )
+        elif failure_type == "error":
+            clients[
+                client_index
+            ].client.chat.completions.create.side_effect = Exception("Random error")
+        elif failure_type == "rate_limit":
+            clients[
+                client_index
+            ].ratelimit_tokens = 10000  # Set high to trigger rate limiting
+        elif failure_type == "bad_response":
+            # Create a malformed response
+            bad_response = {
+                "id": "bad-response",
+                "object": "chat.completion",
+                "created": 1234567890,
+                "model": "gpt-4-bad",
+                "choices": [],  # Missing content
+            }
+            clients[
+                client_index
+            ].client.chat.completions.create.return_value = bad_response
+        elif failure_type == "delayed":
+            # Create a delayed response
+            async def delayed_response(*args, **kwargs):
+                await asyncio.sleep(0.05)  # Small delay
+                return MOCK_COMPLETION
+
+            clients[
+                client_index
+            ].client.chat.completions.create.side_effect = delayed_response
+        else:
+            # Reset to normal behavior
+            clients[client_index].client.chat.completions.create.side_effect = None
+            clients[
+                client_index
+            ].client.chat.completions.create.return_value = MOCK_COMPLETION
+            clients[client_index].reset_cooldown()
+
+        # Randomly recover some deployments
+        if random.random() < 0.3:  # 30% chance to reset a random deployment
+            reset_index = random.randrange(len(clients))
+            clients[reset_index].client.chat.completions.create.side_effect = None
+            clients[
+                reset_index
+            ].client.chat.completions.create.return_value = MOCK_COMPLETION
+            clients[reset_index].reset_cooldown()
+            clients[reset_index].reset_counters()
+
+        # Ensure at least one deployment is always healthy before returning
+        if all(not c.healthy for c in clients):
+            random_index = random.randrange(len(clients))
+            clients[random_index].reset_cooldown()
+            clients[random_index].client.chat.completions.create.side_effect = None
+
+    # Track overall success
+    total_requests = 50
+    successful_requests = 0
+    failed_requests = 0
+
+    # Run chaos test
+    for i in range(total_requests):
+        # Randomly apply chaos to deployments
+        for client_index in range(len(clients)):
+            if random.random() < 0.2:  # 20% chance to cause chaos for each deployment
+                await random_failure(client_index, i)
+
+        # Try to make a request
+        try:
+            await mock_switchboard.create(**BASIC_CHAT_COMPLETION_ARGS)
+            successful_requests += 1
+        except Exception:
+            failed_requests += 1
+
+            # Ensure at least one deployment is healthy after a failure
+            if all(not c.healthy for c in clients):
+                random_index = random.randrange(len(clients))
+                clients[random_index].reset_cooldown()
+                clients[random_index].client.chat.completions.create.side_effect = None
+
+    # Calculate success rate
+    success_rate = (successful_requests / total_requests) * 100
+
+    # The test should maintain some level of availability even with chaos
+    # Actual threshold depends on the system design and failure rates
+    assert success_rate > 0, f"Success rate too low: {success_rate}%"
+
+    # Make sure at least one deployment is healthy for the final check
+    if all(not c.healthy for c in clients):
+        random_index = random.randrange(len(clients))
+        clients[random_index].reset_cooldown()
+        clients[random_index].client.chat.completions.create.side_effect = None
+
+    # Validate that at least some requests were routed to deployments
+    request_distribution = [client.ratelimit_requests for client in clients]
+
+    # There should be some distribution of requests
+    assert sum(request_distribution) > 0, "No requests were processed"

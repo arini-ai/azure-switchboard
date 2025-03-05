@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import AsyncMock
 
 import openai
@@ -219,3 +220,49 @@ async def test_client_timeout_retry_behavior(d1_mock, test_client: Client):
     assert d1_mock.routes["completion"].call_count == 3
     # client should be in cooldown and therefore unhealthy
     assert not test_client.healthy
+
+
+async def test_client_concurrent_requests(mock_client: Client):
+    """Test that the client properly handles multiple concurrent requests."""
+    # Setup mock response
+    chat_completion_mock = AsyncMock(return_value=MOCK_COMPLETION)
+    mock_client.client.chat.completions.create = chat_completion_mock
+
+    # Create multiple concurrent requests
+    num_requests = 10
+    tasks = [
+        mock_client.create(**BASIC_CHAT_COMPLETION_ARGS) for _ in range(num_requests)
+    ]
+
+    # Run all requests concurrently
+    responses = await asyncio.gather(*tasks)
+
+    # Verify all requests were successful
+    assert len(responses) == num_requests
+    assert all(r == MOCK_COMPLETION for r in responses)
+
+    # Verify the mock was called the correct number of times
+    assert chat_completion_mock.call_count == num_requests
+
+    # Verify token usage was tracked correctly (30 tokens per request from MOCK_COMPLETION)
+    assert mock_client.ratelimit_tokens == 30 * num_requests
+    assert mock_client.ratelimit_requests == num_requests
+
+    # Test error handling in concurrent requests
+    mock_client.reset_counters()
+    chat_completion_mock.side_effect = Exception("Test error")
+
+    # Create mixed tasks - some will succeed, some will fail
+    error_tasks = [mock_client.create(**BASIC_CHAT_COMPLETION_ARGS) for _ in range(5)]
+
+    # Run with gather and return_exceptions to not abort on first error
+    error_responses = await asyncio.gather(*error_tasks, return_exceptions=True)
+
+    # Verify all responses are exceptions
+    assert all(isinstance(r, Exception) for r in error_responses)
+
+    # Verify the client goes into cooldown after errors
+    assert not mock_client.healthy
+
+    # Verify request count is still tracked
+    assert mock_client.ratelimit_requests == 5
