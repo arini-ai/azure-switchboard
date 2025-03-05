@@ -53,7 +53,4 @@ tag = true
 push = false
 
 [tool.bumpver.file_patterns]
-"pyproject.toml" = [
-    '^version = "{version}"',
-    '^current_version = "{version}"'
-]
+"pyproject.toml" = ['^version = "{version}"', '^current_version = "{version}"']
