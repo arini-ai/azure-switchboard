@@ -12,7 +12,6 @@ from fixtures import (
     TEST_DEPLOYMENT_3,
 )
 from openai.types.chat import ChatCompletionChunk
-from tenacity import AsyncRetrying, stop_after_attempt
 from test_client import _collect_chunks
 
 from azure_switchboard import Client, Switchboard
@@ -35,29 +34,7 @@ def mock_switchboard(mock_client):
     )
 
 
-async def test_switchboard_selection_basic(mock_switchboard: Switchboard):
-    # test that we select a deployment
-    client = mock_switchboard.select_deployment()
-    assert client.name in mock_switchboard.deployments
 
-    # test that we can select a specific deployment
-    client_1 = mock_switchboard.select_deployment(session_id="test")
-    client_2 = mock_switchboard.select_deployment(session_id="test")
-    assert client_1.name == client_2.name
-
-    # test that we fall back to load balancing if the selected deployment is unhealthy
-    client_1.cooldown()
-    client_3 = mock_switchboard.select_deployment(session_id="test")
-    assert client_3.name != client_1.name
-
-    # test that sessions support failover
-    client_4 = mock_switchboard.select_deployment(session_id="test")
-    assert client_4.name == client_3.name
-
-    # test that recovery doesn't affect sessions
-    await client_1.check_health()
-    client_5 = mock_switchboard.select_deployment(session_id="test")
-    assert client_5.name == client_3.name
 
 
 async def test_switchboard_completion(mock_switchboard: Switchboard, mock_client):
@@ -86,8 +63,32 @@ async def test_switchboard_stream(mock_switchboard: Switchboard, mock_client):
     mock_client.chat.completions.create.assert_called_once()
     assert content == "Hello, world!"
 
+async def test_switchboard_selection(mock_switchboard: Switchboard):
+    # test that we select a deployment
+    client = mock_switchboard.select_deployment()
+    assert client.name in mock_switchboard.deployments
 
-async def test_switchboard_session_stickiness(mock_switchboard: Switchboard):
+    # test that we can select a specific deployment
+    client_1 = mock_switchboard.select_deployment(session_id="test")
+    client_2 = mock_switchboard.select_deployment(session_id="test")
+    assert client_1.name == client_2.name
+
+    # test that we fall back to load balancing if the selected deployment is unhealthy
+    client_1.cooldown()
+    client_3 = mock_switchboard.select_deployment(session_id="test")
+    assert client_3.name != client_1.name
+
+    # test that sessions support failover
+    client_4 = mock_switchboard.select_deployment(session_id="test")
+    assert client_4.name == client_3.name
+
+    # test that recovery doesn't affect sessions
+    await client_1.check_health()
+    client_5 = mock_switchboard.select_deployment(session_id="test")
+    assert client_5.name == client_3.name
+
+
+async def test_load_distribution_with_session_stickiness(mock_switchboard: Switchboard):
     """Test that session stickiness works correctly"""
 
     # Reset usage counters
@@ -114,7 +115,7 @@ async def test_switchboard_session_stickiness(mock_switchboard: Switchboard):
     assert requests_per_deployment == [10, 20, 20]
 
 
-async def test_switchboard_session_stickiness_with_fallback(
+async def test_load_distribution_session_stickiness_with_fallback(
     mock_switchboard: Switchboard,
 ):
     """Test session affinity when the preferred deployment becomes unavailable."""

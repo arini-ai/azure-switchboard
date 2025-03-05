@@ -21,6 +21,13 @@ deployments = [
         rpm_ratelimit=60,
         tpm_ratelimit=100000,
     ),
+    Deployment(
+        name="d3",
+        api_base="https://your-deployment3.openai.azure.com/",
+        api_key="your-api-key3",
+        rpm_ratelimit=60,
+        tpm_ratelimit=100000,
+    ),
 ]
 
 @asynccontextmanager
@@ -31,10 +38,11 @@ async def init_switchboard():
     """
 
     try:
-        # Create the Switchboard with your deployments
+        # Create Switchboard with deployments
         switchboard = Switchboard(deployments)
 
-        # Start background tasks (health checks, ratelimit management)
+        # Start background tasks
+        # (healthchecks, ratelimiting)
         switchboard.start()
 
         yield switchboard
@@ -66,8 +74,8 @@ async def basic_functionality(switchboard: Switchboard):
 async def session_affinity(switchboard: Switchboard):
     session_id = str(uuid4())
 
-    # First message: will select a random healthy deployment
-    # and associate it with the session_id
+    # First message will select a random healthy
+    # deployment and associate it with the session_id
     response = await switchboard.create(
         session_id=session_id,
         model="gpt-4o-mini",
@@ -85,9 +93,10 @@ async def session_affinity(switchboard: Switchboard):
         ]
     )
 
-    # If the deployment becomes unhealthy, requests will be fall back to a healthy deployment
+    # If the deployment becomes unhealthy,
+    # requests will fall back to a healthy one
 
-    # Simulate a deployment failure by marking down the deployment
+    # Simulate a failure by marking down the deployment
     original_client = switchboard.select_deployment(session_id)
     original_client.cooldown()
 
@@ -108,7 +117,6 @@ async def main():
 
         print("Session affinity:")
         await session_affinity(sb)
-
 
 if __name__ == "__main__":
     asyncio.run(main())

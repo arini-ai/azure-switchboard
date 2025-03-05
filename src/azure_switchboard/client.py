@@ -18,7 +18,7 @@ class Deployment(BaseModel):
     api_base: str
     api_key: str
     api_version: str = "2024-10-21"
-    timeout: float = 30.0
+    timeout: float = 600.0
     tpm_ratelimit: Annotated[int, Field(description="TPM Ratelimit")] = 0
     rpm_ratelimit: Annotated[int, Field(description="RPM Ratelimit")] = 0
     healthcheck_interval: int = 30
@@ -183,11 +183,9 @@ class WrappedAsyncStream(wrapt.ObjectProxy):
 
 def azure_client_factory(deployment: Deployment) -> AsyncAzureOpenAI:
     return AsyncAzureOpenAI(
-        # convert pydantic.HttpUrl back to str
         azure_endpoint=deployment.api_base,
         api_key=deployment.api_key,
-        api_version=deployment.api_version,
-        timeout=deployment.timeout,
+        api_version=deployment.api_version
     )
 
 
