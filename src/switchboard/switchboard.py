@@ -1,8 +1,9 @@
 import asyncio
 import logging
 import random
-from typing import AsyncGenerator, Callable, Dict
+from typing import Callable, Dict, Literal, overload
 
+from openai import AsyncStream
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from tenacity import AsyncRetrying, stop_after_attempt
 
@@ -125,9 +126,23 @@ class Switchboard:
 
         return selected
 
-    async def completion(
-        self, session_id: str | None = None, **kwargs
-    ) -> ChatCompletion | None:
+    @overload
+    async def create(
+        self, *, session_id: str | None = None, stream: Literal[True], **kwargs
+    ) -> AsyncStream[ChatCompletionChunk]: ...
+
+    @overload
+    async def create(
+        self, *, session_id: str | None = None, **kwargs
+    ) -> ChatCompletion: ...
+
+    async def create(
+        self,
+        *,
+        session_id: str | None = None,
+        stream: bool = False,
+        **kwargs,
+    ) -> ChatCompletion | AsyncStream[ChatCompletionChunk]:
         """
         Send a chat completion request to the selected deployment, with automatic fallback.
         """
@@ -136,20 +151,17 @@ class Switchboard:
             with attempt:
                 client = self.select_deployment(session_id)
                 logger.debug(f"Sending completion request to {client}")
-                return await client.completion(**kwargs)
+
+                return await client.create(stream=stream, **kwargs)
+
+        # in theory we should never get here because tenacity
+        # should raise RetryError if all attempts fail
+        raise SwitchboardError("All fallback attempts failed")
 
     async def stream(
-        self, session_id: str | None = None, **kwargs
-    ) -> AsyncGenerator[ChatCompletionChunk, None]:
-        """
-        Send a streaming completion request to the selected deployment, with automatic fallback.
-        """
-        async for attempt in self.fallback_policy:
-            with attempt:
-                client = self.select_deployment(session_id)
-                logger.debug(f"Sending streaming request to {client}")
-                async for chunk in client.stream(**kwargs):
-                    yield chunk
+        self, *, session_id: str | None = None, **kwargs
+    ) -> AsyncStream[ChatCompletionChunk]:
+        return await self.create(stream=True, session_id=session_id, **kwargs)
 
     def __repr__(self) -> str:
         return f"Switchboard({self.get_usage()})"

@@ -1,9 +1,10 @@
 import logging
 import random
 import time
-from typing import Annotated, AsyncGenerator
+from typing import Annotated, AsyncIterator, Literal, cast, overload
 
-from openai import AsyncAzureOpenAI
+import wrapt
+from openai import AsyncAzureOpenAI, AsyncStream
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from pydantic import BaseModel, Field
 
@@ -21,23 +22,17 @@ class Deployment(BaseModel):
     tpm_ratelimit: Annotated[int, Field(description="TPM Ratelimit")] = 0
     rpm_ratelimit: Annotated[int, Field(description="RPM Ratelimit")] = 0
     healthcheck_interval: int = 30
+    cooldown_period: int = 60
 
 
 class Client:
     """Runtime state of a deployment"""
 
-    def __init__(
-        self, config: Deployment, client: AsyncAzureOpenAI | None = None
-    ) -> None:
+    def __init__(self, config: Deployment, client: AsyncAzureOpenAI) -> None:
         self.name = config.name
         self.config = config
-        self.client = client or AsyncAzureOpenAI(
-            api_key=config.api_key,
-            api_version=config.api_version,
-            base_url=config.api_base,
-            timeout=config.timeout,
-        )
-        self._last_request_status = True  # assume healthy to start
+        self.client = client
+        self._cooldown_until = time.time()
 
         self.ratelimit_tokens = 0
         self.ratelimit_requests = 0
@@ -56,9 +51,16 @@ class Client:
     def __repr__(self) -> str:
         return f"Client(name={self.name}, util={self.util})"
 
+    def cooldown(self, seconds: int = 0) -> None:
+        self._cooldown_until = time.time() + (seconds or self.config.cooldown_period)
+
+    def reset_cooldown(self) -> None:
+        self._cooldown_until = 0
+
     @property
     def healthy(self) -> bool:
-        return bool(self._last_request_status)
+        # wait for cooldown period on error
+        return time.time() >= self._cooldown_until
 
     @property
     def util(self) -> float:
@@ -92,10 +94,10 @@ class Client:
         try:
             logger.debug(f"{self}: checking health")
             await self.client.models.list()
-            self._last_request_status = True
+            self.reset_cooldown()
         except Exception:
             logger.exception(f"{self}: health check failed")
-            self._last_request_status = False
+            self.cooldown()
 
     def reset_counters(self):
         """Reset usage counters - should be called periodically"""
@@ -107,58 +109,81 @@ class Client:
 
     def get_counters(self) -> dict[str, int | float | str]:
         return {
+            "util": self.util,
             "tokens": self.ratelimit_tokens,
             "requests": self.ratelimit_requests,
-            "util": self.util,
         }
 
-    async def completion(self, **kwargs) -> ChatCompletion:
+    @overload
+    async def create(
+        self, *, stream: Literal[True], **kwargs
+    ) -> AsyncStream[ChatCompletionChunk]: ...
+
+    @overload
+    async def create(self, **kwargs) -> ChatCompletion: ...
+
+    async def create(
+        self,
+        *,
+        stream: bool = False,
+        **kwargs,
+    ) -> ChatCompletion | AsyncStream[ChatCompletionChunk]:
         """
         Send a chat completion request to this client.
         Tracks usage metrics for load balancing.
         """
 
+        self.ratelimit_requests += 1
+
         kwargs["timeout"] = kwargs.get("timeout", self.config.timeout)
-        if kwargs.get("stream", False):
-            kwargs["stream_options"] = {"include_usage": True}
-
-        self.ratelimit_requests += 1
         try:
-            response = await self.client.chat.completions.create(**kwargs)
+            if stream:
+                stream_options = kwargs.pop("stream_options", {})
+                stream_options["include_usage"] = True
 
-            if hasattr(response, "usage"):
-                self.ratelimit_tokens += response.usage.total_tokens
+                response = await self.client.chat.completions.create(
+                    stream=True,
+                    stream_options=stream_options,
+                    **kwargs,
+                )
 
-            self._last_request_status = True
-            return response
+                return WrappedAsyncStream(response, self)
+
+            else:
+                response = await self.client.chat.completions.create(**kwargs)
+                if response.usage:
+                    self.ratelimit_tokens += response.usage.total_tokens
+
+                return response
         except Exception as e:
-            self._last_request_status = False
+            self.cooldown()
             raise e
 
-    async def stream(self, **kwargs) -> AsyncGenerator[ChatCompletionChunk, None]:
-        """
-        Send a streaming request to this client.
-        Tracks usage metrics for load balancing.
-        """
-        kwargs.pop("stream", None)  # pop and pass ourselves to aid the typechecker
-        kwargs["stream_options"] = kwargs.get("stream_options", {"include_usage": True})
-        self.ratelimit_requests += 1
-        stream = await self.client.chat.completions.create(stream=True, **kwargs)
 
-        try:
-            self._last_request_status = True
-            async for chunk in stream:
-                if chunk.usage:  # last chunk has usage info
-                    self.ratelimit_tokens += chunk.usage.total_tokens
+class WrappedAsyncStream(wrapt.ObjectProxy):
+    """Wrap an openai.AsyncStream to track usage"""
 
-                yield chunk
-        except Exception as e:
-            self._last_request_status = False
-            raise e
+    def __init__(self, wrapped: AsyncStream[ChatCompletionChunk], runtime: Client):
+        super(WrappedAsyncStream, self).__init__(wrapped)
+        self._self_runtime = runtime
+
+    async def __anext__(self) -> ChatCompletionChunk:
+        chunk: ChatCompletionChunk = await self.__wrapped__.__anext__()
+        if chunk.usage:
+            self._self_runtime.ratelimit_tokens += chunk.usage.total_tokens
+        return chunk
+
+    async def __aiter__(self) -> AsyncIterator[ChatCompletionChunk]:
+        async for chunk in self.__wrapped__:
+            chunk = cast(ChatCompletionChunk, chunk)
+            if chunk.usage:
+                self._self_runtime.ratelimit_tokens += chunk.usage.total_tokens
+            yield chunk
 
 
 def azure_client_factory(deployment: Deployment) -> AsyncAzureOpenAI:
     return AsyncAzureOpenAI(
+        # convert pydantic.HttpUrl back to str
         azure_endpoint=deployment.api_base,
         api_key=deployment.api_key,
         api_version=deployment.api_version,

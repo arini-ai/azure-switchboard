@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import time
 
 from rich import print as rprint
 from rich.logging import RichHandler
@@ -53,38 +54,52 @@ async def main() -> None:
     switchboard = Switchboard([d1, d2, d3])
     switchboard.start()
 
+    rprint("# Basic completion")
     await basic_completion(switchboard)
+
+    rprint("# Basic stream")
     await basic_stream(switchboard)
+
+    rprint("# Distribute 10 completions, 1:1:1 ratio")
     await distribute_N(switchboard, 10)
-    # await distribute_N(switchboard, 100)
+    rprint(switchboard.get_usage())
+
+    rprint("# Distribute 100 completions, 1:2:3 ratio")
+    d2.tpm_ratelimit *= 2
+    d2.rpm_ratelimit *= 2
+
+    d3.tpm_ratelimit *= 3
+    d3.rpm_ratelimit *= 3
+    await distribute_N(switchboard, 100)
+    rprint(switchboard.get_usage())
+
+    rprint("# Session affinity")
+    await session_affinity(switchboard)
+    rprint(switchboard.get_usage())
 
     await switchboard.stop()
 
 
 async def basic_completion(switchboard: Switchboard) -> None:
-    rprint("# Basic completion")
     rprint(f"args: {BASIC_ARGS}")
-    completion = switchboard.completion(**BASIC_ARGS)
-
     print("response: ", end="")
-    if response := await completion:
-        print(response.choices[0].message.content)
+    if response := await switchboard.create(**BASIC_ARGS):
+        print(response.choices and response.choices[0].message.content)
 
-    rprint(switchboard)
+    # rprint(switchboard)
 
 
 async def basic_stream(switchboard: Switchboard) -> None:
-    rprint("# Basic stream")
     rprint(f"args: {BASIC_ARGS}")
-    stream = switchboard.stream(**BASIC_ARGS)
+    stream = await switchboard.create(stream=True, **BASIC_ARGS)
 
     print("response: ", end="")
     async for chunk in stream:
         if chunk.choices and chunk.choices[0].delta.content:
-            print(chunk.choices[0].delta.content, end="")
+            print(chunk.choices[0].delta.content, end="", flush=True)
     print()
 
-    rprint(switchboard)
+    # rprint(switchboard)
 
 
 async def distribute_N(switchboard: Switchboard, N: int) -> None:
@@ -93,7 +108,7 @@ async def distribute_N(switchboard: Switchboard, N: int) -> None:
     completions = []
     for i in range(N):
         completions.append(
-            switchboard.completion(
+            switchboard.create(
                 model="gpt-4o-mini",
                 messages=[
                     {
@@ -104,17 +119,23 @@ async def distribute_N(switchboard: Switchboard, N: int) -> None:
             )
         )
 
-    rprint(f"# Distribute {N} completions")
     responses = await asyncio.gather(*completions)
     rprint("Responses:", len(responses))
-    rprint(switchboard)
+
+
+async def session_affinity(switchboard: Switchboard) -> None:
+    switchboard.reset_usage()
+
+    session_id = f"test_{time.time()}"
+    await switchboard.create(session_id=session_id, **BASIC_ARGS)
+    await switchboard.create(session_id=session_id, **BASIC_ARGS)
 
 
 if __name__ == "__main__":
-    # logging.basicConfig(
-    #     level=logging.INFO,
-    #     format="%(message)s",
-    #     datefmt="[%X]",
-    #     handlers=[RichHandler(rich_tracebacks=True)],
-    # )
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(message)s",
+        datefmt="[%X]",
+        handlers=[RichHandler(rich_tracebacks=True)],
+    )
     asyncio.run(main())

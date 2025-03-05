@@ -93,6 +93,41 @@ MOCK_COMPLETION = ChatCompletion(
     ),
 )
 
+MOCK_COMPLETION_RAW = {
+    "choices": [
+        {
+            "finish_reason": "stop",
+            "index": 0,
+            "logprobs": None,
+            "message": {
+                "content": "Hello! How can I assist you today?",
+                "refusal": None,
+                "role": "assistant",
+            },
+        }
+    ],
+    "created": 1741124380,
+    "id": "chatcmpl-test",
+    "model": "gpt-4o-mini",
+    "object": "chat.completion",
+    "service_tier": "default",
+    "system_fingerprint": "fp_06737a9306",
+    "usage": {
+        "completion_tokens": 10,
+        "completion_tokens_details": {
+            "accepted_prediction_tokens": 0,
+            "audio_tokens": 0,
+            "reasoning_tokens": 0,
+            "rejected_prediction_tokens": 0,
+        },
+        "prompt_tokens": 8,
+        "prompt_tokens_details": {"audio_tokens": 0, "cached_tokens": 0},
+        "total_tokens": 18,
+    },
+}
+
+MOCK_COMPLETION_PARSED = ChatCompletion.model_validate(MOCK_COMPLETION_RAW)
+
 TEST_DEPLOYMENT_3 = Deployment(
     name="test3",
     api_base="https://test3.openai.azure.com/",
@@ -116,6 +151,7 @@ TEST_DEPLOYMENT_1 = Deployment(
     tpm_ratelimit=1000,
     rpm_ratelimit=6,
 )
+
 
 BASIC_CHAT_COMPLETION_ARGS = {
     "model": "gpt-4o-mini",

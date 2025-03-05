@@ -45,7 +45,7 @@ async def test_switchboard_selection_basic(mock_switchboard: Switchboard):
     assert client_1.name == client_2.name
 
     # test that we fall back to load balancing if the selected deployment is unhealthy
-    client_1._last_request_status = False
+    client_1.cooldown()
     client_3 = mock_switchboard.select_deployment(session_id="test")
     assert client_3.name != client_1.name
 
@@ -54,14 +54,14 @@ async def test_switchboard_selection_basic(mock_switchboard: Switchboard):
     assert client_4.name == client_3.name
 
     # test that recovery doesn't affect sessions
-    client_1._last_request_status = True
+    await client_1.check_health()
     client_5 = mock_switchboard.select_deployment(session_id="test")
     assert client_5.name == client_3.name
 
 
 async def test_switchboard_completion(mock_switchboard: Switchboard, mock_client):
     # test basic chat completion
-    response = await mock_switchboard.completion(**BASIC_CHAT_COMPLETION_ARGS)
+    response = await mock_switchboard.create(**BASIC_CHAT_COMPLETION_ARGS)
     mock_client.chat.completions.create.assert_called_once()
     assert response == MOCK_COMPLETION
 
@@ -78,7 +78,7 @@ async def test_switchboard_stream(mock_switchboard: Switchboard, mock_client):
     mock_client.chat.completions.create = AsyncMock(return_value=mock_stream())
 
     # Test streaming through switchboard
-    stream = mock_switchboard.stream(**BASIC_CHAT_COMPLETION_ARGS)
+    stream = await mock_switchboard.create(stream=True, **BASIC_CHAT_COMPLETION_ARGS)
 
     # Collect all chunks
     _, content = await _collect_chunks(stream)
@@ -94,7 +94,7 @@ async def test_load_distribution_basic(mock_switchboard: Switchboard) -> None:
 
     # Make 100 requests
     for _ in range(100):
-        await mock_switchboard.completion(**BASIC_CHAT_COMPLETION_ARGS)
+        await mock_switchboard.create(**BASIC_CHAT_COMPLETION_ARGS)
 
     # Check that all deployments were used
     used_deployments = [
@@ -137,7 +137,7 @@ async def test_load_distribution_with_session_affinity(mock_switchboard: Switchb
     # Make 10 requests per session ID (50 total)
     for _ in range(10):
         for session_id in session_ids:
-            await mock_switchboard.completion(
+            await mock_switchboard.create(
                 session_id=session_id, **BASIC_CHAT_COMPLETION_ARGS
             )
 
@@ -161,11 +161,11 @@ async def test_load_distribution_with_unhealthy_deployment(
     mock_switchboard.reset_usage()
 
     # Mark one deployment as unhealthy
-    mock_switchboard.deployments["test2"]._last_request_status = False
+    mock_switchboard.deployments["test2"].cooldown()
 
     # Make 100 requests
     for _ in range(100):
-        await mock_switchboard.completion(**BASIC_CHAT_COMPLETION_ARGS)
+        await mock_switchboard.create(**BASIC_CHAT_COMPLETION_ARGS)
 
     # Verify that the unhealthy deployment wasn't used
     assert mock_switchboard.deployments["test1"].ratelimit_requests > 40
@@ -185,9 +185,7 @@ async def test_load_distribution_large_scale(mock_switchboard: Switchboard):
         # Use a session ID for every 10th request to test session affinity
         session_id = f"session{i // 10}" if i % 10 == 0 else None
         tasks.append(
-            mock_switchboard.completion(
-                session_id=session_id, **BASIC_CHAT_COMPLETION_ARGS
-            )
+            mock_switchboard.create(session_id=session_id, **BASIC_CHAT_COMPLETION_ARGS)
         )
 
     await asyncio.gather(*tasks)
@@ -208,14 +206,14 @@ async def test_load_distribution_with_recovery(
 
     # Make initial requests to establish baseline usage
     for _ in range(50):
-        await mock_switchboard.completion(**BASIC_CHAT_COMPLETION_ARGS)
+        await mock_switchboard.create(**BASIC_CHAT_COMPLETION_ARGS)
 
     # Mark one deployment as unhealthy mid-operation
-    mock_switchboard.deployments["test1"]._last_request_status = False
+    mock_switchboard.deployments["test1"].cooldown()
 
     # Make additional requests while one deployment is unhealthy
     for _ in range(50):
-        await mock_switchboard.completion(**BASIC_CHAT_COMPLETION_ARGS)
+        await mock_switchboard.create(**BASIC_CHAT_COMPLETION_ARGS)
 
     # Verify that the unhealthy deployment wasn't used during the second batch
     assert mock_switchboard.deployments["test1"].ratelimit_requests < 40
@@ -226,7 +224,7 @@ async def test_load_distribution_with_recovery(
     await mock_switchboard.deployments["test1"].check_health()
     mock_client.models.list.assert_called()
     for _ in range(50):
-        await mock_switchboard.completion(**BASIC_CHAT_COMPLETION_ARGS)
+        await mock_switchboard.create(**BASIC_CHAT_COMPLETION_ARGS)
 
     # Verify that the unhealthy deployment was skipped during its unhealthy state
     assert mock_switchboard.deployments["test1"].ratelimit_requests > 40
@@ -254,7 +252,7 @@ async def test_load_distribution_proportional_to_ratelimits(
 
     # Make 100 requests
     for _ in range(100):
-        await mock_switchboard.completion(**BASIC_CHAT_COMPLETION_ARGS)
+        await mock_switchboard.create(**BASIC_CHAT_COMPLETION_ARGS)
 
     # Verify that the deployments were used proportionally, 5% error margin
     def within_margin(a, b, margin):
