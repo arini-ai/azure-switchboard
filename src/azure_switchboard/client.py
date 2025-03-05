@@ -188,7 +188,7 @@ def azure_client_factory(deployment: Deployment) -> AsyncAzureOpenAI:
     return AsyncAzureOpenAI(
         azure_endpoint=deployment.api_base,
         api_key=deployment.api_key,
-        api_version=deployment.api_version
+        api_version=deployment.api_version,
     )
 
 
