@@ -1,8 +1,20 @@
+#!/usr/bin/env python3
+#
+# To run this, use:
+#   uv run readme-example.py
+#
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "azure-switchboard",
+# ]
+# ///
+
 import asyncio
 from contextlib import asynccontextmanager
-from azure_switchboard import Switchboard, Deployment
-
 from uuid import uuid4
+
+from azure_switchboard import Deployment, Switchboard
 
 # Define deployments
 deployments = [
@@ -37,14 +49,14 @@ async def init_switchboard():
     Analogous to FastAPI dependency injection.
     """
 
+    # Create Switchboard with deployments
+    switchboard = Switchboard(deployments)
+
+    # Start background tasks
+    # (healthchecks, ratelimiting)
+    switchboard.start()
+
     try:
-        # Create Switchboard with deployments
-        switchboard = Switchboard(deployments)
-
-        # Start background tasks
-        # (healthchecks, ratelimiting)
-        switchboard.start()
-
         yield switchboard
     finally:
         await switchboard.stop()
@@ -76,14 +88,14 @@ async def session_affinity(switchboard: Switchboard):
 
     # First message will select a random healthy
     # deployment and associate it with the session_id
-    response = await switchboard.create(
+    _ = await switchboard.create(
         session_id=session_id,
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Who won the World Series in 2020?"}]
     )
 
     # Follow-up requests with the same session_id will route to the same deployment
-    response = await switchboard.create(
+    _ = await switchboard.create(
         session_id=session_id,
         model="gpt-4o-mini",
         messages=[
@@ -101,7 +113,7 @@ async def session_affinity(switchboard: Switchboard):
     original_client.cooldown()
 
     # A new deployment will be selected for this session_id
-    response = await switchboard.create(
+    _ = await switchboard.create(
         session_id=session_id,
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Who won the World Series in 2021?"}]

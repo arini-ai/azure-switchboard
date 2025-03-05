@@ -1,4 +1,15 @@
-#! /usr/bin/env python3
+#!/usr/bin/env python3
+#
+# To run this, use:
+#   uv run readme-example.py
+#
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "azure-switchboard",
+#     "rich",
+# ]
+# ///
 
 import asyncio
 import logging
@@ -60,18 +71,18 @@ async def main() -> None:
     rprint("# Basic stream")
     await basic_stream(switchboard)
 
-    # rprint("# Distribute 10 completions, 1:1:1 ratio")
-    # await distribute_N(switchboard, 10)
-    # rprint(switchboard.get_usage())
+    rprint("# Distribute 10 completions, 1:1:1 ratio")
+    await distribute_N(switchboard, 10)
+    rprint(switchboard.get_usage())
 
-    # rprint("# Distribute 100 completions, 1:2:3 ratio")
-    # d2.tpm_ratelimit *= 2
-    # d2.rpm_ratelimit *= 2
+    rprint("# Distribute 100 completions, 1:2:3 ratio")
+    d2.tpm_ratelimit *= 2
+    d2.rpm_ratelimit *= 2
 
-    # d3.tpm_ratelimit *= 3
-    # d3.rpm_ratelimit *= 3
-    # await distribute_N(switchboard, 100)
-    # rprint(switchboard.get_usage())
+    d3.tpm_ratelimit *= 3
+    d3.rpm_ratelimit *= 3
+    await distribute_N(switchboard, 100)
+    rprint(switchboard.get_usage())
 
     rprint("# Session affinity")
     await session_affinity(switchboard)

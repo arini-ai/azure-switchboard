@@ -180,28 +180,28 @@ if __name__ == "__main__":
 ## Development
 
 This project uses [uv](https://github.com/astral-sh/uv) for package management,
-and [just](https://github.com/casey/just) for task automation. See the justfile
+and [just](https://github.com/casey/just) for task automation. See the [justfile](https://github.com/abizer/switchboard/blob/master/justfile)
 for available commands.
 
 ```bash
 # Clone the repository
-git clone https://github.com/abizer/azure-switchboard
+git clone https://github.com/abizer/switchboard azure-switchboard
 cd azure-switchboard
 
-just bootstrap
+just install
 ```
 
 ### Running tests
 
 ```bash
-$ just test
-  uv run pytest -s -v
+just test
+# uv run pytest -s -v
 ```
 
 ### Building the package
 
 ```bash
-uv run python -m build
+uv build
 ```
 
 ## License

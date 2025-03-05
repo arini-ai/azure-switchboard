@@ -1,6 +1,4 @@
-import logging
-
 from .client import Client, Deployment
-from .switchboard import Switchboard
+from .switchboard import Switchboard, SwitchboardError
 
-__all__ = ["Deployment", "Client", "Switchboard"]
+__all__ = ["Deployment", "Client", "Switchboard", "SwitchboardError"]

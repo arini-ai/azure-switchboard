@@ -1,14 +1,11 @@
 set fallback
 
-bootstrap:
+install:
   uv sync --frozen
-  grep -q "AZURE_OPENAI_ENDPOINT" .env || echo "please set AZURE_OPENAI_ENDPOINT in .env"
-  grep -q "AZURE_OPENAI_API_KEY" .env || echo "please set AZURE_OPENAI_API_KEY in .env"
-
-install-ci:
-  uv sync --frozen --dev
 
 demo:
+  grep -q "AZURE_OPENAI_ENDPOINT" .env || echo "please set AZURE_OPENAI_ENDPOINT in .env"
+  grep -q "AZURE_OPENAI_API_KEY" .env || echo "please set AZURE_OPENAI_API_KEY in .env"
   uv run --env-file .env tools/api_demo.py
 
 test *args='':
@@ -19,9 +16,3 @@ lint:
 
 bump-version *args='':
   uv run bumpver update {{args}}
-
-build *args='':
-  uv build {{args}}
-
-publish *args='':
-  uv publish {{args}}
