@@ -87,9 +87,9 @@ MOCK_COMPLETION = ChatCompletion(
     model="gpt-4o-mini",
     object="chat.completion",
     usage=CompletionUsage(
-        completion_tokens=10,
-        prompt_tokens=20,
-        total_tokens=30,
+        completion_tokens=3,
+        prompt_tokens=8,
+        total_tokens=11,
     ),
 )
 
@@ -132,24 +132,24 @@ TEST_DEPLOYMENT_3 = Deployment(
     name="test3",
     api_base="https://test3.openai.azure.com/",
     api_key="test3",
-    tpm_ratelimit=1000,
-    rpm_ratelimit=6,
+    tpm_ratelimit=10000,
+    rpm_ratelimit=60,
 )
 
 TEST_DEPLOYMENT_2 = Deployment(
     name="test2",
     api_base="https://test2.openai.azure.com/",
     api_key="test2",
-    tpm_ratelimit=1000,
-    rpm_ratelimit=6,
+    tpm_ratelimit=10000,
+    rpm_ratelimit=60,
 )
 
 TEST_DEPLOYMENT_1 = Deployment(
     name="test1",
     api_base="https://test1.openai.azure.com/",
     api_key="test1",
-    tpm_ratelimit=1000,
-    rpm_ratelimit=6,
+    tpm_ratelimit=10000,
+    rpm_ratelimit=60,
 )
 
 

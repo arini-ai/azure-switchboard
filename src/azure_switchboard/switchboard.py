@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import random
+from collections import OrderedDict
 from typing import Callable, Dict, Literal, overload
 
 from openai import AsyncStream
@@ -35,7 +36,7 @@ class Switchboard:
             stop=stop_after_attempt(2),
         )
 
-        self._sessions = {}
+        self._sessions = LRUDict(max_size=1024)
 
     def start(self) -> None:
         # Start background tasks if intervals are positive
@@ -168,3 +169,26 @@ class Switchboard:
 
     def __repr__(self) -> str:
         return f"Switchboard({self.get_usage()})"
+
+
+# borrowed from https://gist.github.com/davesteele/44793cd0348f59f8fadd49d7799bd306
+class LRUDict(OrderedDict):
+    def __init__(self, *args, max_size: int = 1024, **kwargs):
+        assert max_size > 0
+        self.max_size = max_size
+
+        super().__init__(*args, **kwargs)
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        super().move_to_end(key)
+
+        while len(self) > self.max_size:
+            oldkey = next(iter(self))
+            super().__delitem__(oldkey)
+
+    def __getitem__(self, key):
+        val = super().__getitem__(key)
+        super().move_to_end(key)
+
+        return val

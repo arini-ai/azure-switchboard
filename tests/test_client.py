@@ -62,7 +62,7 @@ async def test_client_completion(mock_client: Client):
     assert response == MOCK_COMPLETION
 
     # Check that token usage was updated
-    assert mock_client.ratelimit_tokens == 30
+    assert mock_client.ratelimit_tokens == 11
     assert mock_client.ratelimit_requests == 1
 
     # test that we handle exceptions properly
@@ -71,7 +71,7 @@ async def test_client_completion(mock_client: Client):
         await mock_client.create(**BASIC_CHAT_COMPLETION_ARGS)
     assert chat_completion_mock.call_count == 2
 
-    assert mock_client.ratelimit_tokens == 30
+    assert mock_client.ratelimit_tokens == 14  # account for preflight estimate
     assert mock_client.ratelimit_requests == 2
 
 
@@ -162,28 +162,28 @@ async def test_client_util(mock_client: Client):
 
     # Get initial utilization (nonzero bc random splay)
     initial_util = mock_client.util
-    assert 0 < initial_util < 0.02
+    assert 0 <= initial_util < 0.02
 
     # Test with some token usage
-    mock_client.ratelimit_tokens = 500  # 50% of TPM limit (1000)
+    mock_client.ratelimit_tokens = 5000  # 50% of TPM limit (10000)
     util_with_tokens = mock_client.util
     assert 0.5 <= util_with_tokens < 0.52  # 50% plus small random factor
 
     # Test with some request usage
     mock_client.ratelimit_tokens = 0
-    mock_client.ratelimit_requests = 3  # 50% of RPM limit (6)
+    mock_client.ratelimit_requests = 30  # 50% of RPM limit (600)
     util_with_requests = mock_client.util
     assert 0.5 <= util_with_requests < 0.52  # 50% plus small random factor
 
     # Test with both token and request usage (should take max)
-    mock_client.ratelimit_tokens = 600  # 60% of TPM
-    mock_client.ratelimit_requests = 3  # 50% of RPM
+    mock_client.ratelimit_tokens = 6000  # 60% of TPM
+    mock_client.ratelimit_requests = 30  # 50% of RPM
     util_with_both = mock_client.util
     assert 0.6 <= util_with_both < 0.62  # 60% (max) plus small random factor
 
-    # Test with unhealthy client (should be infinity)
+    # Test with unhealthy client (should be 1)
     mock_client.cooldown()
-    assert mock_client.util == float("inf")
+    assert mock_client.util == 1
 
 
 @pytest.fixture
@@ -244,8 +244,8 @@ async def test_client_concurrent_requests(mock_client: Client):
     # Verify the mock was called the correct number of times
     assert chat_completion_mock.call_count == num_requests
 
-    # Verify token usage was tracked correctly (30 tokens per request from MOCK_COMPLETION)
-    assert mock_client.ratelimit_tokens == 30 * num_requests
+    # Verify token usage was tracked correctly (11 total tokens per request from MOCK_COMPLETION)
+    assert mock_client.ratelimit_tokens == 11 * num_requests
     assert mock_client.ratelimit_requests == num_requests
 
     # Test error handling in concurrent requests

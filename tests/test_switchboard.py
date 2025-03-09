@@ -34,9 +34,6 @@ def mock_switchboard(mock_client):
     )
 
 
-
-
-
 async def test_switchboard_completion(mock_switchboard: Switchboard, mock_client):
     # test basic chat completion
     response = await mock_switchboard.create(**BASIC_CHAT_COMPLETION_ARGS)
@@ -63,29 +60,30 @@ async def test_switchboard_stream(mock_switchboard: Switchboard, mock_client):
     mock_client.chat.completions.create.assert_called_once()
     assert content == "Hello, world!"
 
+
 async def test_switchboard_selection(mock_switchboard: Switchboard):
     # test that we select a deployment
     client = mock_switchboard.select_deployment()
-    assert client.name in mock_switchboard.deployments
+    assert client.config.name in mock_switchboard.deployments
 
     # test that we can select a specific deployment
     client_1 = mock_switchboard.select_deployment(session_id="test")
     client_2 = mock_switchboard.select_deployment(session_id="test")
-    assert client_1.name == client_2.name
+    assert client_1.config.name == client_2.config.name
 
     # test that we fall back to load balancing if the selected deployment is unhealthy
     client_1.cooldown()
     client_3 = mock_switchboard.select_deployment(session_id="test")
-    assert client_3.name != client_1.name
+    assert client_3.config.name != client_1.config.name
 
     # test that sessions support failover
     client_4 = mock_switchboard.select_deployment(session_id="test")
-    assert client_4.name == client_3.name
+    assert client_4.config.name == client_3.config.name
 
     # test that recovery doesn't affect sessions
     await client_1.check_health()
     client_5 = mock_switchboard.select_deployment(session_id="test")
-    assert client_5.name == client_3.name
+    assert client_5.config.name == client_3.config.name
 
 
 async def test_load_distribution_with_session_stickiness(mock_switchboard: Switchboard):
@@ -111,7 +109,7 @@ async def test_load_distribution_with_session_stickiness(mock_switchboard: Switc
         [client.ratelimit_requests for client in mock_switchboard.deployments.values()]
     )
 
-    # If session affinity is working, the distribution will be 10:20:20 instead of 33:33:34
+    # If session affinity is working, the distribution will be 10:20:20 instead of 16:16:18
     assert requests_per_deployment == [10, 20, 20]
 
 
@@ -188,7 +186,7 @@ async def test_load_distribution_session_stickiness_with_fallback(
 async def test_load_distribution_basic(mock_switchboard: Switchboard) -> None:
     """Test that load is distributed across deployments based on utilization"""
 
-    # Reset usage counters
+    # Reset usage counters and bump limits
     mock_switchboard.reset_usage()
 
     # Make 100 requests
@@ -248,8 +246,11 @@ async def test_load_distribution_with_unhealthy_deployment(
 async def test_load_distribution_large_scale(mock_switchboard: Switchboard):
     """Test load distribution at scale with 1000 requests"""
 
-    # Reset usage counters
+    # Reset usage counters and bump limits
     mock_switchboard.reset_usage()
+    for client in mock_switchboard.deployments.values():
+        client.config.tpm_ratelimit *= 10
+        client.config.rpm_ratelimit *= 10
 
     # Make 1000 requests concurrently
     tasks = []
@@ -315,24 +316,24 @@ async def test_load_distribution_proportional_to_ratelimits(
     d2 = mock_switchboard.deployments["test2"]
     d3 = mock_switchboard.deployments["test3"]
 
-    d1.config.tpm_ratelimit = 1000
-    d1.config.rpm_ratelimit = 6
-    d2.config.tpm_ratelimit = 2000
-    d2.config.rpm_ratelimit = 12
-    d3.config.tpm_ratelimit = 3000
-    d3.config.rpm_ratelimit = 18
+    d1.config.tpm_ratelimit *= 1
+    d1.config.rpm_ratelimit *= 1
+    d2.config.tpm_ratelimit *= 2
+    d2.config.rpm_ratelimit *= 2
+    d3.config.tpm_ratelimit *= 3
+    d3.config.rpm_ratelimit *= 3
 
-    # Make 100 requests
-    for _ in range(100):
+    # Make 150 requests (keep the math clean)
+    for _ in range(150):
         await mock_switchboard.create(**BASIC_CHAT_COMPLETION_ARGS)
 
     # Verify that the deployments were used proportionally, 10% error margin
-    def within_margin(a, b, margin):
+    def within_margin(a, b, margin) -> bool:
         return a * (1 - margin) <= b <= a * (1 + margin)
 
-    assert within_margin(100 * (1 / 6), d1.ratelimit_requests, margin=0.1)
-    assert within_margin(100 * (2 / 6), d2.ratelimit_requests, margin=0.1)
-    assert within_margin(100 * (3 / 6), d3.ratelimit_requests, margin=0.1)
+    assert within_margin(150 * (1 / 6), d1.ratelimit_requests, margin=0.1)
+    assert within_margin(150 * (2 / 6), d2.ratelimit_requests, margin=0.1)
+    assert within_margin(150 * (3 / 6), d3.ratelimit_requests, margin=0.1)
 
 
 async def test_load_distribution_dynamic_rebalancing(mock_switchboard: Switchboard):

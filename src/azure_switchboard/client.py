@@ -29,27 +29,16 @@ class Client:
     """Runtime state of a deployment"""
 
     def __init__(self, config: Deployment, client: AsyncAzureOpenAI) -> None:
-        self.name = config.name
         self.config = config
         self.client = client
-        self._cooldown_until = time.time()
+        self._cooldown_until = 0
 
         self.ratelimit_tokens = 0
         self.ratelimit_requests = 0
-        self.last_reset = time.time()
-
-    def __str__(self):
-        ents = {
-            "name": self.name,
-            "healthy": self.healthy,
-            "tokens": self.ratelimit_tokens,
-            "requests": self.ratelimit_requests,
-            "util": self.util,
-        }
-        return f"Client({', '.join([f'{k}={v}' for k, v in ents.items()])})"
+        self.last_reset = 0
 
     def __repr__(self) -> str:
-        return f"Client(name={self.name}, util={self.util})"
+        return f"Client(name={self.config.name}, util={self.util})"
 
     def cooldown(self, seconds: int = 0) -> None:
         self._cooldown_until = time.time() + (seconds or self.config.cooldown_period)
@@ -59,18 +48,19 @@ class Client:
 
     @property
     def healthy(self) -> bool:
-        # wait for cooldown period on error
-        return time.time() >= self._cooldown_until
+        # the deployment is healthy if we have available capacity
+        # to serve requests
+        return self.util < 1
 
     @property
     def util(self) -> float:
         """
-        Calculate the load weight of this client.
+        Calculate the load weight of this client as a value between 0 and 1.
         Lower weight means this client is a better choice for new requests.
         """
-        # If not healthy, return infinity (never choose)
-        if not self.healthy:
-            return float("inf")
+        # return full utilization if we're cooling down to avoid selection
+        if time.time() < self._cooldown_until:
+            return 1
 
         # Calculate token utilization (as a percentage of max)
         token_util = (
@@ -134,6 +124,10 @@ class Client:
         """
 
         self.ratelimit_requests += 1
+        # add input token estimate before we send the request so utilization is
+        # kept up to date for concurrent requests.
+        _preflight_util_estimate = self._estimate_input_tokens(kwargs["messages"])
+        self.ratelimit_tokens += _preflight_util_estimate
 
         kwargs["timeout"] = kwargs.get("timeout", self.config.timeout)
         try:
@@ -148,39 +142,65 @@ class Client:
                     **kwargs,
                 )
 
-                return WrappedAsyncStream(response, self)
+                # streaming util gets updated inside the WrappedAsyncStream
+                return _WrappedAsyncStream(
+                    response, self, usage_adjustment=_preflight_util_estimate
+                )
 
             else:
                 logging.debug("Creating chat completion")
-                response = await self.client.chat.completions.create(**kwargs)
+                response = cast(
+                    ChatCompletion, await self.client.chat.completions.create(**kwargs)
+                )
                 if response.usage:
                     logging.debug("Chat completion usage: %s", response.usage)
-                    self.ratelimit_tokens += response.usage.total_tokens
+                    self.ratelimit_tokens += (
+                        # dont double-count our preflight estimate
+                        response.usage.total_tokens - _preflight_util_estimate
+                    )
 
                 return response
         except Exception as e:
             self.cooldown()
             raise e
 
+    def _estimate_input_tokens(self, messages: list[dict]) -> int:
+        # loose estimate of input token count. openai says roughly 4
+        # characters per token, so sum len of messages and divide by 4.
+        return sum(len(m.get("content", "")) for m in messages) // 4
 
-class WrappedAsyncStream(wrapt.ObjectProxy):
+
+class _WrappedAsyncStream(wrapt.ObjectProxy):
     """Wrap an openai.AsyncStream to track usage"""
 
-    def __init__(self, wrapped: AsyncStream[ChatCompletionChunk], runtime: Client):
-        super(WrappedAsyncStream, self).__init__(wrapped)
+    def __init__(
+        self,
+        wrapped: AsyncStream[ChatCompletionChunk],
+        runtime: Client,
+        usage_adjustment: int = 0,
+    ):
+        super(_WrappedAsyncStream, self).__init__(wrapped)
         self._self_runtime = runtime
+        self._self_adjustment = usage_adjustment
 
     async def __anext__(self) -> ChatCompletionChunk:
         chunk: ChatCompletionChunk = await self.__wrapped__.__anext__()
         if chunk.usage:
-            self._self_runtime.ratelimit_tokens += chunk.usage.total_tokens
+            self._self_runtime.ratelimit_tokens += (
+                # dont double-count our preflight estimate
+                chunk.usage.total_tokens - self._self_adjustment
+            )
         return chunk
 
     async def __aiter__(self) -> AsyncIterator[ChatCompletionChunk]:
         async for chunk in self.__wrapped__:
             chunk = cast(ChatCompletionChunk, chunk)
+            # only the last chunk contains the usage info
             if chunk.usage:
-                self._self_runtime.ratelimit_tokens += chunk.usage.total_tokens
+                self._self_runtime.ratelimit_tokens += (
+                    # dont double-count our preflight estimate
+                    chunk.usage.total_tokens - self._self_adjustment
+                )
             yield chunk
 
 
