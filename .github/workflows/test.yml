@@ -1,9 +1,8 @@
 name: Test
 
 on:
-  push:
-    branches: [master]
-  pull_request:
+  workflow_call:
+  pull_request:  # Run on PRs
     branches: [master]
   workflow_dispatch:
 
@@ -29,8 +28,8 @@ jobs:
       - name: Install dependencies
         run: just install
 
-      - name: Lint with ruff
-        run: just lint
-
       - name: Test with pytest
         run: just test
+
+      - name: Lint with ruff
+        run: just lint

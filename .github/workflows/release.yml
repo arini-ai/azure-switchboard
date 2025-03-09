@@ -1,4 +1,4 @@
-name: Bump Version
+name: Bump Version and Release
 
 on:
   push:
@@ -8,10 +8,14 @@ on:
   workflow_dispatch:
 
 jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+
   bump-version:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
-      contents: write # For pushing tag and commit
+      contents: write # For pushing tag, commit and creating release
 
     # Only run if push is from a human (not another workflow)
     if: github.actor != 'github-actions[bot]' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
@@ -50,3 +54,17 @@ jobs:
         run: |
           git push
           git push origin ${{ env.PACKAGE_VERSION }}
+
+      - name: Build package
+        run: uv build
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create
+          "${{ env.PACKAGE_VERSION }}"
+          --repo "$GITHUB_REPOSITORY"
+          --title "${{ env.PACKAGE_VERSION }}"
+          --generate-notes
+          dist/*
