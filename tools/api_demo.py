@@ -76,11 +76,12 @@ async def main() -> None:
     rprint(switchboard.get_usage())
 
     rprint("# Distribute 100 completions, 1:2:3 ratio")
-    d2.tpm_ratelimit *= 2
-    d2.rpm_ratelimit *= 2
-
-    d3.tpm_ratelimit *= 3
-    d3.rpm_ratelimit *= 3
+    d1.tpm_ratelimit *= 10
+    d1.rpm_ratelimit *= 10
+    d2.tpm_ratelimit *= 20
+    d2.rpm_ratelimit *= 20
+    d3.tpm_ratelimit *= 30
+    d3.rpm_ratelimit *= 30
     await distribute_N(switchboard, 100)
     rprint(switchboard.get_usage())
 

@@ -29,62 +29,62 @@ See `tools/readme_example.py` for a runnable example.
 
 ```python
 import asyncio
+import os
 from contextlib import asynccontextmanager
-from azure_switchboard import Switchboard, Deployment
-
 from uuid import uuid4
+
+from azure_switchboard import Deployment, Switchboard
+
+# use demo parameters from environment if available
+if not (api_base := os.getenv("AZURE_OPENAI_ENDPOINT")):
+    api_base = "https://your-deployment1.openai.azure.com/"
+if not (api_key := os.getenv("AZURE_OPENAI_API_KEY")):
+    api_key = "your-api-key"
 
 # Define deployments
 deployments = [
     Deployment(
-        name="d1",
-        api_base="https://your-deployment1.openai.azure.com/",
-        api_key="your-api-key",
-        # optionally specify ratelimits
-        rpm_ratelimit=60,
-        tpm_ratelimit=100000,
+        name="east",
+        api_base=api_base,
+        api_key=api_key,
     ),
     Deployment(
-        name="d2",
-        api_base="https://your-deployment2.openai.azure.com/",
-        api_key="your-api-key2",
-        rpm_ratelimit=60,
-        tpm_ratelimit=100000,
+        name="west",
+        # re-use the keys here since the switchboard
+        # implementation doesn't know about it
+        api_base=api_base,
+        api_key=api_key,
     ),
     Deployment(
-        name="d3",
-        api_base="https://your-deployment3.openai.azure.com/",
-        api_key="your-api-key3",
-        rpm_ratelimit=60,
-        tpm_ratelimit=100000,
+        name="south",
+        api_base=api_base,
+        api_key=api_key,
     ),
 ]
 
+
 @asynccontextmanager
 async def init_switchboard():
-    """Wrap client initialization in a context manager for automatic cleanup.
+    """Use a pattern analogous to FastAPI dependency injection for automatic cleanup."""
 
-    Analogous to FastAPI dependency injection.
-    """
+    # Create Switchboard with deployments
+    switchboard = Switchboard(deployments)
+
+    # Start background tasks
+    # (healthchecks, ratelimiting)
+    switchboard.start()
 
     try:
-        # Create Switchboard with deployments
-        switchboard = Switchboard(deployments)
-
-        # Start background tasks
-        # (healthchecks, ratelimiting)
-        switchboard.start()
-
         yield switchboard
     finally:
         await switchboard.stop()
 
+
 async def basic_functionality(switchboard: Switchboard):
     # Make a completion request (non-streaming)
     response = await switchboard.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": "Hello, world!"}]
-        )
+        model="gpt-4o-mini", messages=[{"role": "user", "content": "Hello, world!"}]
+    )
 
     print(response.choices[0].message.content)
 
@@ -92,7 +92,7 @@ async def basic_functionality(switchboard: Switchboard):
     stream = await switchboard.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Hello, world!"}],
-        stream=True
+        stream=True,
     )
 
     async for chunk in stream:
@@ -101,26 +101,30 @@ async def basic_functionality(switchboard: Switchboard):
 
     print()
 
+
 async def session_affinity(switchboard: Switchboard):
     session_id = str(uuid4())
 
     # First message will select a random healthy
     # deployment and associate it with the session_id
-    response = await switchboard.create(
+    _ = await switchboard.create(
         session_id=session_id,
         model="gpt-4o-mini",
-        messages=[{"role": "user", "content": "Who won the World Series in 2020?"}]
+        messages=[{"role": "user", "content": "Who won the World Series in 2020?"}],
     )
 
     # Follow-up requests with the same session_id will route to the same deployment
-    response = await switchboard.create(
+    _ = await switchboard.create(
         session_id=session_id,
         model="gpt-4o-mini",
         messages=[
             {"role": "user", "content": "Who won the World Series in 2020?"},
-            {"role": "assistant", "content": "The Los Angeles Dodgers won the World Series in 2020."},
-            {"role": "user", "content": "Who did they beat?"}
-        ]
+            {
+                "role": "assistant",
+                "content": "The Los Angeles Dodgers won the World Series in 2020.",
+            },
+            {"role": "user", "content": "Who did they beat?"},
+        ],
     )
 
     # If the deployment becomes unhealthy,
@@ -131,14 +135,15 @@ async def session_affinity(switchboard: Switchboard):
     original_client.cooldown()
 
     # A new deployment will be selected for this session_id
-    response = await switchboard.create(
+    _ = await switchboard.create(
         session_id=session_id,
         model="gpt-4o-mini",
-        messages=[{"role": "user", "content": "Who won the World Series in 2021?"}]
+        messages=[{"role": "user", "content": "Who won the World Series in 2021?"}],
     )
 
     new_client = switchboard.select_deployment(session_id)
     assert new_client != original_client
+
 
 async def main():
     async with init_switchboard() as sb:
@@ -147,6 +152,7 @@ async def main():
 
         print("Session affinity:")
         await session_affinity(sb)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -199,6 +205,11 @@ just test
 ```
 
 ### Building the package
+
+If tests pass, a package is automatically built, released, and uploaded to PyPI on merge to master.
+This library uses CalVer for versioning.
+
+Locally, the package can be built with uv:
 
 ```bash
 uv build
