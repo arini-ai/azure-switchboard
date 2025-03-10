@@ -10,7 +10,7 @@ lint:
   uv run ruff check .
 
 bump-version *args='':
-  uv run --frozen bumpver update {{args}}
+  uv run bumpver update {{args}}
 
 clean:
   find . -name '*.pyc' -delete
