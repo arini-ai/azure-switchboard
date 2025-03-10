@@ -6,53 +6,37 @@ from typing import Annotated, AsyncIterator, Literal, cast, overload
 import wrapt
 from openai import AsyncAzureOpenAI, AsyncStream
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 logger = logging.getLogger(__name__)
 
 
-class Deployment(BaseModel):
-    """Metadata about the Azure deployment"""
+class SwitchboardClientError(Exception):
+    pass
 
-    name: str
-    api_base: str
-    api_key: str
-    api_version: str = "2024-10-21"
-    timeout: float = 600.0
+
+class ModelConfig(BaseModel):
+    """Model-specific configuration on a deployment"""
+
+    model: str = Field(description="Model name")
     tpm_ratelimit: Annotated[int, Field(description="TPM Ratelimit")] = 0
     rpm_ratelimit: Annotated[int, Field(description="RPM Ratelimit")] = 0
-    healthcheck_interval: int = 30
-    cooldown_period: int = 60
 
+    tpm_usage: Annotated[int, Field(description="TPM Usage")] = 0
+    rpm_usage: Annotated[int, Field(description="RPM Usage")] = 0
 
-class Client:
-    """Runtime state of a deployment"""
+    default_cooldown: float = Field(
+        default=60.0, repr=False, description="Default cooldown period in seconds"
+    )
+    _cooldown_until: float = PrivateAttr(default=0)
+    _last_reset: float = PrivateAttr(default=0)
 
-    def __init__(self, config: Deployment, client: AsyncAzureOpenAI) -> None:
-        self.config = config
-        self.client = client
-        self._cooldown_until = 0
-
-        self.ratelimit_tokens = 0
-        self.ratelimit_requests = 0
-        self.last_reset = 0
-
-    def __repr__(self) -> str:
-        return f"Client(name={self.config.name}, util={self.util}, tpm={self.ratelimit_tokens}/{self.config.tpm_ratelimit}, rpm={self.ratelimit_requests}/{self.config.rpm_ratelimit})"
-
-    def cooldown(self, seconds: int = 0) -> None:
-        self._cooldown_until = time.time() + (seconds or self.config.cooldown_period)
+    def cooldown(self, seconds: float = 0.0) -> None:
+        self._cooldown_until = time.time() + (seconds or self.default_cooldown)
 
     def reset_cooldown(self) -> None:
         self._cooldown_until = 0
 
-    @property
-    def healthy(self) -> bool:
-        # the deployment is healthy if we have available capacity
-        # to serve requests
-        return self.util < 1
-
-    @property
     def util(self) -> float:
         """
         Calculate the load weight of this client as a value between 0 and 1.
@@ -64,58 +48,89 @@ class Client:
 
         # Calculate token utilization (as a percentage of max)
         token_util = (
-            self.ratelimit_tokens / self.config.tpm_ratelimit
-            if self.config.tpm_ratelimit > 0
-            else 0
+            self.tpm_usage / self.tpm_ratelimit if self.tpm_ratelimit > 0 else 0
         )
 
         # Azure allocates RPM at a ratio of 6:1000 to TPM
         request_util = (
-            self.ratelimit_requests / self.config.rpm_ratelimit
-            if self.config.rpm_ratelimit > 0
-            else 0
+            self.rpm_usage / self.rpm_ratelimit if self.rpm_ratelimit > 0 else 0
         )
 
         # Use the higher of the two utilizations as the weight
         # Add a small random factor to prevent oscillation
         return round(max(token_util, request_util) + random.uniform(0, 0.01), 3)
 
-    async def check_health(self):
-        try:
-            logger.debug(f"{self}: checking health")
-            await self.client.models.list()
-            # maybe bring back cooldown reset when have a better HC
-            # self.reset_cooldown()
-        except Exception:
-            logger.exception(f"{self}: health check failed")
-            self.cooldown()
+    def is_healthy(self) -> bool:
+        """
+        Check if the model is healthy based on utilization.
+        """
+        return self.util() < 1
 
-    def reset_counters(self):
-        """Reset usage counters - should be called periodically"""
+    def reset_usage(self) -> None:
+        """Call periodically to reset usage counters"""
 
         logger.debug(f"{self}: resetting ratelimit counters")
-        self.ratelimit_tokens = 0
-        self.ratelimit_requests = 0
-        self.last_reset = time.time()
+        self.tpm_usage = 0
+        self.rpm_usage = 0
+        self._last_reset = time.time()
 
-    def get_counters(self) -> dict[str, int | float | str]:
+    def get_usage(self) -> dict[str, str | float]:
         return {
-            "util": self.util,
-            "tokens": self.ratelimit_tokens,
-            "requests": self.ratelimit_requests,
+            "util": self.util(),
+            "tpm": f"{self.tpm_usage}/{self.tpm_ratelimit}",
+            "rpm": f"{self.rpm_usage}/{self.rpm_ratelimit}",
         }
+
+
+class Deployment(BaseModel):
+    """Metadata about the Azure deployment"""
+
+    name: str
+    api_base: str
+    api_key: str
+    api_version: str = "2024-10-21"
+    timeout: float = 600.0
+    healthcheck_interval: int = 30
+    cooldown_period: int = 60
+    models: dict[str, ModelConfig] = Field(default_factory=dict)
+
+
+class Client:
+    """Runtime state of a deployment"""
+
+    def __init__(self, config: Deployment, client: AsyncAzureOpenAI) -> None:
+        self.config = config
+        self.client = client
+
+    def __repr__(self) -> str:
+        models = {m.model: m.get_usage() for m in self.config.models.values()}
+        return f"Client(name={self.config.name}, models={models}])"
+
+    def reset_usage(self) -> None:
+        for model in self.config.models.values():
+            model.reset_usage()
+
+    def get_usage(self) -> dict[str, dict]:
+        return {m.model: m.get_usage() for m in self.config.models.values()}
+
+    def is_healthy(self, model: str) -> bool:
+        return self.config.models[model].is_healthy()
+
+    def util(self, model: str) -> float:
+        return self.config.models[model].util()
 
     @overload
     async def create(
-        self, *, stream: Literal[True], **kwargs
+        self, *, model: str, stream: Literal[True], **kwargs
     ) -> AsyncStream[ChatCompletionChunk]: ...
 
     @overload
-    async def create(self, **kwargs) -> ChatCompletion: ...
+    async def create(self, *, model: str, **kwargs) -> ChatCompletion: ...
 
     async def create(
         self,
         *,
+        model: str,
         stream: bool = False,
         **kwargs,
     ) -> ChatCompletion | AsyncStream[ChatCompletionChunk]:
@@ -124,11 +139,16 @@ class Client:
         Tracks usage metrics for load balancing.
         """
 
-        self.ratelimit_requests += 1
+        if model not in self.config.models:
+            raise SwitchboardClientError(f"{model} not configured for deployment")
+
+        model_stats = self.config.models[model]
+
+        model_stats.rpm_usage += 1
         # add input token estimate before we send the request so utilization is
         # kept up to date for concurrent requests.
-        _preflight_util_estimate = self._estimate_input_tokens(kwargs["messages"])
-        self.ratelimit_tokens += _preflight_util_estimate
+        _preflight_estimate = self._estimate_input_tokens(kwargs["messages"])
+        model_stats.tpm_usage += _preflight_estimate
 
         kwargs["timeout"] = kwargs.get("timeout", self.config.timeout)
         try:
@@ -136,8 +156,9 @@ class Client:
                 stream_options = kwargs.pop("stream_options", {})
                 stream_options["include_usage"] = True
 
-                logging.debug("Creating chat completion stream")
+                logging.debug("Creating streaming completion")
                 response = await self.client.chat.completions.create(
+                    model=model,
                     stream=True,
                     stream_options=stream_options,
                     **kwargs,
@@ -145,24 +166,24 @@ class Client:
 
                 # streaming util gets updated inside the WrappedAsyncStream
                 return _WrappedAsyncStream(
-                    response, self, usage_adjustment=_preflight_util_estimate
+                    response, model_stats, usage_adjustment=_preflight_estimate
                 )
 
             else:
                 logging.debug("Creating chat completion")
                 response = cast(
-                    ChatCompletion, await self.client.chat.completions.create(**kwargs)
+                    ChatCompletion,
+                    await self.client.chat.completions.create(model=model, **kwargs),
                 )
                 if response.usage:
-                    logging.debug("Chat completion usage: %s", response.usage)
-                    self.ratelimit_tokens += (
+                    model_stats.tpm_usage += (
                         # dont double-count our preflight estimate
-                        response.usage.total_tokens - _preflight_util_estimate
+                        response.usage.total_tokens - _preflight_estimate
                     )
 
                 return response
         except Exception as e:
-            self.cooldown()
+            model_stats.cooldown()
             raise e
 
     def _estimate_input_tokens(self, messages: list[dict]) -> int:
@@ -177,7 +198,7 @@ class _WrappedAsyncStream(wrapt.ObjectProxy):
     def __init__(
         self,
         wrapped: AsyncStream[ChatCompletionChunk],
-        runtime: Client,
+        runtime: ModelConfig,
         usage_adjustment: int = 0,
     ):
         super(_WrappedAsyncStream, self).__init__(wrapped)
@@ -187,7 +208,7 @@ class _WrappedAsyncStream(wrapt.ObjectProxy):
     async def __anext__(self) -> ChatCompletionChunk:
         chunk: ChatCompletionChunk = await self.__wrapped__.__anext__()
         if chunk.usage:
-            self._self_runtime.ratelimit_tokens += (
+            self._self_runtime.tpm_usage += (
                 # dont double-count our preflight estimate
                 chunk.usage.total_tokens - self._self_adjustment
             )
@@ -198,7 +219,7 @@ class _WrappedAsyncStream(wrapt.ObjectProxy):
             chunk = cast(ChatCompletionChunk, chunk)
             # only the last chunk contains the usage info
             if chunk.usage:
-                self._self_runtime.ratelimit_tokens += (
+                self._self_runtime.tpm_usage += (
                     # dont double-count our preflight estimate
                     chunk.usage.total_tokens - self._self_adjustment
                 )
@@ -210,6 +231,7 @@ def azure_client_factory(deployment: Deployment) -> AsyncAzureOpenAI:
         azure_endpoint=deployment.api_base,
         api_key=deployment.api_key,
         api_version=deployment.api_version,
+        timeout=deployment.timeout,
     )
 
 

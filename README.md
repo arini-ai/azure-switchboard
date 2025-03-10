@@ -215,6 +215,10 @@ Locally, the package can be built with uv:
 uv build
 ```
 
+# TODO
+
+* add fallback to openai
+
 ## License
 
 MIT

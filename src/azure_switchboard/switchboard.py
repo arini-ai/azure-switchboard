@@ -40,11 +40,6 @@ class Switchboard:
 
     def start(self) -> None:
         # Start background tasks if intervals are positive
-        self.healthcheck_task = (
-            asyncio.create_task(self.periodically_check_health())
-            if self.healthcheck_interval > 0
-            else None
-        )
 
         self.ratelimit_reset_task = (
             asyncio.create_task(self.periodically_reset_usage())
@@ -53,27 +48,13 @@ class Switchboard:
         )
 
     async def stop(self):
-        for task in [self.healthcheck_task, self.ratelimit_reset_task]:
+        for task in [self.ratelimit_reset_task]:
             if task:
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
                     pass
-
-    async def periodically_check_health(self):
-        """Periodically check the health of all deployments"""
-
-        async def _check_health(client: Client):
-            # splay outbound requests by a little bit
-            await asyncio.sleep(random.uniform(0, 1))
-            await client.check_health()
-
-        while True:
-            await asyncio.sleep(self.healthcheck_interval)
-            await asyncio.gather(
-                *[_check_health(client) for client in self.deployments.values()]
-            )
 
     async def periodically_reset_usage(self):
         """Periodically reset usage counters on all clients.
@@ -86,14 +67,12 @@ class Switchboard:
 
     def reset_usage(self) -> None:
         for client in self.deployments.values():
-            client.reset_counters()
+            client.reset_usage()
 
     def get_usage(self) -> dict[str, dict]:
-        return {
-            name: client.get_counters() for name, client in self.deployments.items()
-        }
+        return {name: client.get_usage() for name, client in self.deployments.items()}
 
-    def select_deployment(self, session_id: str | None = None) -> Client:
+    def select_deployment(self, model: str, session_id: str | None = None) -> Client:
         """
         Select a deployment using the power of two random choices algorithm.
         If session_id is provided, try to use that specific deployment first.
@@ -101,14 +80,16 @@ class Switchboard:
         # Handle session-based routing first
         if session_id and session_id in self._sessions:
             client = self._sessions[session_id]
-            if client.healthy:
+            if client.is_healthy(model):
                 logger.debug(f"Reusing {client} for session {session_id}")
                 return client
 
             logger.warning(f"{client} is unhealthy, falling back to selection")
 
-        # Get healthy deployments
-        healthy_deployments = [c for c in self.deployments.values() if c.healthy]
+        # Get healthy deployments for the requested model
+        healthy_deployments = list(
+            filter(lambda d: d.is_healthy(model), self.deployments.values())
+        )
         if not healthy_deployments:
             raise SwitchboardError("No healthy deployments available")
 
@@ -118,8 +99,8 @@ class Switchboard:
         # Power of two random choices
         choices = random.sample(healthy_deployments, min(2, len(healthy_deployments)))
 
-        # Select the client with the lower weight (lower weight = better choice)
-        selected = min(choices, key=lambda c: c.util)
+        # Select the client with the lower utilization for the model
+        selected = min(choices, key=lambda d: d.util(model))
         logger.debug(f"Selected {selected}")
 
         if session_id:
@@ -140,6 +121,7 @@ class Switchboard:
     async def create(
         self,
         *,
+        model: str,
         session_id: str | None = None,
         stream: bool = False,
         **kwargs,
@@ -151,9 +133,9 @@ class Switchboard:
         try:
             async for attempt in self.fallback_policy:
                 with attempt:
-                    client = self.select_deployment(session_id)
+                    client = self.select_deployment(model, session_id)
                     logger.debug(f"Sending completion request to {client}")
-                    return await client.create(stream=stream, **kwargs)
+                    return await client.create(model=model, stream=stream, **kwargs)
         except RetryError as e:
             raise SwitchboardError("All attempts failed") from e
         except asyncio.CancelledError:
@@ -161,11 +143,6 @@ class Switchboard:
 
         # we should never reach here
         raise SwitchboardError("Unexpected error")
-
-    async def stream(
-        self, *, session_id: str | None = None, **kwargs
-    ) -> AsyncStream[ChatCompletionChunk]:
-        return await self.create(stream=True, session_id=session_id, **kwargs)
 
     def __repr__(self) -> str:
         return f"Switchboard({self.get_usage()})"
