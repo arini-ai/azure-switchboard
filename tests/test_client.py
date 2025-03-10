@@ -4,14 +4,12 @@ import openai
 import pytest
 import respx
 from fixtures import (
-    BASIC_CHAT_COMPLETION_ARGS,
     MOCK_COMPLETION,
-    MOCK_COMPLETION_PARSED,
-    MOCK_COMPLETION_RAW,
     MOCK_STREAM_CHUNKS,
     TEST_DEPLOYMENT_1,
 )
 from httpx import Response, TimeoutException
+from openai.types.chat import ChatCompletion
 from utils import BaseTestCase, create_mock_openai_client
 
 from azure_switchboard import Client, ModelConfig
@@ -26,24 +24,7 @@ def mock_client() -> Client:
 
 
 class TestClient(BaseTestCase):
-    """Basic client functionality tests."""
-
-    # async def test_healthcheck(self, mock_client):
-    #     """Test basic healthcheck functionality."""
-    #     # Test basic healthcheck
-    #     await mock_client.check_health()
-    #     assert mock_client.client.models.list.call_count == 1
-    #     assert mock_client.healthy
-
-    #     # Test healthcheck failure
-    #     mock_client.client.models.list.side_effect = Exception("test")
-    #     await mock_client.check_health()
-    #     assert not mock_client.healthy
-    #     assert mock_client.client.models.list.call_count == 2
-
-    #     # Test cooldown reset allows recovery
-    #     mock_client.reset_cooldown()
-    #     assert mock_client.healthy
+    """Client functionality tests."""
 
     def _get_model(self, client: Client, model: str) -> ModelConfig:
         return client.config.models[model]
@@ -105,7 +86,7 @@ class TestClient(BaseTestCase):
         # Test exception handling
         mock_client.client.chat.completions.create.side_effect = Exception("test")
         with pytest.raises(Exception, match="test"):
-            stream = await mock_client.create(stream=True, **BASIC_CHAT_COMPLETION_ARGS)
+            stream = await mock_client.create(stream=True, **self.basic_args)
             async for _ in stream:
                 pass
         assert mock_client.client.chat.completions.create.call_count == 2
@@ -205,8 +186,8 @@ class TestClient(BaseTestCase):
             TimeoutException("Timeout 2"),
             expected_response,
         ]
-        response = await test_client.create(**BASIC_CHAT_COMPLETION_ARGS)
-        assert response == MOCK_COMPLETION_PARSED
+        response = await test_client.create(**self.basic_args)
+        assert response == ChatCompletion.model_validate(MOCK_COMPLETION_RAW)
         assert d1_mock.routes["completion"].call_count == 3
 
         # Test failure after max retries
@@ -218,6 +199,40 @@ class TestClient(BaseTestCase):
         ]
 
         with pytest.raises(openai.APITimeoutError):
-            await test_client.create(**BASIC_CHAT_COMPLETION_ARGS)
+            await test_client.create(**self.basic_args)
         assert d1_mock.routes["completion"].call_count == 3
         assert not test_client.is_healthy("gpt-4o-mini")
+
+
+MOCK_COMPLETION_RAW = {
+    "choices": [
+        {
+            "finish_reason": "stop",
+            "index": 0,
+            "logprobs": None,
+            "message": {
+                "content": "Hello! How can I assist you today?",
+                "refusal": None,
+                "role": "assistant",
+            },
+        }
+    ],
+    "created": 1741124380,
+    "id": "chatcmpl-test",
+    "model": "gpt-4o-mini",
+    "object": "chat.completion",
+    "service_tier": "default",
+    "system_fingerprint": "fp_06737a9306",
+    "usage": {
+        "completion_tokens": 10,
+        "completion_tokens_details": {
+            "accepted_prediction_tokens": 0,
+            "audio_tokens": 0,
+            "reasoning_tokens": 0,
+            "rejected_prediction_tokens": 0,
+        },
+        "prompt_tokens": 8,
+        "prompt_tokens_details": {"audio_tokens": 0, "cached_tokens": 0},
+        "total_tokens": 18,
+    },
+}

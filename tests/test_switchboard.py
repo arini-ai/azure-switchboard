@@ -2,7 +2,6 @@ import asyncio
 
 import pytest
 from fixtures import (
-    BASIC_CHAT_COMPLETION_ARGS,
     MOCK_COMPLETION,
     TEST_DEPLOYMENT_1,
     TEST_DEPLOYMENT_2,
@@ -185,7 +184,7 @@ class TestSwitchboard(BaseTestCase):
 
         # Make 100 requests
         for _ in range(100):
-            await mock_switchboard.create(**BASIC_CHAT_COMPLETION_ARGS)
+            await mock_switchboard.create(**self.basic_args)
 
         # Verify all deployments were used
         for client in mock_switchboard.deployments.values():
@@ -204,7 +203,7 @@ class TestSwitchboard(BaseTestCase):
 
         # Make 100 requests
         for _ in range(100):
-            await mock_switchboard.create(**BASIC_CHAT_COMPLETION_ARGS)
+            await mock_switchboard.create(**self.basic_args)
 
         # Verify distribution
         assert self._within_bounds(
