@@ -1,5 +1,4 @@
 import asyncio
-from unittest.mock import AsyncMock
 
 import openai
 import pytest
@@ -13,7 +12,7 @@ from fixtures import (
     TEST_DEPLOYMENT_1,
 )
 from httpx import Response, TimeoutException
-from openai.types.chat import ChatCompletionChunk
+from utils import BaseTestCase, create_mock_openai_client
 
 from azure_switchboard import Client
 from azure_switchboard.client import default_client_factory
@@ -21,249 +20,196 @@ from azure_switchboard.client import default_client_factory
 
 @pytest.fixture
 def mock_client() -> Client:
-    client_mock = AsyncMock()
-    return Client(TEST_DEPLOYMENT_1, client=client_mock)
+    """Create a Client instance with a basic mock."""
+    openai_mock = create_mock_openai_client()
+    return Client(TEST_DEPLOYMENT_1, client=openai_mock)
 
 
-@pytest.fixture
-def test_client() -> Client:
-    return default_client_factory(TEST_DEPLOYMENT_1)
+class TestClient(BaseTestCase):
+    """Basic client functionality tests."""
 
+    async def test_healthcheck(self, mock_client):
+        """Test basic healthcheck functionality."""
+        # Test basic healthcheck
+        await mock_client.check_health()
+        assert mock_client.client.models.list.call_count == 1
+        assert mock_client.healthy
 
-async def test_client_healthcheck(mock_client: Client):
-    # test basic healthcheck
-    mock_client.client.models.list = AsyncMock()
-    await mock_client.check_health()
-    assert mock_client.client.models.list.call_count == 1
-    assert mock_client.healthy
+        # Test healthcheck failure
+        mock_client.client.models.list.side_effect = Exception("test")
+        await mock_client.check_health()
+        assert not mock_client.healthy
+        assert mock_client.client.models.list.call_count == 2
 
-    # test basic healthcheck failure
-    mock_client.client.models.list.side_effect = Exception("test")
-    # don't raise the exception, just mark the client as unhealthy
-    await mock_client.check_health()
-    assert not mock_client.healthy
-    assert mock_client.client.models.list.call_count == 2
+        # Test cooldown reset allows recovery
+        mock_client.reset_cooldown()
+        assert mock_client.healthy
 
-    # test cooldown reset allows recovery
-    mock_client.client.models.list.side_effect = None
-    mock_client.reset_cooldown()
-    await mock_client.check_health()
-    assert mock_client.healthy
-    assert mock_client.client.models.list.call_count == 3
+    async def test_completion(self, mock_client):
+        """Test basic chat completion functionality."""
 
+        # Test basic completion
+        response = await mock_client.create(**BASIC_CHAT_COMPLETION_ARGS)
+        assert mock_client.client.chat.completions.create.call_count == 1
+        assert response == MOCK_COMPLETION
 
-async def test_client_completion(mock_client: Client):
-    # Create a mock response with usage information
+        # Check token usage tracking
+        assert mock_client.ratelimit_tokens == 11
+        assert mock_client.ratelimit_requests == 1
 
-    # test basic chat completion
-    chat_completion_mock = AsyncMock(return_value=MOCK_COMPLETION)
-    mock_client.client.chat.completions.create = chat_completion_mock
-    response = await mock_client.create(**BASIC_CHAT_COMPLETION_ARGS)
-    assert chat_completion_mock.call_count == 1
-    assert response == MOCK_COMPLETION
+        # Test exception handling
+        mock_client.client.chat.completions.create.side_effect = Exception("test")
+        with pytest.raises(Exception, match="test"):
+            await mock_client.create(**BASIC_CHAT_COMPLETION_ARGS)
+        assert mock_client.client.chat.completions.create.call_count == 2
 
-    # Check that token usage was updated
-    assert mock_client.ratelimit_tokens == 11
-    assert mock_client.ratelimit_requests == 1
+        assert mock_client.ratelimit_tokens == 14  # account for preflight estimate
+        assert mock_client.ratelimit_requests == 2
 
-    # test that we handle exceptions properly
-    chat_completion_mock.side_effect = Exception("test")
-    with pytest.raises(Exception, match="test"):
-        await mock_client.create(**BASIC_CHAT_COMPLETION_ARGS)
-    assert chat_completion_mock.call_count == 2
+    async def test_streaming(self, mock_client):
+        """Test streaming functionality."""
 
-    assert mock_client.ratelimit_tokens == 14  # account for preflight estimate
-    assert mock_client.ratelimit_requests == 2
-
-
-async def _collect_chunks(stream) -> tuple[list[ChatCompletionChunk], str]:
-    received_chunks = []
-    content = ""
-    async for chunk in stream:
-        received_chunks.append(chunk)
-        if chunk.choices and chunk.choices[0].delta.content:
-            content += chunk.choices[0].delta.content
-    return received_chunks, content
-
-
-async def test_client_stream(mock_client: Client):
-    # Create a mock async generator for streaming
-
-    async def mock_stream():
-        for chunk in MOCK_STREAM_CHUNKS:
-            yield chunk
-
-    # Set up the mock to return our async generator
-    chat_completion_mock = AsyncMock(return_value=mock_stream())
-    mock_client.client.chat.completions.create = chat_completion_mock
-
-    # Test basic streaming
-    stream = await mock_client.create(stream=True, **BASIC_CHAT_COMPLETION_ARGS)
-    assert stream is not None
-
-    # Collect all chunks to verify content
-    received_chunks, content = await _collect_chunks(stream)
-
-    # Verify the stream options were set correctly
-    chat_completion_mock.assert_called_once()
-    call_kwargs = chat_completion_mock.call_args.kwargs
-    assert call_kwargs.get("stream") is True
-    assert call_kwargs.get("stream_options", {}).get("include_usage") is True
-
-    # Verify we received all chunks
-    assert len(received_chunks) == len(MOCK_STREAM_CHUNKS)
-
-    # Verify the content was assembled correctly
-    assert content == "Hello, world!"
-
-    # Verify the token usage was tracked correctly
-    assert mock_client.ratelimit_tokens == 20  # From the last chunk's usage
-    assert mock_client.ratelimit_requests == 1
-
-    # Test exception handling
-    chat_completion_mock.side_effect = Exception("test")
-    with pytest.raises(Exception, match="test"):
         stream = await mock_client.create(stream=True, **BASIC_CHAT_COMPLETION_ARGS)
-        async for chunk in stream:
-            pass
-    assert chat_completion_mock.call_count == 2
-    # Request count should increment even on failure
-    assert mock_client.ratelimit_requests == 2
+        assert stream is not None
 
+        # Collect chunks and verify content
+        received_chunks, content = await self.collect_chunks(stream)
 
-async def test_client_counters(mock_client: Client):
-    # Reset counters
-    mock_client.reset_counters()
-
-    # Verify counters were reset
-    assert mock_client.ratelimit_tokens == 0
-    assert mock_client.ratelimit_requests == 0
-
-    # Set some initial usage values
-    mock_client.ratelimit_tokens = 100
-    mock_client.ratelimit_requests = 5
-
-    # Reset counters
-    counters = mock_client.get_counters()
-    assert counters["tokens"] == 100
-    assert counters["requests"] == 5
-
-    mock_client.reset_counters()
-
-    # Verify counters were reset
-    assert mock_client.ratelimit_tokens == 0
-    assert mock_client.ratelimit_requests == 0
-
-    # Verify last_reset was updated
-    assert mock_client.last_reset > 0
-
-
-async def test_client_util(mock_client: Client):
-    mock_client.reset_counters()
-
-    # Get initial utilization (nonzero bc random splay)
-    initial_util = mock_client.util
-    assert 0 <= initial_util < 0.02
-
-    # Test with some token usage
-    mock_client.ratelimit_tokens = 5000  # 50% of TPM limit (10000)
-    util_with_tokens = mock_client.util
-    assert 0.5 <= util_with_tokens < 0.52  # 50% plus small random factor
-
-    # Test with some request usage
-    mock_client.ratelimit_tokens = 0
-    mock_client.ratelimit_requests = 30  # 50% of RPM limit (600)
-    util_with_requests = mock_client.util
-    assert 0.5 <= util_with_requests < 0.52  # 50% plus small random factor
-
-    # Test with both token and request usage (should take max)
-    mock_client.ratelimit_tokens = 6000  # 60% of TPM
-    mock_client.ratelimit_requests = 30  # 50% of RPM
-    util_with_both = mock_client.util
-    assert 0.6 <= util_with_both < 0.62  # 60% (max) plus small random factor
-
-    # Test with unhealthy client (should be 1)
-    mock_client.cooldown()
-    assert mock_client.util == 1
-
-
-@pytest.fixture
-def d1_mock():
-    with respx.mock(base_url="https://test1.openai.azure.com") as respx_mock:
-        respx_mock.post(
-            "/openai/deployments/gpt-4o-mini/chat/completions",
-            name="completion",
+        # Verify stream options
+        assert (
+            mock_client.client.chat.completions.create.call_args.kwargs.get("stream")
+            is True
         )
-        yield respx_mock
+        assert (
+            mock_client.client.chat.completions.create.call_args.kwargs.get(
+                "stream_options", {}
+            ).get("include_usage")
+            is True
+        )
 
+        # Verify chunk handling
+        assert len(received_chunks) == len(MOCK_STREAM_CHUNKS)
+        assert content == "Hello, world!"
 
-async def test_client_timeout_retry_behavior(d1_mock, test_client: Client):
-    # verify that we retry twice on timeouts
-    expected_response = Response(status_code=200, json=MOCK_COMPLETION_RAW)
-    d1_mock.routes["completion"].side_effect = [
-        TimeoutException("Timeout 1"),
-        TimeoutException("Timeout 2"),
-        expected_response,
-    ]
-    response = await test_client.create(**BASIC_CHAT_COMPLETION_ARGS)
-    assert response == MOCK_COMPLETION_PARSED
-    assert d1_mock.routes["completion"].call_count == 3
+        # Verify token usage tracking
+        assert mock_client.ratelimit_tokens == 20
+        assert mock_client.ratelimit_requests == 1
 
-    d1_mock.routes["completion"].reset()
-    d1_mock.routes["completion"].side_effect = [
-        TimeoutException("Timeout 1"),
-        TimeoutException("Timeout 2"),
-        TimeoutException("Timeout 3"),
-    ]
+        # Test exception handling
+        mock_client.client.chat.completions.create.side_effect = Exception("test")
+        with pytest.raises(Exception, match="test"):
+            stream = await mock_client.create(stream=True, **BASIC_CHAT_COMPLETION_ARGS)
+            async for _ in stream:
+                pass
+        assert mock_client.client.chat.completions.create.call_count == 2
+        assert mock_client.ratelimit_requests == 2
 
-    with pytest.raises(openai.APITimeoutError):
-        await test_client.create(**BASIC_CHAT_COMPLETION_ARGS)
-    assert d1_mock.routes["completion"].call_count == 3
-    # client should be in cooldown and therefore unhealthy
-    assert not test_client.healthy
+    async def test_counters(self, mock_client):
+        """Test counter management."""
+        # Reset and verify initial state
+        mock_client.reset_counters()
+        assert mock_client.ratelimit_tokens == 0
+        assert mock_client.ratelimit_requests == 0
 
+        # Set and verify values
+        mock_client.ratelimit_tokens = 100
+        mock_client.ratelimit_requests = 5
+        counters = mock_client.get_counters()
+        assert counters["tokens"] == 100
+        assert counters["requests"] == 5
 
-async def test_client_concurrent_requests(mock_client: Client):
-    """Test that the client properly handles multiple concurrent requests."""
-    # Setup mock response
-    chat_completion_mock = AsyncMock(return_value=MOCK_COMPLETION)
-    mock_client.client.chat.completions.create = chat_completion_mock
+        # Reset and verify again
+        mock_client.reset_counters()
+        assert mock_client.ratelimit_tokens == 0
+        assert mock_client.ratelimit_requests == 0
+        assert mock_client.last_reset > 0
 
-    # Create multiple concurrent requests
-    num_requests = 10
-    tasks = [
-        mock_client.create(**BASIC_CHAT_COMPLETION_ARGS) for _ in range(num_requests)
-    ]
+    async def test_utilization(self, mock_client):
+        """Test utilization calculation."""
+        mock_client.reset_counters()
 
-    # Run all requests concurrently
-    responses = await asyncio.gather(*tasks)
+        # Check initial utilization (nonzero due to random splay)
+        initial_util = mock_client.util
+        assert 0 <= initial_util < 0.02
 
-    # Verify all requests were successful
-    assert len(responses) == num_requests
-    assert all(r == MOCK_COMPLETION for r in responses)
+        # Test token-based utilization
+        mock_client.ratelimit_tokens = 5000  # 50% of TPM limit
+        util_with_tokens = mock_client.util
+        assert 0.5 <= util_with_tokens < 0.52
 
-    # Verify the mock was called the correct number of times
-    assert chat_completion_mock.call_count == num_requests
+        # Test request-based utilization
+        mock_client.ratelimit_tokens = 0
+        mock_client.ratelimit_requests = 30  # 50% of RPM limit
+        util_with_requests = mock_client.util
+        assert 0.5 <= util_with_requests < 0.52
 
-    # Verify token usage was tracked correctly (11 total tokens per request from MOCK_COMPLETION)
-    assert mock_client.ratelimit_tokens == 11 * num_requests
-    assert mock_client.ratelimit_requests == num_requests
+        # Test combined utilization (should take max)
+        mock_client.ratelimit_tokens = 6000  # 60% of TPM
+        mock_client.ratelimit_requests = 30  # 50% of RPM
+        util_with_both = mock_client.util
+        assert 0.6 <= util_with_both < 0.62
 
-    # Test error handling in concurrent requests
-    mock_client.reset_counters()
-    chat_completion_mock.side_effect = Exception("Test error")
+        # Test unhealthy client
+        mock_client.cooldown()
+        assert mock_client.util == 1
 
-    # Create mixed tasks - some will succeed, some will fail
-    error_tasks = [mock_client.create(**BASIC_CHAT_COMPLETION_ARGS) for _ in range(5)]
+    async def test_concurrency(self, mock_client):
+        """Test handling of multiple concurrent requests."""
 
-    # Run with gather and return_exceptions to not abort on first error
-    error_responses = await asyncio.gather(*error_tasks, return_exceptions=True)
+        # Create and run concurrent requests
+        num_requests = 10
+        tasks = [
+            mock_client.create(**BASIC_CHAT_COMPLETION_ARGS)
+            for _ in range(num_requests)
+        ]
+        responses = await asyncio.gather(*tasks)
 
-    # Verify all responses are exceptions
-    assert all(isinstance(r, Exception) for r in error_responses)
+        # Verify results
+        assert len(responses) == num_requests
+        assert all(r == MOCK_COMPLETION for r in responses)
+        assert mock_client.client.chat.completions.create.call_count == num_requests
+        assert mock_client.ratelimit_tokens == 11 * num_requests
+        assert mock_client.ratelimit_requests == num_requests
 
-    # Verify the client goes into cooldown after errors
-    assert not mock_client.healthy
+    @pytest.fixture
+    def d1_mock(self):
+        with respx.mock(base_url="https://test1.openai.azure.com") as respx_mock:
+            respx_mock.post(
+                "/openai/deployments/gpt-4o-mini/chat/completions",
+                name="completion",
+            )
+            yield respx_mock
 
-    # Verify request count is still tracked
-    assert mock_client.ratelimit_requests == 5
+    @pytest.fixture
+    def test_client(self):
+        """Create a real Client instance using the default factory, but use
+        respx to mock out the underlying httpx client so we can verify
+        the retry logic.
+        """
+        return default_client_factory(TEST_DEPLOYMENT_1)
+
+    async def test_timeout_retry(self, d1_mock, test_client):
+        """Test timeout retry behavior."""
+        # Test successful retry after timeouts
+        expected_response = Response(status_code=200, json=MOCK_COMPLETION_RAW)
+        d1_mock.routes["completion"].side_effect = [
+            TimeoutException("Timeout 1"),
+            TimeoutException("Timeout 2"),
+            expected_response,
+        ]
+        response = await test_client.create(**BASIC_CHAT_COMPLETION_ARGS)
+        assert response == MOCK_COMPLETION_PARSED
+        assert d1_mock.routes["completion"].call_count == 3
+
+        # Test failure after max retries
+        d1_mock.routes["completion"].reset()
+        d1_mock.routes["completion"].side_effect = [
+            TimeoutException("Timeout 1"),
+            TimeoutException("Timeout 2"),
+            TimeoutException("Timeout 3"),
+        ]
+
+        with pytest.raises(openai.APITimeoutError):
+            await test_client.create(**BASIC_CHAT_COMPLETION_ARGS)
+        assert d1_mock.routes["completion"].call_count == 3
+        assert not test_client.healthy

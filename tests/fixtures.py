@@ -1,4 +1,3 @@
-# Create mock streaming chunks for testing
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from openai.types.chat.chat_completion import Choice
 from openai.types.chat.chat_completion_chunk import Choice as ChunkChoice
@@ -7,6 +6,31 @@ from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.completion_usage import CompletionUsage
 
 from azure_switchboard import Deployment
+
+TEST_DEPLOYMENT_1 = Deployment(
+    name="test1",
+    api_base="https://test1.openai.azure.com/",
+    api_key="test1",
+    tpm_ratelimit=10000,
+    rpm_ratelimit=60,
+)
+
+TEST_DEPLOYMENT_2 = Deployment(
+    name="test2",
+    api_base="https://test2.openai.azure.com/",
+    api_key="test2",
+    tpm_ratelimit=10000,
+    rpm_ratelimit=60,
+)
+
+TEST_DEPLOYMENT_3 = Deployment(
+    name="test3",
+    api_base="https://test3.openai.azure.com/",
+    api_key="test3",
+    tpm_ratelimit=10000,
+    rpm_ratelimit=60,
+)
+
 
 MOCK_STREAM_CHUNKS = [
     ChatCompletionChunk(
@@ -127,30 +151,6 @@ MOCK_COMPLETION_RAW = {
 }
 
 MOCK_COMPLETION_PARSED = ChatCompletion.model_validate(MOCK_COMPLETION_RAW)
-
-TEST_DEPLOYMENT_3 = Deployment(
-    name="test3",
-    api_base="https://test3.openai.azure.com/",
-    api_key="test3",
-    tpm_ratelimit=10000,
-    rpm_ratelimit=60,
-)
-
-TEST_DEPLOYMENT_2 = Deployment(
-    name="test2",
-    api_base="https://test2.openai.azure.com/",
-    api_key="test2",
-    tpm_ratelimit=10000,
-    rpm_ratelimit=60,
-)
-
-TEST_DEPLOYMENT_1 = Deployment(
-    name="test1",
-    api_base="https://test1.openai.azure.com/",
-    api_key="test1",
-    tpm_ratelimit=10000,
-    rpm_ratelimit=60,
-)
 
 
 BASIC_CHAT_COMPLETION_ARGS = {
