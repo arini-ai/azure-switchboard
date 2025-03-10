@@ -38,7 +38,7 @@ class Client:
         self.last_reset = 0
 
     def __repr__(self) -> str:
-        return f"Client(name={self.config.name}, util={self.util})"
+        return f"Client(name={self.config.name}, util={self.util}, tpm={self.ratelimit_tokens}/{self.config.tpm_ratelimit}, rpm={self.ratelimit_requests}/{self.config.rpm_ratelimit})"
 
     def cooldown(self, seconds: int = 0) -> None:
         self._cooldown_until = time.time() + (seconds or self.config.cooldown_period)
