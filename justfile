@@ -4,7 +4,7 @@ install:
   uv sync --frozen
 
 test *args='':
-  uv run pytest -s -v {{args}}
+  uv run pytest {{args}}
 
 lint:
   uv run ruff check .
