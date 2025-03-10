@@ -84,7 +84,8 @@ class Client:
         try:
             logger.debug(f"{self}: checking health")
             await self.client.models.list()
-            self.reset_cooldown()
+            # maybe bring back cooldown reset when have a better HC
+            # self.reset_cooldown()
         except Exception:
             logger.exception(f"{self}: health check failed")
             self.cooldown()

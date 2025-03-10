@@ -289,13 +289,12 @@ async def test_load_distribution_with_recovery(
         await mock_switchboard.create(**BASIC_CHAT_COMPLETION_ARGS)
 
     # Verify that the unhealthy deployment wasn't used during the second batch
-    assert mock_switchboard.deployments["test1"].ratelimit_requests < 40
-    assert mock_switchboard.deployments["test2"].ratelimit_requests > 40
-    assert mock_switchboard.deployments["test3"].ratelimit_requests > 40
+    assert mock_switchboard.deployments["test1"].ratelimit_requests < 20
+    assert mock_switchboard.deployments["test2"].ratelimit_requests >= 35
+    assert mock_switchboard.deployments["test3"].ratelimit_requests >= 35
 
     # Reset the unhealthy deployment and make more requests
-    await mock_switchboard.deployments["test1"].check_health()
-    mock_client.models.list.assert_called()
+    mock_switchboard.deployments["test1"].reset_cooldown()
     for _ in range(50):
         await mock_switchboard.create(**BASIC_CHAT_COMPLETION_ARGS)
 

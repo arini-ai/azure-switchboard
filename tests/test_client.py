@@ -44,8 +44,9 @@ async def test_client_healthcheck(mock_client: Client):
     assert not mock_client.healthy
     assert mock_client.client.models.list.call_count == 2
 
-    # test healthcheck allows recovery
+    # test cooldown reset allows recovery
     mock_client.client.models.list.side_effect = None
+    mock_client.reset_cooldown()
     await mock_client.check_health()
     assert mock_client.healthy
     assert mock_client.client.models.list.call_count == 3
