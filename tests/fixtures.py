@@ -5,30 +5,43 @@ from openai.types.chat.chat_completion_chunk import ChoiceDelta
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.completion_usage import CompletionUsage
 
-from azure_switchboard import Deployment
+from azure_switchboard import Deployment, ModelConfig
+
+
+def _make_model_config() -> dict[str, ModelConfig]:
+    return {
+        "gpt-4o-mini": ModelConfig(
+            model="gpt-4o-mini",
+            tpm_ratelimit=10000,
+            rpm_ratelimit=60,
+        ),
+        "gpt-4o": ModelConfig(
+            model="gpt-4o",
+            tpm_ratelimit=10000,
+            rpm_ratelimit=60,
+        ),
+    }
+
 
 TEST_DEPLOYMENT_1 = Deployment(
     name="test1",
     api_base="https://test1.openai.azure.com/",
     api_key="test1",
-    tpm_ratelimit=10000,
-    rpm_ratelimit=60,
+    models=_make_model_config(),
 )
 
 TEST_DEPLOYMENT_2 = Deployment(
     name="test2",
     api_base="https://test2.openai.azure.com/",
     api_key="test2",
-    tpm_ratelimit=10000,
-    rpm_ratelimit=60,
+    models=_make_model_config(),
 )
 
 TEST_DEPLOYMENT_3 = Deployment(
     name="test3",
     api_base="https://test3.openai.azure.com/",
     api_key="test3",
-    tpm_ratelimit=10000,
-    rpm_ratelimit=60,
+    models=_make_model_config(),
 )
 
 

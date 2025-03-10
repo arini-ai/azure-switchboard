@@ -26,6 +26,11 @@ def create_mock_openai_client() -> AsyncMock:
 class BaseTestCase:
     """Base class for test cases with common utilities."""
 
+    basic_args = {
+        "model": "gpt-4o-mini",
+        "messages": [{"role": "user", "content": "Hello, world!"}],
+    }
+
     @staticmethod
     async def collect_chunks(
         stream: AsyncGenerator[ChatCompletionChunk, None],
