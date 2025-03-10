@@ -102,10 +102,10 @@ class Switchboard:
         if session_id and session_id in self._sessions:
             client = self._sessions[session_id]
             if client.healthy:
-                logger.debug(f"Using client {client} for session {session_id}")
+                logger.debug(f"Reusing {client} for session {session_id}")
                 return client
 
-            logger.warning(f"Client {client} is unhealthy, falling back to selection")
+            logger.warning(f"{client} is unhealthy, falling back to selection")
 
         # Get healthy deployments
         healthy_deployments = [c for c in self.deployments.values() if c.healthy]
@@ -120,7 +120,7 @@ class Switchboard:
 
         # Select the client with the lower weight (lower weight = better choice)
         selected = min(choices, key=lambda c: c.util)
-        logger.debug(f"Selected deployment {selected} with weight {selected.util}")
+        logger.debug(f"Selected {selected}")
 
         if session_id:
             self._sessions[session_id] = selected

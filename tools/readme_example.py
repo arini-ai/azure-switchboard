@@ -44,6 +44,7 @@ deployments = [
     ),
 ]
 
+
 @asynccontextmanager
 async def init_switchboard():
     """Use a pattern analogous to FastAPI dependency
@@ -62,12 +63,12 @@ async def init_switchboard():
     finally:
         await switchboard.stop()
 
+
 async def basic_functionality(switchboard: Switchboard):
     # Make a completion request (non-streaming)
     response = await switchboard.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": "Hello, world!"}]
-        )
+        model="gpt-4o-mini", messages=[{"role": "user", "content": "Hello, world!"}]
+    )
 
     print(response.choices[0].message.content)
 
@@ -75,7 +76,7 @@ async def basic_functionality(switchboard: Switchboard):
     stream = await switchboard.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Hello, world!"}],
-        stream=True
+        stream=True,
     )
 
     async for chunk in stream:
@@ -83,6 +84,7 @@ async def basic_functionality(switchboard: Switchboard):
             print(chunk.choices[0].delta.content, end="", flush=True)
 
     print()
+
 
 async def session_affinity(switchboard: Switchboard):
     session_id = str(uuid4())
@@ -92,7 +94,7 @@ async def session_affinity(switchboard: Switchboard):
     _ = await switchboard.create(
         session_id=session_id,
         model="gpt-4o-mini",
-        messages=[{"role": "user", "content": "Who won the World Series in 2020?"}]
+        messages=[{"role": "user", "content": "Who won the World Series in 2020?"}],
     )
 
     # Follow-up requests with the same session_id will route to the same deployment
@@ -101,9 +103,12 @@ async def session_affinity(switchboard: Switchboard):
         model="gpt-4o-mini",
         messages=[
             {"role": "user", "content": "Who won the World Series in 2020?"},
-            {"role": "assistant", "content": "The Los Angeles Dodgers won the World Series in 2020."},
-            {"role": "user", "content": "Who did they beat?"}
-        ]
+            {
+                "role": "assistant",
+                "content": "The Los Angeles Dodgers won the World Series in 2020.",
+            },
+            {"role": "user", "content": "Who did they beat?"},
+        ],
     )
 
     # If the deployment becomes unhealthy,
@@ -117,11 +122,12 @@ async def session_affinity(switchboard: Switchboard):
     _ = await switchboard.create(
         session_id=session_id,
         model="gpt-4o-mini",
-        messages=[{"role": "user", "content": "Who won the World Series in 2021?"}]
+        messages=[{"role": "user", "content": "Who won the World Series in 2021?"}],
     )
 
     new_client = switchboard.select_deployment(session_id)
     assert new_client != original_client
+
 
 async def main():
     async with init_switchboard() as sb:
@@ -130,6 +136,7 @@ async def main():
 
         print("Session affinity:")
         await session_affinity(sb)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
