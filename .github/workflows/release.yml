@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # For pushing tag, commit and creating release
+      id-token: write # For trusted publishing to PyPI
 
     # Only run if push is from a human (not another workflow)
     if: github.actor != 'github-actions[bot]' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
@@ -68,3 +69,4 @@ jobs:
 
       - name: Publish to PyPI
         run: uv publish
+
