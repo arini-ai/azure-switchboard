@@ -9,27 +9,23 @@ from typing import Annotated, AsyncIterator, Literal, cast, overload
 import wrapt
 from openai import AsyncAzureOpenAI, AsyncStream
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, Field, PrivateAttr, computed_field
 
 logger = logging.getLogger(__name__)
 
 
-class SwitchboardClientError(Exception):
-    pass
+class Model(BaseModel):
+    """Runtime state of a model on a deployment"""
 
-
-class ModelState(BaseModel):
-    """Model-specific config and state on a deployment"""
-
+    name: str
     tpm: Annotated[int, Field(description="TPM Ratelimit")] = 0
     rpm: Annotated[int, Field(description="RPM Ratelimit")] = 0
-    default_cooldown: float = Field(
-        default=10.0, repr=False, description="Default cooldown period in seconds"
-    )
+    default_cooldown: Annotated[
+        float, Field(repr=False, description="Default cooldown period in seconds")
+    ] = 10.0
 
     _tpm_usage: int = PrivateAttr(default=0)
     _rpm_usage: int = PrivateAttr(default=0)
-
     _cooldown_until: float = PrivateAttr(default=0)
     _last_reset: float = PrivateAttr(default=0)
 
@@ -43,11 +39,13 @@ class ModelState(BaseModel):
         """
         Check if the model is healthy based on utilization.
         """
-        return self.util() < 1
+        return self.util < 1
 
     def is_cooling(self) -> bool:
         return time.time() < self._cooldown_until
 
+    @computed_field
+    @property
     def util(self) -> float:
         """
         Calculate the load weight of this client as a value between 0 and 1.
@@ -77,7 +75,7 @@ class ModelState(BaseModel):
 
     def get_usage(self) -> dict[str, str | float]:
         return {
-            "util": self.util(),
+            "util": self.util,
             "tpm": f"{self._tpm_usage}/{self.tpm}",
             "rpm": f"{self._rpm_usage}/{self.rpm}",
         }
@@ -92,7 +90,7 @@ class ModelState(BaseModel):
         return " ".join(f"{k}={v}" for k, v in self.get_usage().items())
 
 
-class Deployment(BaseModel):
+class DeploymentConfig(BaseModel):
     """Metadata about the Azure deployment"""
 
     name: str
@@ -102,31 +100,36 @@ class Deployment(BaseModel):
     timeout: float = 600.0
     healthcheck_interval: int = 30
     cooldown_period: int = 60
-    models: dict[str, ModelState] = Field(default_factory=dict)
+    models: list[Model]
 
 
-class Client:
+class DeploymentError(Exception):
+    pass
+
+
+class Deployment:
     """Runtime state of a deployment"""
 
-    def __init__(self, config: Deployment, client: AsyncAzureOpenAI) -> None:
+    def __init__(self, config: DeploymentConfig, client: AsyncAzureOpenAI) -> None:
         self.config = config
         self.client = client
+        self.models = {m.name: m for m in config.models}
 
     def __repr__(self) -> str:
-        return f"Client(name={self.config.name}, models={self.config.models}])"
+        return f"Client(name={self.config.name}, models={self.models})"
 
     def reset_usage(self) -> None:
-        for model in self.config.models.values():
+        for model in self.models.values():
             model.reset_usage()
 
     def get_usage(self) -> dict[str, dict]:
-        return {name: state.get_usage() for name, state in self.config.models.items()}
+        return {name: state.get_usage() for name, state in self.models.items()}
 
     def is_healthy(self, model: str) -> bool:
-        return self.config.models[model].is_healthy()
+        return self.models[model].is_healthy()
 
     def util(self, model: str) -> float:
-        return self.config.models[model].util()
+        return self.models[model].util
 
     @overload
     async def create(
@@ -148,16 +151,14 @@ class Client:
         Tracks usage metrics for load balancing.
         """
 
-        if model not in self.config.models:
-            raise SwitchboardClientError(f"{model} not configured for deployment")
-
-        model_state = self.config.models[model]
+        if model not in self.models:
+            raise DeploymentError(f"{model} not configured for deployment")
 
         # add input token estimate before we send the request so utilization is
         # kept up to date for other requests that might be executing concurrently.
         _preflight_estimate = self._estimate_token_usage(kwargs)
-        model_state.spend_tokens(_preflight_estimate)
-        model_state.spend_request()
+        self.models[model].spend_tokens(_preflight_estimate)
+        self.models[model].spend_request()
 
         kwargs["timeout"] = kwargs.get("timeout", self.config.timeout)
         try:
@@ -176,7 +177,7 @@ class Client:
                 # streaming util gets updated inside the WrappedAsyncStream
                 return _AsyncStreamWrapper(
                     wrapped=response_stream,
-                    model_ref=model_state,
+                    model_ref=self.models[model],
                     usage_adjustment=_preflight_estimate,
                 )
 
@@ -188,14 +189,14 @@ class Client:
                 response = cast(ChatCompletion, response)
 
                 if response.usage:
-                    model_state.spend_tokens(
+                    self.models[model].spend_tokens(
                         # dont double-count our preflight estimate
                         response.usage.total_tokens - _preflight_estimate
                     )
 
                 return response
         except Exception as e:
-            model_state.cooldown()
+            self.models[model].cooldown()
             raise e
 
     def _estimate_token_usage(self, kwargs: dict) -> int:
@@ -214,7 +215,7 @@ class _AsyncStreamWrapper(wrapt.ObjectProxy):
     def __init__(
         self,
         wrapped: AsyncStream[ChatCompletionChunk],
-        model_ref: ModelState,
+        model_ref: Model,
         usage_adjustment: int = 0,
     ):
         super(_AsyncStreamWrapper, self).__init__(wrapped)
@@ -241,7 +242,7 @@ class _AsyncStreamWrapper(wrapt.ObjectProxy):
             raise
 
 
-def azure_client_factory(deployment: Deployment) -> AsyncAzureOpenAI:
+def azure_client_factory(deployment: DeploymentConfig) -> AsyncAzureOpenAI:
     return AsyncAzureOpenAI(
         azure_endpoint=deployment.api_base,
         api_key=deployment.api_key,
@@ -250,5 +251,5 @@ def azure_client_factory(deployment: Deployment) -> AsyncAzureOpenAI:
     )
 
 
-def default_client_factory(deployment: Deployment) -> Client:
-    return Client(config=deployment, client=azure_client_factory(deployment))
+def default_deployment_factory(deployment: DeploymentConfig) -> Deployment:
+    return Deployment(config=deployment, client=azure_client_factory(deployment))

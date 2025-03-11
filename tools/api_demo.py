@@ -3,7 +3,7 @@
 # To run this, use:
 #   uv run readme-example.py
 #
-# /// script
+# // script
 # requires-python = ">=3.10"
 # dependencies = [
 #     "azure-switchboard",
@@ -19,7 +19,7 @@ import time
 from rich import print as rprint
 from rich.logging import RichHandler
 
-from azure_switchboard import Deployment, Switchboard
+from azure_switchboard import DeploymentConfig, Model, Switchboard
 
 logger = logging.getLogger(__name__)
 
@@ -29,28 +29,25 @@ API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
 assert API_BASE, "AZURE_OPENAI_ENDPOINT must be set"
 assert API_KEY, "AZURE_OPENAI_API_KEY must be set"
 
-d1 = Deployment(
+d1 = DeploymentConfig(
     name="demo_1",
     api_base=API_BASE,
     api_key=API_KEY,
-    rpm_ratelimit=6,
-    tpm_ratelimit=1000,
+    models=[Model(name="gpt-4o-mini", tpm=1000, rpm=6)],
 )
 
-d2 = Deployment(
+d2 = DeploymentConfig(
     name="demo_2",
     api_base=API_BASE,
     api_key=API_KEY,
-    rpm_ratelimit=6,
-    tpm_ratelimit=1000,
+    models=[Model(name="gpt-4o-mini", tpm=1000, rpm=6)],
 )
 
-d3 = Deployment(
+d3 = DeploymentConfig(
     name="demo_3",
     api_base=API_BASE,
     api_key=API_KEY,
-    rpm_ratelimit=6,
-    tpm_ratelimit=1000,
+    models=[Model(name="gpt-4o-mini", tpm=1000, rpm=6)],
 )
 
 BASIC_ARGS = {
@@ -76,12 +73,15 @@ async def main() -> None:
     rprint(switchboard.get_usage())
 
     rprint("# Distribute 100 completions, 1:2:3 ratio")
-    d1.tpm_ratelimit *= 10
-    d1.rpm_ratelimit *= 10
-    d2.tpm_ratelimit *= 20
-    d2.rpm_ratelimit *= 20
-    d3.tpm_ratelimit *= 30
-    d3.rpm_ratelimit *= 30
+
+    def _update_rl(name: str, multiple: int) -> None:
+        switchboard.deployments[name].models["gpt-4o-mini"].tpm *= multiple
+        switchboard.deployments[name].models["gpt-4o-mini"].rpm *= multiple
+
+    _update_rl("demo_1", 10)
+    _update_rl("demo_2", 20)
+    _update_rl("demo_3", 30)
+
     await distribute_N(switchboard, 100)
     rprint(switchboard.get_usage())
 

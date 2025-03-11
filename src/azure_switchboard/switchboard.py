@@ -1,14 +1,16 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 import random
 from collections import OrderedDict
-from typing import Callable, Dict, Literal, overload
+from typing import Callable, Literal, overload
 
 from openai import AsyncStream
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from tenacity import AsyncRetrying, RetryError, stop_after_attempt
 
-from .client import Client, Deployment, default_client_factory
+from .deployment import Deployment, DeploymentConfig, default_deployment_factory
 
 logger = logging.getLogger(__name__)
 
@@ -20,12 +22,14 @@ class SwitchboardError(Exception):
 class Switchboard:
     def __init__(
         self,
-        deployments: list[Deployment],
-        client_factory: Callable[[Deployment], Client] = default_client_factory,
+        deployments: list[DeploymentConfig],
+        client_factory: Callable[[DeploymentConfig], Deployment] = (
+            default_deployment_factory
+        ),
         healthcheck_interval: int = 10,
         ratelimit_window: int = 60,  # Reset usage counters every minute
     ) -> None:
-        self.deployments: Dict[str, Client] = {
+        self.deployments: dict[str, Deployment] = {
             deployment.name: client_factory(deployment) for deployment in deployments
         }
 
@@ -40,30 +44,23 @@ class Switchboard:
 
     def start(self) -> None:
         # Start background tasks if intervals are positive
+        if self.ratelimit_window > 0:
 
-        self.ratelimit_reset_task = (
-            asyncio.create_task(self.periodically_reset_usage())
-            if self.ratelimit_window > 0
-            else None
-        )
+            async def periodic_reset():
+                while True:
+                    await asyncio.sleep(self.ratelimit_window)
+                    logger.debug("Resetting usage counters")
+                    self.reset_usage()
+
+            self.ratelimit_reset_task = asyncio.create_task(periodic_reset())
 
     async def stop(self):
-        for task in [self.ratelimit_reset_task]:
-            if task:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-
-    async def periodically_reset_usage(self):
-        """Periodically reset usage counters on all clients.
-
-        This is pretty naive but it will suffice for now."""
-        while True:
-            await asyncio.sleep(self.ratelimit_window)
-            logger.debug("Resetting usage counters")
-            self.reset_usage()
+        if self.ratelimit_reset_task:
+            try:
+                self.ratelimit_reset_task.cancel()
+                await self.ratelimit_reset_task
+            except asyncio.CancelledError:
+                pass
 
     def reset_usage(self) -> None:
         for client in self.deployments.values():
@@ -72,7 +69,9 @@ class Switchboard:
     def get_usage(self) -> dict[str, dict]:
         return {name: client.get_usage() for name, client in self.deployments.items()}
 
-    def select_deployment(self, model: str, session_id: str | None = None) -> Client:
+    def select_deployment(
+        self, *, model: str, session_id: str | None = None
+    ) -> Deployment:
         """
         Select a deployment using the power of two random choices algorithm.
         If session_id is provided, try to use that specific deployment first.
@@ -133,7 +132,7 @@ class Switchboard:
         try:
             async for attempt in self.fallback_policy:
                 with attempt:
-                    client = self.select_deployment(model, session_id)
+                    client = self.select_deployment(model=model, session_id=session_id)
                     logger.debug(f"Sending completion request to {client}")
                     return await client.create(model=model, stream=stream, **kwargs)
         except RetryError as e:
@@ -156,7 +155,7 @@ class LRUDict(OrderedDict):
 
         super().__init__(*args, **kwargs)
 
-    def __setitem__(self, key, value):
+    def __setitem__(self, key: str, value: Deployment) -> None:
         super().__setitem__(key, value)
         super().move_to_end(key)
 
@@ -164,7 +163,7 @@ class LRUDict(OrderedDict):
             oldkey = next(iter(self))
             super().__delitem__(oldkey)
 
-    def __getitem__(self, key):
+    def __getitem__(self, key: str) -> Deployment:
         val = super().__getitem__(key)
         super().move_to_end(key)
 
