@@ -9,7 +9,7 @@ from fixtures import (
 )
 from utils import BaseTestCase, create_mock_openai_client
 
-from azure_switchboard import Client, Switchboard
+from azure_switchboard import Client, Switchboard, SwitchboardError
 
 
 @pytest.fixture
@@ -37,7 +37,11 @@ class TestSwitchboard(BaseTestCase):
     def _get_deployment(self, switchboard) -> Client:
         return next(iter(switchboard.deployments.values()))
 
-    async def test_completion(self, mock_switchboard):
+    async def test_repr(self, mock_switchboard: Switchboard):
+        sb_repr = repr(mock_switchboard)
+        assert sb_repr.startswith("Switchboard")
+
+    async def test_completion(self, mock_switchboard: Switchboard):
         """Test basic chat completion through switchboard."""
 
         response = await mock_switchboard.create(**self.basic_args)
@@ -45,7 +49,7 @@ class TestSwitchboard(BaseTestCase):
         deployment.client.chat.completions.create.assert_called_once()
         assert response == MOCK_COMPLETION
 
-    async def test_streaming(self, mock_switchboard):
+    async def test_streaming(self, mock_switchboard: Switchboard):
         """Test streaming through switchboard."""
 
         stream = await mock_switchboard.create(stream=True, **self.basic_args)
@@ -55,14 +59,11 @@ class TestSwitchboard(BaseTestCase):
         deployment.client.chat.completions.create.assert_called_once()
         assert content == "Hello, world!"
 
-    async def test_selection(self, mock_switchboard):
-        """Test basic deployment selection."""
+    async def test_selection(self, mock_switchboard: Switchboard):
+        """Test basic selection invariants"""
         client = mock_switchboard.select_deployment(model="gpt-4o-mini")
         assert client.config.name in mock_switchboard.deployments
 
-    async def test_failover(self, mock_switchboard):
-        """Test proper handling when multiple deployments fail in sequence."""
-        # Get list of deployments
         deployments = list(mock_switchboard.deployments.values())
         assert len(deployments) == 3, "Need exactly 3 deployments for this test"
 
@@ -82,7 +83,7 @@ class TestSwitchboard(BaseTestCase):
 
         # Mark last deployment as unhealthy
         deployments[2].config.models["gpt-4o-mini"].cooldown()
-        with pytest.raises(Exception):
+        with pytest.raises(SwitchboardError):
             await mock_switchboard.create(**self.basic_args)
 
         # Restore first deployment
@@ -115,7 +116,7 @@ class TestSwitchboard(BaseTestCase):
         )
         assert client_4.config.name == client_3.config.name
 
-    async def test_session_stickiness_failover(self, mock_switchboard):
+    async def test_session_stickiness_failover(self, mock_switchboard: Switchboard):
         """Test session affinity when preferred deployment becomes unavailable."""
 
         session_id = "test"
@@ -162,7 +163,7 @@ class TestSwitchboard(BaseTestCase):
             1 + tolerance
         )
 
-    async def test_load_distribution(self, mock_switchboard):
+    async def test_load_distribution(self, mock_switchboard: Switchboard):
         """Test that load is distributed across healthy deployments."""
 
         # Make 100 requests
@@ -177,7 +178,9 @@ class TestSwitchboard(BaseTestCase):
                 max=40,
             )
 
-    async def test_load_distribution_health_awareness(self, mock_switchboard):
+    async def test_load_distribution_health_awareness(
+        self, mock_switchboard: Switchboard
+    ):
         """Test load distribution when some deployments are unhealthy."""
 
         # Mark one deployment as unhealthy
@@ -210,7 +213,9 @@ class TestSwitchboard(BaseTestCase):
             max=60,
         )
 
-    async def test_load_distribution_utilization_awareness(self, mock_switchboard):
+    async def test_load_distribution_utilization_awareness(
+        self, mock_switchboard: Switchboard
+    ):
         """Selection should prefer to load deployments with lower utilization."""
 
         # Make 100 requests to preload the deployments, should be evenly distributed
@@ -235,7 +240,9 @@ class TestSwitchboard(BaseTestCase):
                 tolerance=0.1,
             )
 
-    async def test_load_distribution_session_stickiness(self, mock_switchboard):
+    async def test_load_distribution_session_stickiness(
+        self, mock_switchboard: Switchboard
+    ):
         """Test that session stickiness works correctly with load distribution."""
 
         session_ids = ["session1", "session2", "session3", "session4", "session5"]
@@ -261,3 +268,27 @@ class TestSwitchboard(BaseTestCase):
         assert request_counts == [10, 20, 20], (
             "5 sessions into 3 deployments should create 1:2:2 distribution"
         )
+
+    async def test_ratelimit_reset(self, mock_switchboard: Switchboard):
+        """Test that the ratelimit is reset correctly."""
+
+        # disabled upstream so restart it for the purpose
+        # of this test
+        mock_switchboard.ratelimit_window = 1
+        mock_switchboard.start()
+
+        # make some requests to add usage
+        for _ in range(10):
+            await mock_switchboard.create(**self.basic_args)
+
+        usage = mock_switchboard.get_usage()
+
+        # wait for the ratelimit to reset
+        await asyncio.sleep(2)
+
+        usage2 = mock_switchboard.get_usage()
+
+        assert usage2 != usage
+
+        await mock_switchboard.stop()
+        mock_switchboard.ratelimit_window = 0

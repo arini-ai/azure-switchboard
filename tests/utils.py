@@ -1,7 +1,7 @@
-from typing import AsyncGenerator, List
 from unittest.mock import AsyncMock
 
 from fixtures import MOCK_COMPLETION, MOCK_STREAM_CHUNKS
+from openai import AsyncStream
 from openai.types.chat import ChatCompletionChunk
 
 
@@ -33,8 +33,8 @@ class BaseTestCase:
 
     @staticmethod
     async def collect_chunks(
-        stream: AsyncGenerator[ChatCompletionChunk, None],
-    ) -> tuple[List[ChatCompletionChunk], str]:
+        stream: AsyncStream[ChatCompletionChunk],
+    ) -> tuple[list[ChatCompletionChunk], str]:
         """Collect all chunks from a stream and return the chunks and assembled content."""
         received_chunks = []
         content = ""

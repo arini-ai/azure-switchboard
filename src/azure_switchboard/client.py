@@ -4,7 +4,6 @@ import asyncio
 import logging
 import random
 import time
-from _collections_abc import dict_items
 from typing import Annotated, AsyncIterator, Literal, cast, overload
 
 import wrapt
@@ -17,19 +16,6 @@ logger = logging.getLogger(__name__)
 
 class SwitchboardClientError(Exception):
     pass
-
-
-class Deployment(BaseModel):
-    """Metadata about the Azure deployment"""
-
-    name: str
-    api_base: str
-    api_key: str
-    api_version: str = "2024-10-21"
-    timeout: float = 600.0
-    healthcheck_interval: int = 30
-    cooldown_period: int = 60
-    models: dict[str, ModelState] = Field(default_factory=dict)
 
 
 class ModelState(BaseModel):
@@ -104,6 +90,19 @@ class ModelState(BaseModel):
 
     def __str__(self) -> str:
         return " ".join(f"{k}={v}" for k, v in self.get_usage().items())
+
+
+class Deployment(BaseModel):
+    """Metadata about the Azure deployment"""
+
+    name: str
+    api_base: str
+    api_key: str
+    api_version: str = "2024-10-21"
+    timeout: float = 600.0
+    healthcheck_interval: int = 30
+    cooldown_period: int = 60
+    models: dict[str, ModelState] = Field(default_factory=dict)
 
 
 class Client:
@@ -233,7 +232,7 @@ class _AsyncStreamWrapper(wrapt.ObjectProxy):
                         chunk.usage.total_tokens - self._self_adjustment
                     )
                 yield chunk
-        except asyncio.CancelledError:
+        except asyncio.CancelledError:  # pragma: no cover
             logger.debug("Cancelled mid-stream")
             return
         except Exception:

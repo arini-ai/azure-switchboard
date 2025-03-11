@@ -1,5 +1,5 @@
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import openai
 import pytest
@@ -101,14 +101,12 @@ class TestClient(BaseTestCase):
         # Test midstream exception handling
         # shim through spend tokens to raise the exception
         mock_client.client.chat.completions.create.side_effect = None
-        with patch("azure_switchboard.client.ModelState.spend_tokens") as mock:
+        stream = await mock_client.create(stream=True, **self.basic_args)
+        with patch.object(stream.__wrapped__, "__aiter__") as mock:  # type: ignore
             mock.side_effect = Exception("spend_tokens error")
             with pytest.raises(Exception, match="spend_tokens error"):
-                stream = await mock_client.create(stream=True, **self.basic_args)
                 assert mock_client.client.chat.completions.create.call_count == 3
-                async for _ in stream:
-                    pass
-
+                await self.collect_chunks(stream)
             assert mock.call_count == 1
             assert not model.is_healthy()
 
