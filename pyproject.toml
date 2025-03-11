@@ -1,6 +1,6 @@
 [project]
 name = "azure-switchboard"
-version = "2025.3.17"
+version = "2025.3.18"
 description = "Batteries-included loadbalancing client for Azure OpenAI"
 readme = "README.md"
 license = { text = "MIT" }
@@ -43,7 +43,7 @@ asyncio_default_fixture_loop_scope = "function"
 addopts = "--cov=azure_switchboard --cov-report=term-missing:skip-covered -s -v"
 
 [tool.bumpver]
-current_version = "2025.3.17"
+current_version = "2025.3.18"
 version_pattern = "YYYY.MM.INC0"
 commit_message = "new release {old_version} -> {new_version}"
 tag_message = "{new_version}"
