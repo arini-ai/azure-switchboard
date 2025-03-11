@@ -4,7 +4,7 @@ version = "2025.3.19"
 description = "Batteries-included loadbalancing client for Azure OpenAI"
 readme = "README.md"
 license = { text = "MIT" }
-authors = [{ name = "abizer", email = "abizer@abizer.me" }]
+authors = [{ name = "Abizer Lokhandwala", email = "abizer@abizer.me" }]
 requires-python = ">=3.10"
 dependencies = ["openai>=1.62.0", "tenacity>=9.0.0", "wrapt>=1.17.2"]
 classifiers = [
@@ -18,7 +18,7 @@ classifiers = [
 keywords = ["azure", "openai", "loadbalancing", "llm", "ai", "litellm"]
 
 [project.urls]
-Homepage = "https://github.com/abizer/switchboard"
+Homepage = "https://github.com/arini-ai/azure-switchboard"
 
 [build-system]
 requires = ["hatchling>=1.21.0"]
