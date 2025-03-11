@@ -58,6 +58,7 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     permissions:
+      contents: write # For pushing tag, commit and creating release
       id-token: write # For trusted publishing to PyPI
 
     steps:
