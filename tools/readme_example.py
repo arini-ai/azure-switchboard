@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 #
 # To run this, use:
-#   uv run readme-example.py
+#   uv run readme_example.py
 #
-# // script
+# /// script
 # requires-python = ">=3.10"
 # dependencies = [
 #     "azure-switchboard",

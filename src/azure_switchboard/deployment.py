@@ -98,8 +98,6 @@ class DeploymentConfig(BaseModel):
     api_key: str
     api_version: str = "2024-10-21"
     timeout: float = 600.0
-    healthcheck_interval: int = 30
-    cooldown_period: int = 60
     models: list[Model]
 
 

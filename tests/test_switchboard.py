@@ -20,7 +20,6 @@ def mock_switchboard():
         switchboard = Switchboard(
             [TEST_DEPLOYMENT_1, TEST_DEPLOYMENT_2, TEST_DEPLOYMENT_3],
             client_factory=lambda x: Deployment(x, mock_openai),
-            healthcheck_interval=0,  # disable healthchecks
             ratelimit_window=0,  # disable usage resets
         )
         yield switchboard
@@ -34,7 +33,7 @@ def mock_switchboard():
 class TestSwitchboard(BaseTestCase):
     """Basic switchboard functionality tests."""
 
-    def _get_deployment(self, switchboard) -> Deployment:
+    def _get_deployment(self, switchboard: Switchboard) -> Deployment:
         return next(iter(switchboard.deployments.values()))
 
     async def test_repr(self, mock_switchboard: Switchboard):

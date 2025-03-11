@@ -31,9 +31,8 @@ See `tools/readme_example.py` for a runnable example.
 import asyncio
 import os
 from contextlib import asynccontextmanager
-from uuid import uuid4
 
-from azure_switchboard import Deployment, Switchboard
+from azure_switchboard import DeploymentConfig, Model, Switchboard
 
 # use demo parameters from environment if available
 if not (api_base := os.getenv("AZURE_OPENAI_ENDPOINT")):
@@ -43,38 +42,41 @@ if not (api_key := os.getenv("AZURE_OPENAI_API_KEY")):
 
 # Define deployments
 deployments = [
-    Deployment(
+    DeploymentConfig(
         name="east",
         api_base=api_base,
         api_key=api_key,
+        models=[Model(name="gpt-4o-mini", tpm=10000, rpm=60)],
     ),
-    Deployment(
+    DeploymentConfig(
         name="west",
         # re-use the keys here since the switchboard
         # implementation doesn't know about it
         api_base=api_base,
         api_key=api_key,
+        models=[Model(name="gpt-4o-mini", tpm=10000, rpm=60)],
     ),
-    Deployment(
+    DeploymentConfig(
         name="south",
         api_base=api_base,
         api_key=api_key,
+        models=[Model(name="gpt-4o-mini", tpm=10000, rpm=60)],
     ),
 ]
 
 
 @asynccontextmanager
-async def init_switchboard():
-    """Use a pattern analogous to FastAPI dependency injection for automatic cleanup."""
-
-    # Create Switchboard with deployments
-    switchboard = Switchboard(deployments)
-
-    # Start background tasks
-    # (healthchecks, ratelimiting)
-    switchboard.start()
+async def get_switchboard():
+    """Use a pattern analogous to FastAPI dependency
+    injection for automatic cleanup.
+    """
 
     try:
+        # Create Switchboard with deployments
+        switchboard = Switchboard(deployments)
+
+        # Start background tasks (ratelimiting)
+        switchboard.start()
         yield switchboard
     finally:
         await switchboard.stop()
@@ -83,10 +85,11 @@ async def init_switchboard():
 async def basic_functionality(switchboard: Switchboard):
     # Make a completion request (non-streaming)
     response = await switchboard.create(
-        model="gpt-4o-mini", messages=[{"role": "user", "content": "Hello, world!"}]
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "Hello, world!"}],
     )
 
-    print(response.choices[0].message.content)
+    print("completion:", response.choices[0].message.content)
 
     # Make a streaming completion request
     stream = await switchboard.create(
@@ -95,6 +98,7 @@ async def basic_functionality(switchboard: Switchboard):
         stream=True,
     )
 
+    print("streaming: ", end="")
     async for chunk in stream:
         if chunk.choices and chunk.choices[0].delta.content:
             print(chunk.choices[0].delta.content, end="", flush=True)
@@ -103,7 +107,7 @@ async def basic_functionality(switchboard: Switchboard):
 
 
 async def session_affinity(switchboard: Switchboard):
-    session_id = str(uuid4())
+    session_id = "anything"
 
     # First message will select a random healthy
     # deployment and associate it with the session_id
@@ -131,8 +135,11 @@ async def session_affinity(switchboard: Switchboard):
     # requests will fall back to a healthy one
 
     # Simulate a failure by marking down the deployment
-    original_client = switchboard.select_deployment(session_id)
-    original_client.cooldown()
+    original_client = switchboard.select_deployment(
+        model="gpt-4o-mini", session_id=session_id
+    )
+    print("original client:", original_client)
+    original_client.models["gpt-4o-mini"].cooldown()
 
     # A new deployment will be selected for this session_id
     _ = await switchboard.create(
@@ -141,16 +148,19 @@ async def session_affinity(switchboard: Switchboard):
         messages=[{"role": "user", "content": "Who won the World Series in 2021?"}],
     )
 
-    new_client = switchboard.select_deployment(session_id)
+    new_client = switchboard.select_deployment(
+        model="gpt-4o-mini", session_id=session_id
+    )
+    print("new client:", new_client)
     assert new_client != original_client
 
 
 async def main():
-    async with init_switchboard() as sb:
+    async with get_switchboard() as sb:
         print("Basic functionality:")
         await basic_functionality(sb)
 
-        print("Session affinity:")
+        print("Session affinity (should warn):")
         await session_affinity(sb)
 
 
@@ -159,6 +169,14 @@ if __name__ == "__main__":
 ```
 
 ## Configuration Options
+
+### switchboard.Model Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `name` | Configured model name, e.g. "gpt-4o" or "gpt-4o-mini" | Required |
+| `tpm` | Tokens per minute rate limit | 0 (unlimited) |
+| `rpm` | Requests per minute rate limit | 0 (unlimited) |
 
 ### switchboard.Deployment Parameters
 
@@ -169,10 +187,7 @@ if __name__ == "__main__":
 | `api_key` | Azure OpenAI API key | Required |
 | `api_version` | Azure OpenAI API version | "2024-10-21" |
 | `timeout` | Default timeout in seconds | 600.0 |
-| `tpm_ratelimit` | Tokens per minute rate limit | 0 (unlimited) |
-| `rpm_ratelimit` | Requests per minute rate limit | 0 (unlimited) |
-| `healthcheck_interval` | Seconds between health checks | 30 |
-| `cooldown_period` | Seconds to wait after an error before retrying | 60 |
+| `models` | List of Models configured for this deployment | Required |
 
 ### switchboard.Switchboard Parameters
 
@@ -180,7 +195,6 @@ if __name__ == "__main__":
 |-----------|-------------|---------|
 | `deployments` | List of Deployment objects | Required |
 | `client_factory` | Factory for creating AsyncAzureOpenAI clients | default_client_factory |
-| `healthcheck_interval` | Seconds between health checks | 10 |
 | `ratelimit_window` | Seconds before resetting usage counters | 60 |
 
 ## Development
@@ -191,7 +205,7 @@ for available commands.
 
 ```bash
 # Clone the repository
-git clone https://github.com/abizer/switchboard azure-switchboard
+git clone https://github.com/arini-ai/azure-switchboard
 cd azure-switchboard
 
 just install
@@ -201,7 +215,7 @@ just install
 
 ```bash
 just test
-# uv run pytest -s -v
+# uv run pytest
 ```
 
 ### Building the package

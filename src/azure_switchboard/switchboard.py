@@ -26,14 +26,12 @@ class Switchboard:
         client_factory: Callable[[DeploymentConfig], Deployment] = (
             default_deployment_factory
         ),
-        healthcheck_interval: int = 10,
         ratelimit_window: int = 60,  # Reset usage counters every minute
     ) -> None:
         self.deployments: dict[str, Deployment] = {
             deployment.name: client_factory(deployment) for deployment in deployments
         }
 
-        self.healthcheck_interval = healthcheck_interval
         self.ratelimit_window = ratelimit_window
 
         self.fallback_policy = AsyncRetrying(

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 #
 # To run this, use:
-#   uv run readme-example.py
+#   uv run api_demo.py
 #
-# // script
+# /// script
 # requires-python = ">=3.10"
 # dependencies = [
 #     "azure-switchboard",
@@ -23,30 +23,29 @@ from azure_switchboard import DeploymentConfig, Model, Switchboard
 
 logger = logging.getLogger(__name__)
 
-API_BASE = os.getenv("AZURE_OPENAI_ENDPOINT")
-API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
-
-assert API_BASE, "AZURE_OPENAI_ENDPOINT must be set"
-assert API_KEY, "AZURE_OPENAI_API_KEY must be set"
+if not (api_base := os.getenv("AZURE_OPENAI_ENDPOINT")):
+    api_base = "https://your-deployment1.openai.azure.com/"
+if not (api_key := os.getenv("AZURE_OPENAI_API_KEY")):
+    api_key = "your-api-key"
 
 d1 = DeploymentConfig(
     name="demo_1",
-    api_base=API_BASE,
-    api_key=API_KEY,
+    api_base=api_base,
+    api_key=api_key,
     models=[Model(name="gpt-4o-mini", tpm=1000, rpm=6)],
 )
 
 d2 = DeploymentConfig(
     name="demo_2",
-    api_base=API_BASE,
-    api_key=API_KEY,
+    api_base=api_base,
+    api_key=api_key,
     models=[Model(name="gpt-4o-mini", tpm=1000, rpm=6)],
 )
 
 d3 = DeploymentConfig(
     name="demo_3",
-    api_base=API_BASE,
-    api_key=API_KEY,
+    api_base=api_base,
+    api_key=api_key,
     models=[Model(name="gpt-4o-mini", tpm=1000, rpm=6)],
 )
 
