@@ -1,11 +1,18 @@
-from .client import Client, Deployment, ModelState, SwitchboardClientError
+from .deployment import (
+    Deployment,
+    DeploymentConfig,
+    DeploymentError,
+    Model,
+    default_deployment_factory,
+)
 from .switchboard import Switchboard, SwitchboardError
 
 __all__ = [
-    "ModelState",
     "Deployment",
-    "Client",
+    "DeploymentConfig",
+    "Model",
     "Switchboard",
     "SwitchboardError",
-    "SwitchboardClientError",
+    "DeploymentError",
+    "default_deployment_factory",
 ]
