@@ -14,7 +14,7 @@ from openai.types.chat import ChatCompletion
 from utils import BaseTestCase, create_mock_azure_client
 
 from azure_switchboard import Deployment, DeploymentError
-from azure_switchboard.deployment import azure_client_factory
+from azure_switchboard.deployment import azure_factory
 
 
 @pytest.fixture
@@ -222,7 +222,7 @@ class TestDeployment(BaseTestCase):
         respx to mock out the underlying httpx client so we can verify
         the retry logic.
         """
-        return azure_client_factory(TEST_DEPLOYMENT_1)
+        return (azure_factory)(TEST_DEPLOYMENT_1)
 
     async def test_timeout_retry(self, d1_mock, test_client):
         """Test timeout retry behavior."""

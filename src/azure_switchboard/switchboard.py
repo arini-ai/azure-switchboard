@@ -10,13 +10,23 @@ from openai import AsyncOpenAI, AsyncStream
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from tenacity import AsyncRetrying, RetryError, stop_after_attempt
 
-from .deployment import Deployment, DeploymentConfig, azure_client_factory
+from .deployment import Deployment, DeploymentConfig, azure_factory
 
 logger = logging.getLogger(__name__)
 
 
 class SwitchboardError(Exception):
     pass
+
+
+def two_random_choices(deployments: list[Deployment], model: str) -> Deployment:
+    """Power of two random choices algorithm.
+
+    Randomly select 2 deployments and return the one
+    with lower util for the given model.
+    """
+    choices = random.sample(deployments, min(2, len(deployments)))
+    return min(choices, key=lambda d: d.util(model))
 
 
 class Switchboard:
@@ -26,14 +36,15 @@ class Switchboard:
         ratelimit_window: int = 60,  # Reset usage counters every minute
         fallback: DeploymentConfig | None = None,
         retries: int = 2,
-        deployment_factory: Callable[[DeploymentConfig], Deployment] = (
-            azure_client_factory
-        ),
+        deployment_factory: Callable[[DeploymentConfig], Deployment] = azure_factory,
+        selector: Callable[[list[Deployment], str], Deployment] = two_random_choices,
     ) -> None:
         self.deployments: dict[str, Deployment] = {
             deployment.name: deployment_factory(deployment)
             for deployment in deployments
         }
+
+        self.selector = selector
 
         self.fallback = None
         if fallback:
@@ -106,11 +117,7 @@ class Switchboard:
         if len(healthy_deployments) == 1:
             return healthy_deployments[0]
 
-        # Power of two random choices
-        choices = random.sample(healthy_deployments, min(2, len(healthy_deployments)))
-
-        # Select the client with the lower utilization for the model
-        selected = min(choices, key=lambda d: d.util(model))
+        selected = self.selector(healthy_deployments, model)
         logger.debug(f"Selected {selected}")
 
         if session_id:

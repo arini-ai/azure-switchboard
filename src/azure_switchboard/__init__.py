@@ -3,7 +3,7 @@ from .deployment import (
     DeploymentConfig,
     DeploymentError,
     Model,
-    azure_client_factory,
+    azure_factory,
 )
 from .switchboard import Switchboard, SwitchboardError
 
@@ -14,5 +14,5 @@ __all__ = [
     "Switchboard",
     "SwitchboardError",
     "DeploymentError",
-    "azure_client_factory",
+    "azure_factory",
 ]

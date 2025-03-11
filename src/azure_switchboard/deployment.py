@@ -241,7 +241,7 @@ class _AsyncStreamWrapper(wrapt.ObjectProxy):
             raise DeploymentError("Error in wrapped stream") from e
 
 
-def azure_client_factory(deployment: DeploymentConfig) -> Deployment:
+def azure_factory(deployment: DeploymentConfig) -> Deployment:
     return Deployment(
         config=deployment,
         client=AsyncAzureOpenAI(

@@ -12,22 +12,23 @@ pip install azure-switchboard
 
 ## Overview
 
-`azure-switchboard` is a asyncio-only Python 3 library that provides an intelligent client loadbalancer for Azure OpenAI. You instantiate the Switchboard client with a set of Azure deployments, and the client distributes your chat completion requests across the provided deployments using the [power of two random choices](https://www.eecs.harvard.edu/~michaelm/postscripts/handbook2001.pdf) method based on utilization. In this sense, it serves as a lightweight service mesh between your application and Azure OpenAI. The basic idea is inspired by [ServiceRouter](https://www.usenix.org/system/files/osdi23-saokar.pdf).
+`azure-switchboard` is a Python 3 asyncio library that provides an intelligent, API-compatible client loadbalancer for Azure OpenAI. You instantiate a Switchboard client with a set of deployments, and the client distributes your chat completion requests across the available deployments using the [power of two random choices](https://www.eecs.harvard.edu/~michaelm/postscripts/handbook2001.pdf) method. In this sense, it functions as a lightweight service mesh between your application and Azure OpenAI. The basic idea is inspired by [ServiceRouter](https://www.usenix.org/system/files/osdi23-saokar.pdf).
 
 ## Features
 
-- **API Compatibility**: `Switchboard.create` is a fully-typed, transparent drop-in replacement for `OpenAI.chat.completions.create`
-- **Coordination-Free**: Pick-2 algorithm does not require coordination between client instances to achieve excellent load distribution characteristics
-- **Utilization-Aware**: Load is distributed by TPM/RPM utilization per model per deployment
+- **API Compatibility**: `Switchboard.create` is a drop-in, type-transparent proxy to `OpenAI.chat.completions.create`
+- **Coordination-Free**: The default Two Random Choices algorithm does not require coordination between client instances to achieve excellent load distribution characteristics.
+- **Utilization-Aware**: TPM/RPM ratelimit utilization is tracked per model per deployment for use during selection.
 - **Batteries Included**:
     - **Session Affinity**: Provide a `session_id` to route requests in the same session to the same deployment, optimizing for prompt caching
     - **Automatic Failover**: Client retries automatically up to `retries` times on deployment failure, with fallback to OpenAI configurable through the `fallback` parameter
-- **Lightweight**: Only three runtime dependencies: `openai`, `tenacity`, `wrapt`
-- **100% Test Coverage**: Implementation is fully unit tested.
+    - **Pluggable Selection**: Custom selection algorithms can be
+    provided by passing a callable to the `selector` parameter on the Switchboard constructor.
 
-## Basic Usage
+- **Lightweight**: sub-400 LOC implementation with only three runtime dependencies: `openai`, `tenacity`, `wrapt`
+- **100% Test Coverage**: There are twice as many lines in the tests as in the implementation.
 
-See `tools/readme_example.py` for a runnable example.
+## Runnable Example
 
 ```python
 import asyncio
