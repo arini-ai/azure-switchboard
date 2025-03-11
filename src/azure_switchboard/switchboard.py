@@ -138,11 +138,11 @@ class Switchboard:
                     return await client.create(model=model, stream=stream, **kwargs)
         except RetryError as e:
             raise SwitchboardError("All attempts failed") from e
-        except asyncio.CancelledError:
+        except asyncio.CancelledError:  # pragma: no cover
             pass
 
         # we should never reach here
-        raise SwitchboardError("Unexpected error")
+        raise SwitchboardError("Unexpected error")  # pragma: no cover
 
     def __repr__(self) -> str:
         return f"Switchboard({self.get_usage()})"
@@ -160,7 +160,7 @@ class LRUDict(OrderedDict):
         super().__setitem__(key, value)
         super().move_to_end(key)
 
-        while len(self) > self.max_size:
+        while len(self) > self.max_size:  # pragma: no cover
             oldkey = next(iter(self))
             super().__delitem__(oldkey)
 

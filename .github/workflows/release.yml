@@ -1,4 +1,4 @@
-name: Bump Version and Release
+name: Release New Version
 
 on:
   push:
@@ -8,20 +8,19 @@ on:
   workflow_dispatch:
 
 jobs:
-  test:
-    uses: ./.github/workflows/test.yml
-
-  bump-version:
-    needs: test
+  release:
     runs-on: ubuntu-latest
     permissions:
       contents: write # For pushing tag, commit and creating release
       id-token: write # For trusted publishing to PyPI
 
-    # Only run if push is from a human (not another workflow)
+    # Only run if push is from a human (not another workflow, to avoid loops on tag push)
     if: github.actor != 'github-actions[bot]' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
 
     steps:
+      - name: Preflight checks
+        uses: ./.github/workflows/test.yml
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # Fetch all history for bumpver
@@ -31,19 +30,14 @@ jobs:
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
 
-      - uses: extractions/setup-just@v2
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-
       - name: Bump version
         run: |
-          just bump-version --tag-commit
+          uv run --frozen bumpver update
           # Extract the new version
           NEW_VERSION=$(grep -m1 'current_version = ' pyproject.toml | cut -d'"' -f2)
           echo "PACKAGE_VERSION=$NEW_VERSION" >> $GITHUB_ENV
@@ -54,7 +48,7 @@ jobs:
           git push origin ${{ env.PACKAGE_VERSION }}
 
       - name: Build package
-        run: uv build
+        run: uv build --no-sources
 
       - name: Create GitHub Release
         env:

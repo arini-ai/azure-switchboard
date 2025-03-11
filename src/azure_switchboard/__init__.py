@@ -1,8 +1,8 @@
-from .client import Client, Deployment, ModelConfig, SwitchboardClientError
+from .client import Client, Deployment, ModelState, SwitchboardClientError
 from .switchboard import Switchboard, SwitchboardError
 
 __all__ = [
-    "ModelConfig",
+    "ModelState",
     "Deployment",
     "Client",
     "Switchboard",

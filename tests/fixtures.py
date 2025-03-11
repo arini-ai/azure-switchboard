@@ -5,20 +5,18 @@ from openai.types.chat.chat_completion_chunk import ChoiceDelta
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.completion_usage import CompletionUsage
 
-from azure_switchboard import Deployment, ModelConfig
+from azure_switchboard import Deployment, ModelState
 
 
-def _make_model_config() -> dict[str, ModelConfig]:
+def _make_model_config() -> dict[str, ModelState]:
     return {
-        "gpt-4o-mini": ModelConfig(
-            model="gpt-4o-mini",
-            tpm_ratelimit=10000,
-            rpm_ratelimit=60,
+        "gpt-4o-mini": ModelState(
+            tpm=10000,
+            rpm=60,
         ),
-        "gpt-4o": ModelConfig(
-            model="gpt-4o",
-            tpm_ratelimit=10000,
-            rpm_ratelimit=60,
+        "gpt-4o": ModelState(
+            tpm=10000,
+            rpm=60,
         ),
     }
 
@@ -129,44 +127,3 @@ MOCK_COMPLETION = ChatCompletion(
         total_tokens=11,
     ),
 )
-
-MOCK_COMPLETION_RAW = {
-    "choices": [
-        {
-            "finish_reason": "stop",
-            "index": 0,
-            "logprobs": None,
-            "message": {
-                "content": "Hello! How can I assist you today?",
-                "refusal": None,
-                "role": "assistant",
-            },
-        }
-    ],
-    "created": 1741124380,
-    "id": "chatcmpl-test",
-    "model": "gpt-4o-mini",
-    "object": "chat.completion",
-    "service_tier": "default",
-    "system_fingerprint": "fp_06737a9306",
-    "usage": {
-        "completion_tokens": 10,
-        "completion_tokens_details": {
-            "accepted_prediction_tokens": 0,
-            "audio_tokens": 0,
-            "reasoning_tokens": 0,
-            "rejected_prediction_tokens": 0,
-        },
-        "prompt_tokens": 8,
-        "prompt_tokens_details": {"audio_tokens": 0, "cached_tokens": 0},
-        "total_tokens": 18,
-    },
-}
-
-MOCK_COMPLETION_PARSED = ChatCompletion.model_validate(MOCK_COMPLETION_RAW)
-
-
-BASIC_CHAT_COMPLETION_ARGS = {
-    "model": "gpt-4o-mini",
-    "messages": [{"role": "user", "content": "Hello, world!"}],
-}
