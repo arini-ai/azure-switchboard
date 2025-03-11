@@ -1,4 +1,5 @@
 import asyncio
+from unittest.mock import MagicMock, patch
 
 import openai
 import pytest
@@ -35,7 +36,7 @@ class TestClient(BaseTestCase):
     def _get_model(self, client: Client, model: str) -> ModelState:
         return client.config.models[model]
 
-    async def test_completion(self, mock_client):
+    async def test_completion(self, mock_client: Client):
         """Test basic chat completion functionality."""
 
         response = await mock_client.create(**self.basic_args)
@@ -59,7 +60,7 @@ class TestClient(BaseTestCase):
         assert usage["tpm"] == "14/10000"
         assert usage["rpm"] == "2/60"
 
-    async def test_streaming(self, mock_client):
+    async def test_streaming(self, mock_client: Client):
         """Test streaming functionality."""
 
         stream = await mock_client.create(stream=True, **self.basic_args)
@@ -97,7 +98,24 @@ class TestClient(BaseTestCase):
         assert usage["tpm"] == "23/10000"
         assert usage["rpm"] == "2/60"
 
-    async def test_cooldown(self, mock_client):
+        # Test midstream exception handling
+        # shim through spend tokens to raise the exception
+        mock_client.client.chat.completions.create.side_effect = None
+        with patch("azure_switchboard.client.ModelState.spend_tokens") as mock:
+            mock.side_effect = Exception("spend_tokens error")
+            with pytest.raises(Exception, match="spend_tokens error"):
+                stream = await mock_client.create(stream=True, **self.basic_args)
+                assert mock_client.client.chat.completions.create.call_count == 3
+                async for _ in stream:
+                    pass
+
+            assert mock.call_count == 1
+            assert not model.is_healthy()
+
+        model.reset_cooldown()
+        assert model.is_healthy()
+
+    async def test_cooldown(self, mock_client: Client):
         """Test model-level cooldown functionality."""
         model = self._get_model(mock_client, "gpt-4o-mini")
 
@@ -107,23 +125,25 @@ class TestClient(BaseTestCase):
         model.reset_cooldown()
         assert model.is_healthy()
 
-    async def test_valid_model(self, mock_client):
+    async def test_valid_model(self, mock_client: Client):
         """Test that an invalid model raises an error."""
         with pytest.raises(SwitchboardClientError, match="gpt-fake not configured"):
             await mock_client.create(model="gpt-fake", messages=[])
 
-    async def test_usage(self, mock_client):
+    async def test_usage(self, mock_client: Client):
         """Test client-level counters"""
         # Reset and verify initial state
         for model in mock_client.config.models.values():
-            usage = model.get_usage()
-            assert usage["tpm"] == "0/10000"
-            assert usage["rpm"] == "0/60"
+            model_str = str(model)
+            assert "tpm=0/10000" in model_str
+            assert "rpm=0/60" in model_str
 
         # Test client-level usage
         usage = mock_client.get_usage()
         assert usage["gpt-4o-mini"]["tpm"] == "0/10000"
         assert usage["gpt-4o-mini"]["rpm"] == "0/60"
+        client_str = str(mock_client)
+        assert "models=" in client_str
 
         # Set and verify values
         model = self._get_model(mock_client, "gpt-4o-mini")
@@ -144,7 +164,7 @@ class TestClient(BaseTestCase):
         assert usage["gpt-4o-mini"]["rpm"] == "0/60"
         assert model._last_reset > 0
 
-    async def test_utilization(self, mock_client):
+    async def test_utilization(self, mock_client: Client):
         """Test utilization calculation."""
 
         model = self._get_model(mock_client, "gpt-4o-mini")
@@ -175,7 +195,7 @@ class TestClient(BaseTestCase):
         model.cooldown()
         assert model.util() == 1
 
-    async def test_concurrency(self, mock_client):
+    async def test_concurrency(self, mock_client: Client):
         """Test handling of multiple concurrent requests."""
         mock_client.reset_usage()
         # Create and run concurrent requests

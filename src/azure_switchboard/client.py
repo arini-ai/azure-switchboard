@@ -102,7 +102,7 @@ class ModelState(BaseModel):
     def spend_tokens(self, n: int) -> None:
         self._tpm_usage += n
 
-    def __repr__(self) -> str:
+    def __str__(self) -> str:
         return " ".join(f"{k}={v}" for k, v in self.get_usage().items())
 
 
@@ -114,7 +114,7 @@ class Client:
         self.client = client
 
     def __repr__(self) -> str:
-        return f"Client(name={self.config.name}, models={self.config.models.items()}])"
+        return f"Client(name={self.config.name}, models={self.config.models}])"
 
     def reset_usage(self) -> None:
         for model in self.config.models.values():
