@@ -18,12 +18,12 @@ jobs:
     if: github.actor != 'github-actions[bot]' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
 
     steps:
-      - name: Preflight checks
-        uses: ./.github/workflows/test.yml
-
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # Fetch all history for bumpver
+
+      - name: Preflight checks
+        uses: ./.github/workflows/test.yml
 
       - name: Configure Git
         run: |
