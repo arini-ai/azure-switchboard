@@ -23,7 +23,7 @@ jobs:
           fetch-depth: 0 # Fetch all history for bumpver
 
       - name: Preflight checks
-        uses: ./.github/workflows/test.yml
+        uses: test.yml
 
       - name: Configure Git
         run: |
