@@ -17,6 +17,9 @@ jobs:
     permissions:
       contents: write # For pushing tag, commit and creating release
 
+    outputs:
+      version: ${{ steps.bumpver.outputs.version }}
+
     # Only run if push is from a human (not another workflow, to avoid loops on tag push)
     if: github.actor != 'github-actions[bot]' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
 
@@ -39,16 +42,17 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Bump version
+        id: bumpver
         run: |
           uv run --frozen bumpver update
           # Extract the new version
           NEW_VERSION=$(grep -m1 'current_version = ' pyproject.toml | cut -d'"' -f2)
-          echo "PACKAGE_VERSION=$NEW_VERSION" >> $GITHUB_ENV
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
       - name: Push changes and tag
         run: |
           git push
-          git push origin ${{ env.PACKAGE_VERSION }}
+          git push origin ${{ steps.bumpver.outputs.version }}
 
   publish:
     needs: release
@@ -70,9 +74,9 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: >-
           gh release create
-          "${{ env.PACKAGE_VERSION }}"
+          "${{ needs.release.outputs.version }}"
           --repo "$GITHUB_REPOSITORY"
-          --title "${{ env.PACKAGE_VERSION }}"
+          --title "${{ needs.release.outputs.version }}"
           --generate-notes
           dist/*
 
