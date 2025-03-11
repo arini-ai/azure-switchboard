@@ -12,35 +12,41 @@ from httpx import Response, TimeoutException
 from openai.types.chat import ChatCompletion
 from utils import BaseTestCase, create_mock_openai_client
 
-from azure_switchboard import Client, ModelConfig
-from azure_switchboard.client import default_client_factory
+from azure_switchboard import Client, ModelState
+from azure_switchboard.client import SwitchboardClientError, default_client_factory
 
 
 @pytest.fixture
-def mock_client() -> Client:
+def mock_client():
     """Create a Client instance with a basic mock."""
-    openai_mock = create_mock_openai_client()
-    return Client(TEST_DEPLOYMENT_1, client=openai_mock)
+    try:
+        openai_mock = create_mock_openai_client()
+        client = Client(TEST_DEPLOYMENT_1, client=openai_mock)
+        yield client
+    finally:
+        client.reset_usage()
+        for model in client.config.models.values():
+            model.reset_cooldown()
 
 
 class TestClient(BaseTestCase):
     """Client functionality tests."""
 
-    def _get_model(self, client: Client, model: str) -> ModelConfig:
+    def _get_model(self, client: Client, model: str) -> ModelState:
         return client.config.models[model]
 
     async def test_completion(self, mock_client):
         """Test basic chat completion functionality."""
 
-        mock_client.reset_usage()
-        model = self._get_model(mock_client, "gpt-4o-mini")
         response = await mock_client.create(**self.basic_args)
         assert mock_client.client.chat.completions.create.call_count == 1
         assert response == MOCK_COMPLETION
 
         # Check token usage tracking
-        assert model.tpm_usage == 11
-        assert model.rpm_usage == 1
+        model = self._get_model(mock_client, "gpt-4o-mini")
+        usage = model.get_usage()
+        assert usage["tpm"] == "11/10000"
+        assert usage["rpm"] == "1/60"
 
         # Test exception handling
         mock_client.client.chat.completions.create.side_effect = Exception("test")
@@ -49,39 +55,36 @@ class TestClient(BaseTestCase):
         assert mock_client.client.chat.completions.create.call_count == 2
 
         # account for preflight estimate
-        assert model.tpm_usage == 14
-        assert model.rpm_usage == 2
+        usage = model.get_usage()
+        assert usage["tpm"] == "14/10000"
+        assert usage["rpm"] == "2/60"
 
     async def test_streaming(self, mock_client):
         """Test streaming functionality."""
 
-        mock_client.reset_usage()
-        model = self._get_model(mock_client, "gpt-4o-mini")
         stream = await mock_client.create(stream=True, **self.basic_args)
         assert stream is not None
 
+        # Verify stream options
+        create_mock = mock_client.client.chat.completions.create
+        assert create_mock.call_args.kwargs.get("stream") is True
+        assert (
+            create_mock.call_args.kwargs.get("stream_options", {}).get("include_usage")
+            is True
+        )
+
         # Collect chunks and verify content
         received_chunks, content = await self.collect_chunks(stream)
-
-        # Verify stream options
-        assert (
-            mock_client.client.chat.completions.create.call_args.kwargs.get("stream")
-            is True
-        )
-        assert (
-            mock_client.client.chat.completions.create.call_args.kwargs.get(
-                "stream_options", {}
-            ).get("include_usage")
-            is True
-        )
 
         # Verify chunk handling
         assert len(received_chunks) == len(MOCK_STREAM_CHUNKS)
         assert content == "Hello, world!"
 
         # Verify token usage tracking
-        assert model.tpm_usage == 20
-        assert model.rpm_usage == 1
+        model = self._get_model(mock_client, "gpt-4o-mini")
+        usage = model.get_usage()
+        assert usage["tpm"] == "20/10000"
+        assert usage["rpm"] == "1/60"
 
         # Test exception handling
         mock_client.client.chat.completions.create.side_effect = Exception("test")
@@ -90,53 +93,81 @@ class TestClient(BaseTestCase):
             async for _ in stream:
                 pass
         assert mock_client.client.chat.completions.create.call_count == 2
-        assert model.rpm_usage == 2
+        usage = model.get_usage()
+        assert usage["tpm"] == "23/10000"
+        assert usage["rpm"] == "2/60"
+
+    async def test_cooldown(self, mock_client):
+        """Test model-level cooldown functionality."""
+        model = self._get_model(mock_client, "gpt-4o-mini")
+
+        model.cooldown()
+        assert not model.is_healthy()
+
+        model.reset_cooldown()
+        assert model.is_healthy()
+
+    async def test_valid_model(self, mock_client):
+        """Test that an invalid model raises an error."""
+        with pytest.raises(SwitchboardClientError, match="gpt-fake not configured"):
+            await mock_client.create(model="gpt-fake", messages=[])
 
     async def test_usage(self, mock_client):
-        """Test counter management."""
+        """Test client-level counters"""
         # Reset and verify initial state
-        mock_client.reset_usage()
         for model in mock_client.config.models.values():
-            assert model.tpm_usage == 0
-            assert model.rpm_usage == 0
+            usage = model.get_usage()
+            assert usage["tpm"] == "0/10000"
+            assert usage["rpm"] == "0/60"
+
+        # Test client-level usage
+        usage = mock_client.get_usage()
+        assert usage["gpt-4o-mini"]["tpm"] == "0/10000"
+        assert usage["gpt-4o-mini"]["rpm"] == "0/60"
 
         # Set and verify values
         model = self._get_model(mock_client, "gpt-4o-mini")
-        model.tpm_usage = 100
-        model.rpm_usage = 5
-        counters = model.get_usage()
-        assert counters["tpm"] == "100/10000"
-        assert counters["rpm"] == "5/60"
+        model.spend_tokens(100)
+        model.spend_request(5)
+        usage = model.get_usage()
+        assert usage["tpm"] == "100/10000"
+        assert usage["rpm"] == "5/60"
+
+        usage = mock_client.get_usage()
+        assert usage["gpt-4o-mini"]["tpm"] == "100/10000"
+        assert usage["gpt-4o-mini"]["rpm"] == "5/60"
 
         # Reset and verify again
         mock_client.reset_usage()
-        assert model.tpm_usage == 0
-        assert model.rpm_usage == 0
+        usage = mock_client.get_usage()
+        assert usage["gpt-4o-mini"]["tpm"] == "0/10000"
+        assert usage["gpt-4o-mini"]["rpm"] == "0/60"
         assert model._last_reset > 0
 
     async def test_utilization(self, mock_client):
         """Test utilization calculation."""
-        mock_client.reset_usage()
-        mock_client.config.models["gpt-4o-mini"].reset_cooldown()
+
+        model = self._get_model(mock_client, "gpt-4o-mini")
 
         # Check initial utilization (nonzero due to random splay)
         initial_util = mock_client.util("gpt-4o-mini")
         assert 0 <= initial_util < 0.02
 
         # Test token-based utilization
-        model = self._get_model(mock_client, "gpt-4o-mini")
-        model.tpm_usage = 5000  # 50% of TPM limit
+        model.spend_tokens(5000)  # 50% of TPM limit
         util_with_tokens = model.util()
         assert 0.5 <= util_with_tokens < 0.52
 
         # Test request-based utilization
-        model.rpm_usage = 30  # 50% of RPM limit
+        model.reset_usage()
+        model.spend_request(30)  # 50% of RPM limit
         util_with_requests = model.util()
         assert 0.5 <= util_with_requests < 0.52
 
         # Test combined utilization (should take max of the two)
-        model.tpm_usage = 6000  # 60% of TPM
-        model.rpm_usage = 30  # 50% of RPM
+        model.reset_usage()
+        model.spend_tokens(6000)  # 60% of TPM
+        model.spend_request(30)  # 50% of RPM
         util_with_both = model.util()
         assert 0.6 <= util_with_both < 0.62
 
@@ -157,8 +188,9 @@ class TestClient(BaseTestCase):
         assert len(responses) == num_requests
         assert all(r == MOCK_COMPLETION for r in responses)
         assert mock_client.client.chat.completions.create.call_count == num_requests
-        assert model.tpm_usage == 11 * num_requests
-        assert model.rpm_usage == num_requests
+        usage = model.get_usage()
+        assert usage["tpm"] == f"{11 * num_requests}/10000"
+        assert usage["rpm"] == f"{num_requests}/60"
 
     @pytest.fixture
     def d1_mock(self):

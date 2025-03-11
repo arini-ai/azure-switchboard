@@ -218,6 +218,9 @@ uv build
 # TODO
 
 * add fallback to openai
+* client inherit from azure client?
+* opentelemetry integration
+* lru list for usage tracking / better ratelimit handling
 
 ## License
 
