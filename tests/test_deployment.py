@@ -11,18 +11,18 @@ from fixtures import (
 )
 from httpx import Response, TimeoutException
 from openai.types.chat import ChatCompletion
-from utils import BaseTestCase, create_mock_openai_client
+from utils import BaseTestCase, create_mock_azure_client
 
 from azure_switchboard import Deployment, DeploymentError
-from azure_switchboard.deployment import default_deployment_factory
+from azure_switchboard.deployment import azure_client_factory
 
 
 @pytest.fixture
 def mock_deployment():
     """Create a Client instance with a basic mock."""
+    openai_mock = create_mock_azure_client()
+    client = Deployment(TEST_DEPLOYMENT_1, client=openai_mock)
     try:
-        openai_mock = create_mock_openai_client()
-        client = Deployment(TEST_DEPLOYMENT_1, client=openai_mock)
         yield client
     finally:
         client.reset_usage()
@@ -101,7 +101,7 @@ class TestDeployment(BaseTestCase):
         stream = await mock_deployment.create(stream=True, **self.basic_args)
         with patch.object(stream.__wrapped__, "__aiter__") as mock:  # type: ignore
             mock.side_effect = Exception("spend_tokens error")
-            with pytest.raises(Exception, match="spend_tokens error"):
+            with pytest.raises(DeploymentError, match="Error in wrapped stream"):
                 assert mock_deployment.client.chat.completions.create.call_count == 3
                 await self.collect_chunks(stream)
             assert mock.call_count == 1
@@ -222,7 +222,7 @@ class TestDeployment(BaseTestCase):
         respx to mock out the underlying httpx client so we can verify
         the retry logic.
         """
-        return default_deployment_factory(TEST_DEPLOYMENT_1)
+        return azure_client_factory(TEST_DEPLOYMENT_1)
 
     async def test_timeout_retry(self, d1_mock, test_client):
         """Test timeout retry behavior."""

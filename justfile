@@ -6,8 +6,8 @@ install:
 test *args='':
   uv run pytest {{args}}
 
-lint:
-  uv run ruff check .
+lint *args='':
+  uv run ruff check . {{args}}
 
 bump-version *args='':
   uv run bumpver update {{args}}

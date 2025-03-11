@@ -5,7 +5,7 @@ from openai import AsyncStream
 from openai.types.chat import ChatCompletionChunk
 
 
-def create_mock_openai_client() -> AsyncMock:
+def create_mock_azure_client() -> AsyncMock:
     """Create a basic mock client that returns MOCK_COMPLETION."""
     mock = AsyncMock()
     mock.models.list = AsyncMock()
