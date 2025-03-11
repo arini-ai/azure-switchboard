@@ -6,11 +6,11 @@ import random
 from collections import OrderedDict
 from typing import Callable, Literal, overload
 
-from openai import AsyncStream
+from openai import AsyncOpenAI, AsyncStream
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from tenacity import AsyncRetrying, RetryError, stop_after_attempt
 
-from .deployment import Deployment, DeploymentConfig, default_deployment_factory
+from .deployment import Deployment, DeploymentConfig, azure_client_factory
 
 logger = logging.getLogger(__name__)
 
@@ -23,19 +23,32 @@ class Switchboard:
     def __init__(
         self,
         deployments: list[DeploymentConfig],
-        client_factory: Callable[[DeploymentConfig], Deployment] = (
-            default_deployment_factory
-        ),
         ratelimit_window: int = 60,  # Reset usage counters every minute
+        fallback: DeploymentConfig | None = None,
+        retries: int = 2,
+        deployment_factory: Callable[[DeploymentConfig], Deployment] = (
+            azure_client_factory
+        ),
     ) -> None:
         self.deployments: dict[str, Deployment] = {
-            deployment.name: client_factory(deployment) for deployment in deployments
+            deployment.name: deployment_factory(deployment)
+            for deployment in deployments
         }
+
+        self.fallback = None
+        if fallback:
+            self.fallback = Deployment(
+                config=fallback,
+                client=AsyncOpenAI(
+                    api_key=fallback.api_key or None,
+                    base_url=fallback.api_base or None,
+                ),
+            )
 
         self.ratelimit_window = ratelimit_window
 
         self.fallback_policy = AsyncRetrying(
-            stop=stop_after_attempt(2),
+            stop=stop_after_attempt(retries),
         )
 
         self._sessions = LRUDict(max_size=1024)
@@ -132,14 +145,19 @@ class Switchboard:
                 with attempt:
                     client = self.select_deployment(model=model, session_id=session_id)
                     logger.debug(f"Sending completion request to {client}")
-                    return await client.create(model=model, stream=stream, **kwargs)
-        except RetryError as e:
-            raise SwitchboardError("All attempts failed") from e
-        except asyncio.CancelledError:  # pragma: no cover
-            pass
+                    response = await client.create(model=model, stream=stream, **kwargs)
+                    return response
+        except RetryError:
+            logger.exception("Azure retries exhausted")
 
-        # we should never reach here
-        raise SwitchboardError("Unexpected error")  # pragma: no cover
+        if self.fallback:
+            logger.warning("Attempting fallback to OpenAI")
+            try:
+                return await self.fallback.create(model=model, stream=stream, **kwargs)
+            except Exception as e:
+                raise SwitchboardError("OpenAI fallback failed") from e
+        else:
+            raise SwitchboardError("All attempts failed")
 
     def __repr__(self) -> str:
         return f"Switchboard({self.get_usage()})"

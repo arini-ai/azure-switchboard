@@ -17,34 +17,28 @@ from contextlib import asynccontextmanager
 from azure_switchboard import DeploymentConfig, Model, Switchboard
 
 # use demo parameters from environment if available
-if not (api_base := os.getenv("AZURE_OPENAI_ENDPOINT")):
-    api_base = "https://your-deployment1.openai.azure.com/"
-if not (api_key := os.getenv("AZURE_OPENAI_API_KEY")):
-    api_key = "your-api-key"
+api_base = os.getenv("AZURE_OPENAI_ENDPOINT", "https://test.openai.azure.com/")
+api_key = os.getenv("AZURE_OPENAI_API_KEY", "your-api-key")
+openai_api_key = os.getenv("OPENAI_API_KEY", "your-openai-api-key")
 
-# Define deployments
-deployments = [
-    DeploymentConfig(
-        name="east",
-        api_base=api_base,
-        api_key=api_key,
-        models=[Model(name="gpt-4o-mini", tpm=10000, rpm=60)],
-    ),
-    DeploymentConfig(
-        name="west",
-        # re-use the keys here since the switchboard
-        # implementation doesn't know about it
-        api_base=api_base,
-        api_key=api_key,
-        models=[Model(name="gpt-4o-mini", tpm=10000, rpm=60)],
-    ),
-    DeploymentConfig(
-        name="south",
-        api_base=api_base,
-        api_key=api_key,
-        models=[Model(name="gpt-4o-mini", tpm=10000, rpm=60)],
-    ),
-]
+# define deployments
+deployments = []
+for name in ("east", "west", "south"):
+    deployments.append(
+        DeploymentConfig(
+            name=name,
+            api_base=api_base,  # can reuse since the implementation doesn't know
+            api_key=api_key,
+            models=[Model(name="gpt-4o-mini", tpm=10000, rpm=60)],
+        )
+    )
+
+fallback = DeploymentConfig(
+    name="openai",
+    api_base="",  # gets populated by AsyncOpenAI automatically
+    api_key=openai_api_key,
+    models=[Model(name="gpt-4o-mini", tpm=10000, rpm=60)],
+)
 
 
 @asynccontextmanager
@@ -53,12 +47,11 @@ async def get_switchboard():
     injection for automatic cleanup.
     """
 
-    try:
-        # Create Switchboard with deployments
-        switchboard = Switchboard(deployments)
+    # Create Switchboard and start background tasks
+    switchboard = Switchboard(deployments=deployments, fallback=fallback)
+    switchboard.start()
 
-        # Start background tasks (ratelimiting)
-        switchboard.start()
+    try:
         yield switchboard
     finally:
         await switchboard.stop()

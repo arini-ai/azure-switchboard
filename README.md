@@ -15,13 +15,14 @@ pip install azure-switchboard
 
 ## Features
 
-- **API Compatibility**: `Switchboard.create` is a transparent proxy for `OpenAI.chat.completions.create` and can be used as a drop-in replacement
-- **Coordination-Free**: Pick-2 algorithm does not require coordination between client instances to achieve good load distribution characteristics
-- **Utilization-Aware**: Tracks TPM/RPM usage per deployment for utilization-based loadbalancing
+- **API Compatibility**: `Switchboard.create` is a fully-typed, transparent drop-in replacement for `OpenAI.chat.completions.create`
+- **Coordination-Free**: Pick-2 algorithm does not require coordination between client instances to achieve excellent load distribution characteristics
+- **Utilization-Aware**: Load is distributed by TPM/RPM utilization per model per deployment
 - **Batteries Included**:
     - **Session Affinity**: Provide a `session_id` to route requests in the same session to the same deployment, optimizing for prompt caching
-    - **Automatic Failover**: Internally monitors deployment health and manages retries to fallback deployments automatically
+    - **Automatic Failover**: Client retries automatically up to `retries` times on deployment failure, with fallback to OpenAI configurable through the `fallback` parameter
 - **Lightweight**: Only three runtime dependencies: `openai`, `tenacity`, `wrapt`
+- **100% Test Coverage**: Implementation is fully unit tested.
 
 ## Basic Usage
 
@@ -35,34 +36,28 @@ from contextlib import asynccontextmanager
 from azure_switchboard import DeploymentConfig, Model, Switchboard
 
 # use demo parameters from environment if available
-if not (api_base := os.getenv("AZURE_OPENAI_ENDPOINT")):
-    api_base = "https://your-deployment1.openai.azure.com/"
-if not (api_key := os.getenv("AZURE_OPENAI_API_KEY")):
-    api_key = "your-api-key"
+api_base = os.getenv("AZURE_OPENAI_ENDPOINT", "https://test.openai.azure.com/")
+api_key = os.getenv("AZURE_OPENAI_API_KEY", "your-api-key")
+openai_api_key = os.getenv("OPENAI_API_KEY", "your-openai-api-key")
 
-# Define deployments
-deployments = [
-    DeploymentConfig(
-        name="east",
-        api_base=api_base,
-        api_key=api_key,
-        models=[Model(name="gpt-4o-mini", tpm=10000, rpm=60)],
-    ),
-    DeploymentConfig(
-        name="west",
-        # re-use the keys here since the switchboard
-        # implementation doesn't know about it
-        api_base=api_base,
-        api_key=api_key,
-        models=[Model(name="gpt-4o-mini", tpm=10000, rpm=60)],
-    ),
-    DeploymentConfig(
-        name="south",
-        api_base=api_base,
-        api_key=api_key,
-        models=[Model(name="gpt-4o-mini", tpm=10000, rpm=60)],
-    ),
-]
+# define deployments
+deployments = []
+for name in ("east", "west", "south"):
+    deployments.append(
+        DeploymentConfig(
+            name=name,
+            api_base=api_base,  # can reuse since the implementation doesn't know
+            api_key=api_key,
+            models=[Model(name="gpt-4o-mini", tpm=10000, rpm=60)],
+        )
+    )
+
+fallback = DeploymentConfig(
+    name="openai",
+    api_base="",  # gets populated by AsyncOpenAI automatically
+    api_key=openai_api_key,
+    models=[Model(name="gpt-4o-mini", tpm=10000, rpm=60)],
+)
 
 
 @asynccontextmanager
@@ -71,12 +66,11 @@ async def get_switchboard():
     injection for automatic cleanup.
     """
 
-    try:
-        # Create Switchboard with deployments
-        switchboard = Switchboard(deployments)
+    # Create Switchboard and start background tasks
+    switchboard = Switchboard(deployments=deployments, fallback=fallback)
+    switchboard.start()
 
-        # Start background tasks (ratelimiting)
-        switchboard.start()
+    try:
         yield switchboard
     finally:
         await switchboard.stop()
@@ -177,8 +171,9 @@ if __name__ == "__main__":
 | `name` | Configured model name, e.g. "gpt-4o" or "gpt-4o-mini" | Required |
 | `tpm` | Tokens per minute rate limit | 0 (unlimited) |
 | `rpm` | Requests per minute rate limit | 0 (unlimited) |
+| `default_cooldown` | Default cooldown period in seconds | 10.0 |
 
-### switchboard.Deployment Parameters
+### switchboard.DeploymentConfig Parameters
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
@@ -193,9 +188,11 @@ if __name__ == "__main__":
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `deployments` | List of Deployment objects | Required |
-| `client_factory` | Factory for creating AsyncAzureOpenAI clients | default_client_factory |
+| `deployments` | List of DeploymentConfig objects | Required |
 | `ratelimit_window` | Seconds before resetting usage counters | 60 |
+| `fallback` | Fallback DeploymentConfig | None |
+| `retries` | Number of retries on deployment failure | 2 |
+| `deployment_factory` | Factory for creating Deployments | azure_client_factory |
 
 ## Development
 
@@ -204,7 +201,6 @@ and [just](https://github.com/casey/just) for task automation. See the [justfile
 for available commands.
 
 ```bash
-# Clone the repository
 git clone https://github.com/arini-ai/azure-switchboard
 cd azure-switchboard
 
@@ -215,13 +211,11 @@ just install
 
 ```bash
 just test
-# uv run pytest
 ```
 
-### Building the package
+### Release
 
-If tests pass, a package is automatically built, released, and uploaded to PyPI on merge to master.
-This library uses CalVer for versioning.
+This library uses CalVer for versioning. On push to master, if tests pass, a package is automatically built, released, and uploaded to PyPI.
 
 Locally, the package can be built with uv:
 
@@ -229,9 +223,16 @@ Locally, the package can be built with uv:
 uv build
 ```
 
+## Contributing
+
+1. Fork/clone repo
+2. Make changes
+3. Run tests with `just test`
+4. Lint with `just lint --fix`
+5. Commit and make a PR
+
 # TODO
 
-* add fallback to openai
 * client inherit from azure client?
 * opentelemetry integration
 * lru list for usage tracking / better ratelimit handling

@@ -7,7 +7,7 @@ import time
 from typing import Annotated, AsyncIterator, Literal, cast, overload
 
 import wrapt
-from openai import AsyncAzureOpenAI, AsyncStream
+from openai import AsyncAzureOpenAI, AsyncOpenAI, AsyncStream
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from pydantic import BaseModel, Field, PrivateAttr, computed_field
 
@@ -108,7 +108,9 @@ class DeploymentError(Exception):
 class Deployment:
     """Runtime state of a deployment"""
 
-    def __init__(self, config: DeploymentConfig, client: AsyncAzureOpenAI) -> None:
+    def __init__(
+        self, config: DeploymentConfig, client: AsyncAzureOpenAI | AsyncOpenAI
+    ) -> None:
         self.config = config
         self.client = client
         self.models = {m.name: m for m in config.models}
@@ -193,9 +195,9 @@ class Deployment:
                     )
 
                 return response
-        except Exception as e:
+        except Exception:
             self.models[model].cooldown()
-            raise e
+            raise
 
     def _estimate_token_usage(self, kwargs: dict) -> int:
         # loose estimate of token cost. were only considering
@@ -234,20 +236,18 @@ class _AsyncStreamWrapper(wrapt.ObjectProxy):
         except asyncio.CancelledError:  # pragma: no cover
             logger.debug("Cancelled mid-stream")
             return
-        except Exception:
-            logger.exception("Error in wrapped stream")
+        except Exception as e:
             self._self_model_ref.cooldown()
-            raise
+            raise DeploymentError("Error in wrapped stream") from e
 
 
-def azure_client_factory(deployment: DeploymentConfig) -> AsyncAzureOpenAI:
-    return AsyncAzureOpenAI(
-        azure_endpoint=deployment.api_base,
-        api_key=deployment.api_key,
-        api_version=deployment.api_version,
-        timeout=deployment.timeout,
+def azure_client_factory(deployment: DeploymentConfig) -> Deployment:
+    return Deployment(
+        config=deployment,
+        client=AsyncAzureOpenAI(
+            azure_endpoint=deployment.api_base,
+            api_key=deployment.api_key,
+            api_version=deployment.api_version,
+            timeout=deployment.timeout,
+        ),
     )
-
-
-def default_deployment_factory(deployment: DeploymentConfig) -> Deployment:
-    return Deployment(config=deployment, client=azure_client_factory(deployment))

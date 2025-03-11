@@ -1,4 +1,5 @@
 import asyncio
+from unittest.mock import AsyncMock
 
 import pytest
 from fixtures import (
@@ -7,21 +8,27 @@ from fixtures import (
     TEST_DEPLOYMENT_2,
     TEST_DEPLOYMENT_3,
 )
-from utils import BaseTestCase, create_mock_openai_client
+from utils import BaseTestCase, create_mock_azure_client
 
-from azure_switchboard import Deployment, Switchboard, SwitchboardError
+from azure_switchboard import (
+    Deployment,
+    DeploymentConfig,
+    Model,
+    Switchboard,
+    SwitchboardError,
+)
 
 
 @pytest.fixture
 def mock_switchboard():
     """Create a Switchboard with a shared underlying client."""
+    mock_azure = create_mock_azure_client()
+    switchboard = Switchboard(
+        [TEST_DEPLOYMENT_1, TEST_DEPLOYMENT_2, TEST_DEPLOYMENT_3],
+        ratelimit_window=0,  # disable ratelimit resets
+        deployment_factory=lambda x: Deployment(x, mock_azure),
+    )
     try:
-        mock_openai = create_mock_openai_client()
-        switchboard = Switchboard(
-            [TEST_DEPLOYMENT_1, TEST_DEPLOYMENT_2, TEST_DEPLOYMENT_3],
-            client_factory=lambda x: Deployment(x, mock_openai),
-            ratelimit_window=0,  # disable usage resets
-        )
         yield switchboard
     finally:
         switchboard.reset_usage()
@@ -82,7 +89,7 @@ class TestSwitchboard(BaseTestCase):
 
         # Mark last deployment as unhealthy
         deployments[2].models["gpt-4o-mini"].cooldown()
-        with pytest.raises(SwitchboardError):
+        with pytest.raises(SwitchboardError, match="All attempts failed"):
             await mock_switchboard.create(**self.basic_args)
 
         # Restore first deployment
@@ -155,6 +162,82 @@ class TestSwitchboard(BaseTestCase):
         )
         assert response4 == MOCK_COMPLETION
         assert mock_switchboard._sessions[session_id] == fallback_deployment
+
+    @pytest.fixture
+    def mock_fallback(self):
+        """Create a Switchboard with a shared underlying client."""
+        mock_azure = create_mock_azure_client()
+        switchboard = Switchboard(
+            deployments=[TEST_DEPLOYMENT_1],
+            fallback=DeploymentConfig(
+                name="openai",
+                api_base="",  # no need, provided by AsyncOpenAI underneath
+                api_key="test",
+                models=[Model(name="gpt-4o-mini", tpm=1000, rpm=1000)],
+            ),
+            ratelimit_window=0,
+            deployment_factory=lambda x: Deployment(x, mock_azure),
+        )
+        try:
+            yield switchboard
+        finally:
+            switchboard.reset_usage()
+
+    async def test_fallback_to_openai(self, mock_fallback: Switchboard):
+        """Test that the switchboard can fallback to OpenAI."""
+
+        assert mock_fallback.fallback is not None
+        fallback_mock = AsyncMock()
+        fallback_mock.return_value = MOCK_COMPLETION
+        mock_fallback.fallback.client.chat.completions.create = fallback_mock
+
+        # basic test to verify the fallback works
+        response = await mock_fallback.fallback.create(**self.basic_args)
+        assert response == MOCK_COMPLETION
+        assert fallback_mock.call_count == 1
+
+        # default: use the healthy azure deployment
+        response = await mock_fallback.create(**self.basic_args)
+        assert response == MOCK_COMPLETION
+        t1 = mock_fallback.deployments["test1"]
+        assert t1.client.chat.completions.create.call_count == 1
+        assert fallback_mock.call_count == 1
+
+        # make deployment unhealthy so it falls back to openai
+        t1.models["gpt-4o-mini"].cooldown()
+        await mock_fallback.create(**self.basic_args)
+        assert t1.client.chat.completions.create.call_count == 1
+        assert fallback_mock.call_count == 2
+
+        # make openai fallback unhealthy, verify it throws
+        fallback_mock.side_effect = Exception("test")
+        with pytest.raises(SwitchboardError, match="OpenAI fallback failed"):
+            await mock_fallback.create(**self.basic_args)
+        assert fallback_mock.call_count == 3
+
+        # bring the deployment back, verify we use it
+        t1.models["gpt-4o-mini"].reset_cooldown()
+        await mock_fallback.create(**self.basic_args)
+        assert t1.client.chat.completions.create.call_count == 2
+        assert fallback_mock.call_count == 3
+
+        # make everything unhealthy, verify it throws
+        t1.models["gpt-4o-mini"].cooldown()
+        with pytest.raises(SwitchboardError, match="OpenAI fallback failed"):
+            await mock_fallback.create(**self.basic_args)
+        assert fallback_mock.call_count == 4
+
+        # reset fallback, verify it works
+        fallback_mock.side_effect = None
+        await mock_fallback.create(**self.basic_args)
+        assert t1.client.chat.completions.create.call_count == 2
+        assert fallback_mock.call_count == 5
+
+        # reset the deployment and verify it gets used again
+        t1.models["gpt-4o-mini"].reset_cooldown()
+        await mock_fallback.create(**self.basic_args)
+        assert t1.client.chat.completions.create.call_count == 3
+        assert fallback_mock.call_count == 5
 
     def _within_bounds(self, val, min, max, tolerance=0.05):
         """Check if a value is within bounds, accounting for tolerance."""
