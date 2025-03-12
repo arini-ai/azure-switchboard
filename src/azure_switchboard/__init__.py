@@ -1,18 +1,18 @@
 from .deployment import (
+    AzureDeployment,
     Deployment,
-    DeploymentConfig,
     DeploymentError,
     Model,
-    azure_factory,
+    OpenAIDeployment,
 )
 from .switchboard import Switchboard, SwitchboardError
 
 __all__ = [
     "Deployment",
-    "DeploymentConfig",
+    "AzureDeployment",
+    "OpenAIDeployment",
     "Model",
     "Switchboard",
     "SwitchboardError",
     "DeploymentError",
-    "azure_factory",
 ]

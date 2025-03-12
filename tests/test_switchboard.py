@@ -1,243 +1,230 @@
 import asyncio
-from unittest.mock import AsyncMock
+from unittest.mock import patch
 
 import pytest
-from fixtures import (
-    MOCK_COMPLETION,
-    TEST_DEPLOYMENT_1,
-    TEST_DEPLOYMENT_2,
-    TEST_DEPLOYMENT_3,
-)
-from utils import BaseTestCase, create_mock_azure_client
+import respx
 
-from azure_switchboard import (
-    Deployment,
-    DeploymentConfig,
-    Model,
-    Switchboard,
-    SwitchboardError,
-)
+from azure_switchboard import OpenAIDeployment, Switchboard, SwitchboardError
+
+from .fixtures import MOCK_COMPLETION, MOCK_COMPLETION_JSON
+from .utils import BaseTestCase, azure_config, chat_completion_mock, openai_config
 
 
-@pytest.fixture
-def mock_switchboard():
-    """Create a Switchboard with a shared underlying client."""
-    mock_azure = create_mock_azure_client()
-    switchboard = Switchboard(
-        [TEST_DEPLOYMENT_1, TEST_DEPLOYMENT_2, TEST_DEPLOYMENT_3],
-        ratelimit_window=0,  # disable ratelimit resets
-        deployment_factory=lambda x: Deployment(x, mock_azure),
-    )
-    try:
-        yield switchboard
-    finally:
-        switchboard.reset_usage()
-        for client in switchboard.deployments.values():
-            for model in client.models.values():
-                model.reset_cooldown()
+@pytest.fixture(scope="function")
+def switchboard(request: pytest.FixtureRequest):
+    deployments = request.node.get_closest_marker("deployments") or [
+        azure_config("test1"),
+        azure_config("test2"),
+        azure_config("test3"),
+    ]
+    return Switchboard(deployments=deployments)
+
+
+@pytest.fixture(scope="function", autouse=True)
+def mock_client():
+    with respx.mock() as respx_mock:
+        respx_mock.route(
+            name="gpt-4o-mini",
+            method="POST",
+            path="/openai/deployments/gpt-4o-mini/chat/completions",
+        ).respond(status_code=200, json=MOCK_COMPLETION_JSON)
+
+        yield respx_mock
 
 
 class TestSwitchboard(BaseTestCase):
     """Basic switchboard functionality tests."""
 
-    def _get_deployment(self, switchboard: Switchboard) -> Deployment:
-        return next(iter(switchboard.deployments.values()))
+    async def test_completion(
+        self, switchboard: Switchboard, mock_client: respx.MockRouter
+    ):
+        """Test chat completion through switchboard."""
 
-    async def test_repr(self, mock_switchboard: Switchboard):
-        sb_repr = repr(mock_switchboard)
-        assert sb_repr.startswith("Switchboard")
+        assert "Switchboard" in repr(switchboard)
 
-    async def test_completion(self, mock_switchboard: Switchboard):
-        """Test basic chat completion through switchboard."""
-
-        response = await mock_switchboard.create(**self.basic_args)
-        deployment = self._get_deployment(mock_switchboard)
-        deployment.client.chat.completions.create.assert_called_once()
+        response = await switchboard.create(**self.basic_args)
+        assert mock_client["gpt-4o-mini"].call_count == 1
         assert response == MOCK_COMPLETION
 
-    async def test_streaming(self, mock_switchboard: Switchboard):
+        assert any(
+            filter(
+                lambda d: d["gpt-4o-mini"].get("rpm") == "1/60",
+                switchboard.get_usage().values(),
+            )
+        )
+
+    async def test_streaming(
+        self, switchboard: Switchboard, mock_client: respx.MockRouter
+    ):
         """Test streaming through switchboard."""
 
-        stream = await mock_switchboard.create(stream=True, **self.basic_args)
-        _, content = await self.collect_chunks(stream)
+        mock_client._assert_all_called = False
 
-        deployment = self._get_deployment(mock_switchboard)
-        deployment.client.chat.completions.create.assert_called_once()
-        assert content == "Hello, world!"
+        with patch("azure_switchboard.deployment.Deployment.create") as mock:
+            mock.side_effect = chat_completion_mock()
+            stream = await switchboard.create(stream=True, **self.basic_args)
+            _, content = await self.collect_chunks(stream)
 
-    async def test_selection(self, mock_switchboard: Switchboard):
+            assert mock.call_count == 1
+            assert content == "Hello, world!"
+
+    async def test_selection(
+        self, switchboard: Switchboard, mock_client: respx.MockRouter
+    ):
         """Test basic selection invariants"""
-        client = mock_switchboard.select_deployment(model="gpt-4o-mini")
-        assert client.config.name in mock_switchboard.deployments
+        client = switchboard.select_deployment(model="gpt-4o-mini")
+        assert client.config.name in switchboard.deployments
 
-        deployments = list(mock_switchboard.deployments.values())
+        deployments = list(switchboard.deployments.values())
         assert len(deployments) == 3, "Need exactly 3 deployments for this test"
 
         # Initial request should work
-        response = await mock_switchboard.create(**self.basic_args)
+        response = await switchboard.create(**self.basic_args)
         assert response == MOCK_COMPLETION
+        assert mock_client["gpt-4o-mini"].call_count == 1
+        host_0 = mock_client["gpt-4o-mini"].calls.last.request.url.host
 
         # Mark first deployment as unhealthy
         deployments[0].models["gpt-4o-mini"].cooldown()
-        response = await mock_switchboard.create(**self.basic_args)
+        response = await switchboard.create(**self.basic_args)
         assert response == MOCK_COMPLETION
+        assert mock_client["gpt-4o-mini"].call_count == 2
+        host_1 = mock_client["gpt-4o-mini"].calls.last.request.url.host
 
         # Mark second deployment as unhealthy
         deployments[1].models["gpt-4o-mini"].cooldown()
-        response = await mock_switchboard.create(**self.basic_args)
+        response = await switchboard.create(**self.basic_args)
         assert response == MOCK_COMPLETION
+        assert mock_client["gpt-4o-mini"].call_count == 3
+        host_2 = mock_client["gpt-4o-mini"].calls.last.request.url.host
 
         # Mark last deployment as unhealthy
         deployments[2].models["gpt-4o-mini"].cooldown()
         with pytest.raises(SwitchboardError, match="All attempts failed"):
-            await mock_switchboard.create(**self.basic_args)
+            await switchboard.create(**self.basic_args)
+        assert mock_client["gpt-4o-mini"].call_count == 3
 
         # Restore first deployment
         deployments[0].models["gpt-4o-mini"].reset_cooldown()
-        response = await mock_switchboard.create(**self.basic_args)
+        response = await switchboard.create(**self.basic_args)
         assert response == MOCK_COMPLETION
+        assert mock_client["gpt-4o-mini"].call_count == 4
+        host_3 = mock_client["gpt-4o-mini"].calls.last.request.url.host
 
-    async def test_session_stickiness(self, mock_switchboard: Switchboard) -> None:
+        assert len(set([host_0, host_1, host_2, host_3])) > 1
+
+    async def test_session_stickiness(
+        self, switchboard: Switchboard, mock_client: respx.MockRouter
+    ) -> None:
         """Test session stickiness and failover."""
 
+        mock_client._assert_all_called = False
+
         # Test consistent deployment selection for session
-        client_1 = mock_switchboard.select_deployment(
-            session_id="test", model="gpt-4o-mini"
-        )
-        client_2 = mock_switchboard.select_deployment(
-            session_id="test", model="gpt-4o-mini"
-        )
+        client_1 = switchboard.select_deployment(session_id="test", model="gpt-4o-mini")
+        client_2 = switchboard.select_deployment(session_id="test", model="gpt-4o-mini")
         assert client_1.config.name == client_2.config.name
 
         # Test failover when selected deployment is unhealthy
         client_1.models["gpt-4o-mini"].cooldown()
-        client_3 = mock_switchboard.select_deployment(
-            session_id="test", model="gpt-4o-mini"
-        )
+        client_3 = switchboard.select_deployment(session_id="test", model="gpt-4o-mini")
         assert client_3.config.name != client_1.config.name
 
         # Test session maintains failover assignment
-        client_4 = mock_switchboard.select_deployment(
-            session_id="test", model="gpt-4o-mini"
-        )
+        client_4 = switchboard.select_deployment(session_id="test", model="gpt-4o-mini")
         assert client_4.config.name == client_3.config.name
 
-    async def test_session_stickiness_failover(self, mock_switchboard: Switchboard):
+    async def test_session_stickiness_failover(
+        self, switchboard: Switchboard, mock_client: respx.MockRouter
+    ):
         """Test session affinity when preferred deployment becomes unavailable."""
 
         session_id = "test"
 
         # Initial request establishes session affinity
-        response1 = await mock_switchboard.create(
-            session_id=session_id, **self.basic_args
-        )
+        response1 = await switchboard.create(session_id=session_id, **self.basic_args)
         assert response1 == MOCK_COMPLETION
-
+        assert mock_client["gpt-4o-mini"].call_count == 1
         # Get assigned deployment
-        assigned_deployment = mock_switchboard._sessions[session_id]
+        assigned_deployment = switchboard._sessions[session_id]
         original_deployment = assigned_deployment
 
         # Verify session stickiness
-        response2 = await mock_switchboard.create(
-            session_id=session_id, **self.basic_args
-        )
+        response2 = await switchboard.create(session_id=session_id, **self.basic_args)
         assert response2 == MOCK_COMPLETION
-        assert mock_switchboard._sessions[session_id] == original_deployment
+        assert switchboard._sessions[session_id] == original_deployment
 
         # Make assigned deployment unhealthy
         model = original_deployment.models["gpt-4o-mini"]
         model.cooldown()
 
         # Verify failover
-        response3 = await mock_switchboard.create(
-            session_id=session_id, **self.basic_args
-        )
+        response3 = await switchboard.create(session_id=session_id, **self.basic_args)
         assert response3 == MOCK_COMPLETION
-        assert mock_switchboard._sessions[session_id] != original_deployment
+        assert switchboard._sessions[session_id] != original_deployment
 
         # Verify session maintains new assignment
-        fallback_deployment = mock_switchboard._sessions[session_id]
-        response4 = await mock_switchboard.create(
-            session_id=session_id, **self.basic_args
-        )
+        fallback_deployment = switchboard._sessions[session_id]
+        response4 = await switchboard.create(session_id=session_id, **self.basic_args)
         assert response4 == MOCK_COMPLETION
-        assert mock_switchboard._sessions[session_id] == fallback_deployment
+        assert switchboard._sessions[session_id] == fallback_deployment
 
-    @pytest.fixture
-    def mock_fallback(self):
-        """Create a Switchboard with a shared underlying client."""
-        mock_azure = create_mock_azure_client()
-        switchboard = Switchboard(
-            deployments=[TEST_DEPLOYMENT_1],
-            fallback=DeploymentConfig(
-                name="openai",
-                api_base="",  # no need, provided by AsyncOpenAI underneath
-                api_key="test",
-                models=[Model(name="gpt-4o-mini", tpm=1000, rpm=1000)],
-            ),
-            ratelimit_window=0,
-            deployment_factory=lambda x: Deployment(x, mock_azure),
-        )
-        try:
-            yield switchboard
-        finally:
-            switchboard.reset_usage()
-
-    async def test_fallback_to_openai(self, mock_fallback: Switchboard):
+    async def test_fallback_to_openai(self, mock_client: respx.MockRouter):
         """Test that the switchboard can fallback to OpenAI."""
 
-        assert mock_fallback.fallback is not None
-        fallback_mock = AsyncMock()
-        fallback_mock.return_value = MOCK_COMPLETION
-        mock_fallback.fallback.client.chat.completions.create = fallback_mock
+        switchboard = Switchboard(deployments=[azure_config("test1"), openai_config()])
+        mock_client.route(
+            name="openai",
+            method="POST",
+            host="api.openai.com",
+            path="/v1/chat/completions",
+        ).respond(status_code=200, json=MOCK_COMPLETION_JSON)
+
+        assert switchboard.fallback is not None
+        assert isinstance(switchboard.fallback.config, OpenAIDeployment)
 
         # basic test to verify the fallback works
-        response = await mock_fallback.fallback.create(**self.basic_args)
+        response = await switchboard.fallback.create(**self.basic_args)
         assert response == MOCK_COMPLETION
-        assert fallback_mock.call_count == 1
+        assert mock_client["openai"].call_count == 1
 
         # default: use the healthy azure deployment
-        response = await mock_fallback.create(**self.basic_args)
+        response = await switchboard.create(**self.basic_args)
         assert response == MOCK_COMPLETION
-        t1 = mock_fallback.deployments["test1"]
-        assert t1.client.chat.completions.create.call_count == 1
-        assert fallback_mock.call_count == 1
+        assert mock_client["gpt-4o-mini"].call_count == 1
 
         # make deployment unhealthy so it falls back to openai
-        t1.models["gpt-4o-mini"].cooldown()
-        await mock_fallback.create(**self.basic_args)
-        assert t1.client.chat.completions.create.call_count == 1
-        assert fallback_mock.call_count == 2
+        switchboard.deployments["test1"].models["gpt-4o-mini"].cooldown()
+        await switchboard.create(**self.basic_args)
+        assert mock_client["openai"].call_count == 2
 
         # make openai fallback unhealthy, verify it throws
-        fallback_mock.side_effect = Exception("test")
-        with pytest.raises(SwitchboardError, match="OpenAI fallback failed"):
-            await mock_fallback.create(**self.basic_args)
-        assert fallback_mock.call_count == 3
+        mock_client["openai"].side_effect = Exception("test")
+        with pytest.raises(SwitchboardError, match="Fallback to OpenAI failed"):
+            await switchboard.create(**self.basic_args)
+        # 3 total additional calls were made, because openai retries twice internally
+        assert mock_client["openai"].call_count == 5
 
         # bring the deployment back, verify we use it
-        t1.models["gpt-4o-mini"].reset_cooldown()
-        await mock_fallback.create(**self.basic_args)
-        assert t1.client.chat.completions.create.call_count == 2
-        assert fallback_mock.call_count == 3
+        switchboard.deployments["test1"].models["gpt-4o-mini"].reset_cooldown()
+        await switchboard.create(**self.basic_args)
+        assert mock_client["gpt-4o-mini"].call_count == 2
 
         # make everything unhealthy, verify it throws
-        t1.models["gpt-4o-mini"].cooldown()
-        with pytest.raises(SwitchboardError, match="OpenAI fallback failed"):
-            await mock_fallback.create(**self.basic_args)
-        assert fallback_mock.call_count == 4
+        switchboard.deployments["test1"].models["gpt-4o-mini"].cooldown()
+        with pytest.raises(SwitchboardError, match="Fallback to OpenAI failed"):
+            await switchboard.create(**self.basic_args)
+        assert mock_client["openai"].call_count == 8
 
         # reset fallback, verify it works
-        fallback_mock.side_effect = None
-        await mock_fallback.create(**self.basic_args)
-        assert t1.client.chat.completions.create.call_count == 2
-        assert fallback_mock.call_count == 5
+        mock_client["openai"].side_effect = None
+        await switchboard.create(**self.basic_args)
+        assert mock_client["openai"].call_count == 9
 
         # reset the deployment and verify it gets used again
-        t1.models["gpt-4o-mini"].reset_cooldown()
-        await mock_fallback.create(**self.basic_args)
-        assert t1.client.chat.completions.create.call_count == 3
-        assert fallback_mock.call_count == 5
+        switchboard.deployments["test1"].models["gpt-4o-mini"].reset_cooldown()
+        await switchboard.create(**self.basic_args)
+        assert mock_client["gpt-4o-mini"].call_count == 3
 
     def _within_bounds(self, val, min, max, tolerance=0.05):
         """Check if a value is within bounds, accounting for tolerance."""
@@ -245,70 +232,69 @@ class TestSwitchboard(BaseTestCase):
             1 + tolerance
         )
 
-    async def test_load_distribution(self, mock_switchboard: Switchboard):
+    async def test_load_distribution(self, switchboard: Switchboard):
         """Test that load is distributed across healthy deployments."""
 
         # Make 100 requests
-        for _ in range(100):
-            await mock_switchboard.create(**self.basic_args)
+        await asyncio.gather(
+            *[switchboard.create(**self.basic_args) for _ in range(100)]
+        )
 
         # Verify all deployments were used
-        for client in mock_switchboard.deployments.values():
+        for deployment in switchboard.deployments.values():
             assert self._within_bounds(
-                val=client.models["gpt-4o-mini"]._rpm_usage,
+                val=deployment.models["gpt-4o-mini"]._rpm_usage,
                 min=25,
                 max=40,
             )
 
-    async def test_load_distribution_health_awareness(
-        self, mock_switchboard: Switchboard
-    ):
+    async def test_load_distribution_health_awareness(self, switchboard: Switchboard):
         """Test load distribution when some deployments are unhealthy."""
 
         # Mark one deployment as unhealthy
-        mock_switchboard.deployments["test2"].models["gpt-4o-mini"].cooldown()
+        switchboard.deployments["test2"].models["gpt-4o-mini"].cooldown()
 
         # Make 100 requests
         for _ in range(100):
-            await mock_switchboard.create(**self.basic_args)
+            await switchboard.create(**self.basic_args)
 
         # Verify distribution
         assert self._within_bounds(
-            val=mock_switchboard.deployments["test1"].models["gpt-4o-mini"]._rpm_usage,
+            val=switchboard.deployments["test1"].models["gpt-4o-mini"]._rpm_usage,
             min=40,
             max=60,
         )
         assert self._within_bounds(
-            val=mock_switchboard.deployments["test2"].models["gpt-4o-mini"]._rpm_usage,
+            val=switchboard.deployments["test2"].models["gpt-4o-mini"]._rpm_usage,
             min=0,
             max=0,
         )
         assert self._within_bounds(
-            val=mock_switchboard.deployments["test3"].models["gpt-4o-mini"]._rpm_usage,
+            val=switchboard.deployments["test3"].models["gpt-4o-mini"]._rpm_usage,
             min=40,
             max=60,
         )
 
     async def test_load_distribution_utilization_awareness(
-        self, mock_switchboard: Switchboard
+        self, switchboard: Switchboard
     ):
         """Selection should prefer to load deployments with lower utilization."""
 
         # Make 100 requests to preload the deployments, should be evenly distributed
         for _ in range(100):
-            await mock_switchboard.create(**self.basic_args)
+            await switchboard.create(**self.basic_args)
 
         # reset utilization of one deployment
-        client = mock_switchboard.select_deployment(model="gpt-4o-mini")
+        client = switchboard.select_deployment(model="gpt-4o-mini")
         client.reset_usage()
 
         # make another 100 requests
         for _ in range(100):
-            await mock_switchboard.create(**self.basic_args)
+            await switchboard.create(**self.basic_args)
 
         # verify the load distribution is still roughly even
         # (ie, we preferred to send requests to the underutilized deployment)
-        for client in mock_switchboard.deployments.values():
+        for client in switchboard.deployments.values():
             assert self._within_bounds(
                 val=client.models["gpt-4o-mini"]._rpm_usage,
                 min=60,
@@ -316,19 +302,17 @@ class TestSwitchboard(BaseTestCase):
                 tolerance=0.1,
             )
 
-    async def test_load_distribution_session_stickiness(
-        self, mock_switchboard: Switchboard
-    ):
+    async def test_load_distribution_session_stickiness(self, switchboard: Switchboard):
         """Test that session stickiness works correctly with load distribution."""
 
-        session_ids = ["session1", "session2", "session3", "session4", "session5"]
+        session_ids = ["1", "2", "3", "4", "5"]
 
-        # Make 50 requests total (10 per session ID)
+        # Make 100 requests total (10 per session ID)
         requests = []
-        for _ in range(10):
+        for _ in range(20):
             for session_id in session_ids:
                 requests.append(
-                    mock_switchboard.create(session_id=session_id, **self.basic_args)
+                    switchboard.create(session_id=session_id, **self.basic_args)
                 )
 
         await asyncio.gather(*requests)
@@ -337,34 +321,42 @@ class TestSwitchboard(BaseTestCase):
         request_counts = sorted(
             [
                 client.models["gpt-4o-mini"]._rpm_usage
-                for client in mock_switchboard.deployments.values()
+                for client in switchboard.deployments.values()
             ]
         )
-        assert sum(request_counts) == 50
-        assert request_counts == [10, 20, 20], (
+        assert sum(request_counts) == 100
+        assert request_counts == [20, 40, 40], (
             "5 sessions into 3 deployments should create 1:2:2 distribution"
         )
 
-    async def test_ratelimit_reset(self, mock_switchboard: Switchboard):
+    async def test_ratelimit_reset(self, switchboard: Switchboard):
         """Test that the ratelimit is reset correctly."""
 
-        # disabled upstream so restart it for the purpose
-        # of this test
-        mock_switchboard.ratelimit_window = 1
-        mock_switchboard.start()
+        # create an empty switchboard to verify autostart
+        async with Switchboard(deployments=[]) as sb:
+            assert sb.ratelimit_reset_task
+
+        # speed things up a bit
+        switchboard._ratelimit_window = 0.5
+        switchboard.start()
+
+        assert switchboard.ratelimit_reset_task is not None
 
         # make some requests to add usage
         for _ in range(10):
-            await mock_switchboard.create(**self.basic_args)
+            await switchboard.create(**self.basic_args)
 
-        usage = mock_switchboard.get_usage()
+        for d in switchboard.deployments.values():
+            m = d.models["gpt-4o-mini"]
+            assert m._tpm_usage > 0
+            assert m._rpm_usage > 0
 
         # wait for the ratelimit to reset
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
 
-        usage2 = mock_switchboard.get_usage()
+        for d in switchboard.deployments.values():
+            m = d.models["gpt-4o-mini"]
+            assert m._tpm_usage == 0
+            assert m._rpm_usage == 0
 
-        assert usage2 != usage
-
-        await mock_switchboard.stop()
-        mock_switchboard.ratelimit_window = 0
+        await switchboard.stop()

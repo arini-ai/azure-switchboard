@@ -4,30 +4,35 @@ import asyncio
 import logging
 import random
 import time
-from typing import Annotated, AsyncIterator, Literal, cast, overload
+from typing import AsyncIterator, Literal, cast, overload
 
 import wrapt
 from openai import AsyncAzureOpenAI, AsyncOpenAI, AsyncStream
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
-from pydantic import BaseModel, Field, PrivateAttr, computed_field
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
 
-class Model(BaseModel):
+class Model:
     """Runtime state of a model on a deployment"""
 
-    name: str
-    tpm: Annotated[int, Field(description="TPM Ratelimit")] = 0
-    rpm: Annotated[int, Field(description="RPM Ratelimit")] = 0
-    default_cooldown: Annotated[
-        float, Field(repr=False, description="Default cooldown period in seconds")
-    ] = 10.0
+    def __init__(
+        self,
+        name: str,
+        tpm: int = 0,
+        rpm: int = 0,
+        default_cooldown: float = 10.0,
+    ):
+        self.name = name
+        self.tpm = tpm
+        self.rpm = rpm
+        self.default_cooldown = default_cooldown
 
-    _tpm_usage: int = PrivateAttr(default=0)
-    _rpm_usage: int = PrivateAttr(default=0)
-    _cooldown_until: float = PrivateAttr(default=0)
-    _last_reset: float = PrivateAttr(default=0)
+        self._tpm_usage: int = 0
+        self._rpm_usage: int = 0
+        self._cooldown_until: float = 0
+        self._last_reset: float = 0
 
     def cooldown(self, seconds: float = 0.0) -> None:
         self._cooldown_until = time.time() + (seconds or self.default_cooldown)
@@ -44,7 +49,6 @@ class Model(BaseModel):
     def is_cooling(self) -> bool:
         return time.time() < self._cooldown_until
 
-    @computed_field
     @property
     def util(self) -> float:
         """
@@ -86,19 +90,49 @@ class Model(BaseModel):
     def spend_tokens(self, n: int) -> None:
         self._tpm_usage += n
 
-    def __str__(self) -> str:
-        return " ".join(f"{k}={v}" for k, v in self.get_usage().items())
+    def __repr__(self) -> str:
+        elems = ", ".join(f"{k}={v}" for k, v in self.get_usage().items())
+        return f"{self.__class__.__name__}(name={self.name}, {elems})"
 
 
-class DeploymentConfig(BaseModel):
-    """Metadata about the Azure deployment"""
+class AzureDeployment(BaseModel, arbitrary_types_allowed=True):
+    """Metadata about an Azure deployment"""
 
     name: str
-    api_base: str
+    endpoint: str
     api_key: str
     api_version: str = "2024-10-21"
     timeout: float = 600.0
     models: list[Model]
+    client: AsyncAzureOpenAI | None = None
+
+    def get_client(self) -> AsyncAzureOpenAI:
+        return AsyncAzureOpenAI(
+            azure_endpoint=self.endpoint,
+            api_key=self.api_key,
+            api_version=self.api_version,
+            timeout=self.timeout,
+        )
+
+
+class OpenAIDeployment(BaseModel, arbitrary_types_allowed=True):
+    """Metadata about an OpenAI deployment"""
+
+    name: str = "openai"
+    api_key: str | None = None
+    base_url: str | None = None
+    timeout: float = 600.0
+    models: list[Model] = Field(
+        default_factory=lambda: [Model(name="gpt-4o-mini"), Model(name="gpt-4o")]
+    )
+    client: AsyncOpenAI | None = None
+
+    def get_client(self) -> AsyncOpenAI:
+        return AsyncOpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=self.timeout,
+        )
 
 
 class DeploymentError(Exception):
@@ -109,14 +143,16 @@ class Deployment:
     """Runtime state of a deployment"""
 
     def __init__(
-        self, config: DeploymentConfig, client: AsyncAzureOpenAI | AsyncOpenAI
+        self,
+        config: AzureDeployment | OpenAIDeployment,
     ) -> None:
         self.config = config
-        self.client = client
+        self.client = config.get_client()
         self.models = {m.name: m for m in config.models}
 
     def __repr__(self) -> str:
-        return f"Client(name={self.config.name}, models={self.models})"
+        elems = ", ".join(map(str, self.models.values()))
+        return f"Deployment(name={self.config.name}, models=[{elems}])"
 
     def reset_usage(self) -> None:
         for model in self.models.values():
@@ -163,14 +199,13 @@ class Deployment:
         kwargs["timeout"] = kwargs.get("timeout", self.config.timeout)
         try:
             if stream:
-                stream_options = kwargs.pop("stream_options", {})
-                stream_options["include_usage"] = True
-
                 logging.debug("Creating streaming completion")
                 response_stream = await self.client.chat.completions.create(
                     model=model,
                     stream=True,
-                    stream_options=stream_options,
+                    stream_options=kwargs.pop(
+                        "stream_options", {"include_usage": True}
+                    ),
                     **kwargs,
                 )
 
@@ -239,15 +274,3 @@ class _AsyncStreamWrapper(wrapt.ObjectProxy):
         except Exception as e:
             self._self_model_ref.cooldown()
             raise DeploymentError("Error in wrapped stream") from e
-
-
-def azure_factory(deployment: DeploymentConfig) -> Deployment:
-    return Deployment(
-        config=deployment,
-        client=AsyncAzureOpenAI(
-            azure_endpoint=deployment.api_base,
-            api_key=deployment.api_key,
-            api_version=deployment.api_version,
-            timeout=deployment.timeout,
-        ),
-    )
