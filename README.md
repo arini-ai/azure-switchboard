@@ -6,7 +6,7 @@ Batteries-included, coordination-free client loadbalancing for Azure OpenAI.
 pip install azure-switchboard
 ```
 
-[![PyPI version](https://badge.fury.io/py/azure-switchboard.svg)](https://badge.fury.io/py/azure-switchboard)
+[![PyPI - Version](https://img.shields.io/pypi/v/azure-switchboard)](https://pypi.org/project/azure-switchboard/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Tests](https://github.com/arini-ai/azure-switchboard/actions/workflows/test.yml/badge.svg?branch=master)](https://github.com/arini-ai/azure-switchboard/actions/workflows/test.yml)
 
