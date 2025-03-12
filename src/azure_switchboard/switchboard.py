@@ -4,13 +4,17 @@ import asyncio
 import logging
 import random
 from collections import OrderedDict
-from typing import Callable, Literal, overload
+from typing import Callable, Literal, Sequence, overload
 
-from openai import AsyncOpenAI, AsyncStream
+from openai import AsyncStream
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from tenacity import AsyncRetrying, RetryError, stop_after_attempt
 
-from .deployment import Deployment, DeploymentConfig, azure_client_factory
+from .deployment import (
+    AzureDeployment,
+    Deployment,
+    OpenAIDeployment,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -19,51 +23,57 @@ class SwitchboardError(Exception):
     pass
 
 
+def two_random_choices(model: str, options: list[Deployment]) -> Deployment:
+    """Power of two random choices algorithm.
+
+    Randomly select 2 deployments and return the one
+    with lower util for the given model.
+    """
+    selected = random.sample(options, min(2, len(options)))
+    return min(selected, key=lambda d: d.util(model))
+
+
 class Switchboard:
     def __init__(
         self,
-        deployments: list[DeploymentConfig],
-        ratelimit_window: int = 60,  # Reset usage counters every minute
-        fallback: DeploymentConfig | None = None,
-        retries: int = 2,
-        deployment_factory: Callable[[DeploymentConfig], Deployment] = (
-            azure_client_factory
-        ),
+        deployments: Sequence[AzureDeployment | OpenAIDeployment],
+        selector: Callable[[str, list[Deployment]], Deployment] = two_random_choices,
+        failover_policy: AsyncRetrying = AsyncRetrying(stop=stop_after_attempt(2)),
     ) -> None:
-        self.deployments: dict[str, Deployment] = {
-            deployment.name: deployment_factory(deployment)
-            for deployment in deployments
-        }
+        self.deployments: dict[str, Deployment] = {}
+        self.fallback: Deployment | None = None
 
-        self.fallback = None
-        if fallback:
-            self.fallback = Deployment(
-                config=fallback,
-                client=AsyncOpenAI(
-                    api_key=fallback.api_key or None,
-                    base_url=fallback.api_base or None,
-                ),
-            )
+        for deployment in deployments:
+            if isinstance(deployment, OpenAIDeployment):
+                self.fallback = Deployment(deployment)
+            else:
+                self.deployments[deployment.name] = Deployment(deployment)
 
-        self.ratelimit_window = ratelimit_window
+        self.selector = selector
 
-        self.fallback_policy = AsyncRetrying(
-            stop=stop_after_attempt(retries),
-        )
+        self.failover_policy = failover_policy
 
-        self._sessions = LRUDict(max_size=1024)
+        # expire old sessions
+        self._sessions = _LRUDict(max_size=1024)
+
+        # reset usage every minute
+        self._ratelimit_window = 60.0
+
+    async def __aenter__(self) -> Switchboard:
+        self.start()
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
+        await self.stop()
 
     def start(self) -> None:
-        # Start background tasks if intervals are positive
-        if self.ratelimit_window > 0:
+        async def periodic_reset():
+            while True:
+                await asyncio.sleep(self._ratelimit_window)
+                logger.debug("Resetting usage counters")
+                self.reset_usage()
 
-            async def periodic_reset():
-                while True:
-                    await asyncio.sleep(self.ratelimit_window)
-                    logger.debug("Resetting usage counters")
-                    self.reset_usage()
-
-            self.ratelimit_reset_task = asyncio.create_task(periodic_reset())
+        self.ratelimit_reset_task = asyncio.create_task(periodic_reset())
 
     async def stop(self):
         if self.ratelimit_reset_task:
@@ -96,27 +106,23 @@ class Switchboard:
 
             logger.warning(f"{client} is unhealthy, falling back to selection")
 
-        # Get healthy deployments for the requested model
-        healthy_deployments = list(
+        # Get eligible deployments for the requested model
+        eligible_deployments = list(
             filter(lambda d: d.is_healthy(model), self.deployments.values())
         )
-        if not healthy_deployments:
-            raise SwitchboardError("No healthy deployments available")
+        if not eligible_deployments:
+            raise SwitchboardError(f"No eligible deployments available for {model}")
 
-        if len(healthy_deployments) == 1:
-            return healthy_deployments[0]
+        if len(eligible_deployments) == 1:
+            return eligible_deployments[0]
 
-        # Power of two random choices
-        choices = random.sample(healthy_deployments, min(2, len(healthy_deployments)))
-
-        # Select the client with the lower utilization for the model
-        selected = min(choices, key=lambda d: d.util(model))
-        logger.debug(f"Selected {selected}")
+        selection = self.selector(model, eligible_deployments)
+        logger.debug(f"Selected {selection}")
 
         if session_id:
-            self._sessions[session_id] = selected
+            self._sessions[session_id] = selection
 
-        return selected
+        return selection
 
     @overload
     async def create(
@@ -141,30 +147,30 @@ class Switchboard:
         """
 
         try:
-            async for attempt in self.fallback_policy:
+            async for attempt in self.failover_policy:
                 with attempt:
                     client = self.select_deployment(model=model, session_id=session_id)
                     logger.debug(f"Sending completion request to {client}")
                     response = await client.create(model=model, stream=stream, **kwargs)
                     return response
         except RetryError:
-            logger.exception("Azure retries exhausted")
+            logger.exception("Azure failovers exhausted")
 
         if self.fallback:
             logger.warning("Attempting fallback to OpenAI")
             try:
                 return await self.fallback.create(model=model, stream=stream, **kwargs)
             except Exception as e:
-                raise SwitchboardError("OpenAI fallback failed") from e
+                raise SwitchboardError("Fallback to OpenAI failed") from e
         else:
             raise SwitchboardError("All attempts failed")
 
     def __repr__(self) -> str:
-        return f"Switchboard({self.get_usage()})"
+        return f"Switchboard({self.deployments})"
 
 
 # borrowed from https://gist.github.com/davesteele/44793cd0348f59f8fadd49d7799bd306
-class LRUDict(OrderedDict):
+class _LRUDict(OrderedDict):
     def __init__(self, *args, max_size: int = 1024, **kwargs):
         assert max_size > 0
         self.max_size = max_size

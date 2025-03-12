@@ -4,115 +4,129 @@ from unittest.mock import patch
 import openai
 import pytest
 import respx
-from fixtures import (
-    MOCK_COMPLETION,
-    MOCK_STREAM_CHUNKS,
-    TEST_DEPLOYMENT_1,
-)
 from httpx import Response, TimeoutException
-from openai.types.chat import ChatCompletion
-from utils import BaseTestCase, create_mock_azure_client
 
 from azure_switchboard import Deployment, DeploymentError
-from azure_switchboard.deployment import azure_client_factory
+
+from .fixtures import (
+    MOCK_COMPLETION,
+    MOCK_COMPLETION_JSON,
+    MOCK_STREAM_CHUNKS,
+)
+from .utils import BaseTestCase, azure_config, chat_completion_mock
 
 
 @pytest.fixture
-def mock_deployment():
-    """Create a Client instance with a basic mock."""
-    openai_mock = create_mock_azure_client()
-    client = Deployment(TEST_DEPLOYMENT_1, client=openai_mock)
-    try:
-        yield client
-    finally:
-        client.reset_usage()
-        for model in client.models.values():
-            model.reset_cooldown()
+def mock_client():
+    with respx.mock(base_url="https://test1.openai.azure.com") as respx_mock:
+        respx_mock.post(
+            "/openai/deployments/gpt-4o-mini/chat/completions",
+            name="gpt-4o-mini",
+        ).respond(status_code=200, json=MOCK_COMPLETION_JSON)
+
+        yield respx_mock
 
 
 class TestDeployment(BaseTestCase):
     """Deployment functionality tests."""
 
-    async def test_completion(self, mock_deployment: Deployment):
+    async def test_completion(self, mock_client: respx.MockRouter):
         """Test basic chat completion functionality."""
 
-        response = await mock_deployment.create(**self.basic_args)
-        assert mock_deployment.client.chat.completions.create.call_count == 1
+        deployment = Deployment(azure_config("test1"))
+        deployment.client.max_retries = 0
+
+        response = await deployment.create(**self.basic_args)
+        assert mock_client.routes["gpt-4o-mini"].call_count == 1
         assert response == MOCK_COMPLETION
 
         # Check token usage tracking
-        model = mock_deployment.models["gpt-4o-mini"]
+        model = deployment.models["gpt-4o-mini"]
         usage = model.get_usage()
-        assert usage["tpm"] == "11/10000"
+        assert usage["tpm"] == "18/10000"
         assert usage["rpm"] == "1/60"
 
         # Test exception handling
-        mock_deployment.client.chat.completions.create.side_effect = Exception("test")
-        with pytest.raises(Exception, match="test"):
-            await mock_deployment.create(**self.basic_args)
-        assert mock_deployment.client.chat.completions.create.call_count == 2
+        mock_client.routes["gpt-4o-mini"].side_effect = Exception("test")
+        with pytest.raises(openai.APIConnectionError):
+            await deployment.create(**self.basic_args)
+        assert mock_client.routes["gpt-4o-mini"].call_count == 2
 
         # account for preflight estimate
         usage = model.get_usage()
-        assert usage["tpm"] == "14/10000"
+        assert usage["tpm"] == "21/10000"
         assert usage["rpm"] == "2/60"
 
-    async def test_streaming(self, mock_deployment: Deployment):
-        """Test streaming functionality."""
+    async def test_streaming(self):
+        """Test streaming functionality.
 
-        stream = await mock_deployment.create(stream=True, **self.basic_args)
-        assert stream is not None
+        It's annoying to try to mock HTTP streaming responses so we cheat
+        a little bit with an AsyncMock.
+        """
 
-        # Verify stream options
-        create_mock = mock_deployment.client.chat.completions.create
-        assert create_mock.call_args.kwargs.get("stream") is True
-        assert (
-            create_mock.call_args.kwargs.get("stream_options", {}).get("include_usage")
-            is True
-        )
+        deployment = Deployment(azure_config("test1"))
+        deployment.client.max_retries = 0
 
-        # Collect chunks and verify content
-        received_chunks, content = await self.collect_chunks(stream)
+        with patch.object(
+            deployment.client.chat.completions,
+            "create",
+            side_effect=chat_completion_mock(),
+        ) as mock:
+            stream = await deployment.create(stream=True, **self.basic_args)
+            mock.assert_called_once()
 
-        # Verify chunk handling
-        assert len(received_chunks) == len(MOCK_STREAM_CHUNKS)
-        assert content == "Hello, world!"
+            # verify basic behavior
+            received_chunks, content = await self.collect_chunks(stream)
+            assert len(received_chunks) == len(MOCK_STREAM_CHUNKS)
+            assert content == "Hello, world!"
 
-        # Verify token usage tracking
-        model = mock_deployment.models["gpt-4o-mini"]
-        usage = model.get_usage()
-        assert usage["tpm"] == "20/10000"
-        assert usage["rpm"] == "1/60"
+            # Verify token usage tracking
+            usage = deployment.models["gpt-4o-mini"].get_usage()
+            assert usage["tpm"] == "20/10000"
+            assert usage["rpm"] == "1/60"
 
-        # Test exception handling
-        mock_deployment.client.chat.completions.create.side_effect = Exception("test")
-        with pytest.raises(Exception, match="test"):
-            stream = await mock_deployment.create(stream=True, **self.basic_args)
-            async for _ in stream:
-                pass
-        assert mock_deployment.client.chat.completions.create.call_count == 2
-        usage = model.get_usage()
-        assert usage["tpm"] == "23/10000"
-        assert usage["rpm"] == "2/60"
+        # verify exception handling
+        with patch.object(
+            deployment.client.chat.completions,
+            "create",
+            side_effect=Exception("test"),
+        ) as mock:
+            with pytest.raises(Exception, match="test"):
+                stream = await deployment.create(stream=True, **self.basic_args)
+                async for _ in stream:
+                    pass
+            mock.assert_called_once()
+
+            usage = deployment.models["gpt-4o-mini"].get_usage()
+            assert usage["tpm"] == "23/10000"
+            assert usage["rpm"] == "2/60"
 
         # Test midstream exception handling
-        # shim through spend tokens to raise the exception
-        mock_deployment.client.chat.completions.create.side_effect = None
-        stream = await mock_deployment.create(stream=True, **self.basic_args)
-        with patch.object(stream.__wrapped__, "__aiter__") as mock:  # type: ignore
-            mock.side_effect = Exception("spend_tokens error")
-            with pytest.raises(DeploymentError, match="Error in wrapped stream"):
-                assert mock_deployment.client.chat.completions.create.call_count == 3
-                await self.collect_chunks(stream)
-            assert mock.call_count == 1
-            assert not model.is_healthy()
+        with patch.object(
+            deployment.client.chat.completions,
+            "create",
+            side_effect=chat_completion_mock(),
+        ) as mock:
+            stream = await deployment.create(stream=True, **self.basic_args)
 
-        model.reset_cooldown()
-        assert model.is_healthy()
+            with patch.object(
+                stream._self_model_ref,  # type: ignore[reportAttributeAccessIssue]
+                "spend_tokens",
+                side_effect=Exception("asyncstream error"),
+            ):
+                with pytest.raises(DeploymentError, match="Error in wrapped stream"):
+                    await self.collect_chunks(stream)
+                assert mock.call_count == 1
+                assert not deployment.models["gpt-4o-mini"].is_healthy()
 
-    async def test_cooldown(self, mock_deployment: Deployment):
+            deployment.models["gpt-4o-mini"].reset_cooldown()
+            assert deployment.models["gpt-4o-mini"].is_healthy()
+
+    async def test_cooldown(self):
         """Test model-level cooldown functionality."""
-        model = mock_deployment.models["gpt-4o-mini"]
+
+        deployment = Deployment(azure_config("test1"))
+        model = deployment.models["gpt-4o-mini"]
 
         model.cooldown()
         assert not model.is_healthy()
@@ -120,52 +134,58 @@ class TestDeployment(BaseTestCase):
         model.reset_cooldown()
         assert model.is_healthy()
 
-    async def test_valid_model(self, mock_deployment: Deployment):
+    async def test_valid_model(self):
         """Test that an invalid model raises an error."""
-        with pytest.raises(DeploymentError, match="gpt-fake not configured"):
-            await mock_deployment.create(model="gpt-fake", messages=[])
 
-    async def test_usage(self, mock_deployment: Deployment):
+        deployment = Deployment(azure_config("test1"))
+        with pytest.raises(DeploymentError, match="gpt-fake not configured"):
+            await deployment.create(model="gpt-fake", messages=[])
+
+    async def test_usage(self):
         """Test client-level counters"""
+
+        deployment = Deployment(azure_config("test1"))
         # Reset and verify initial state
-        for model in mock_deployment.models.values():
+        for model in deployment.models.values():
             model_str = str(model)
             assert "tpm=0/10000" in model_str
             assert "rpm=0/60" in model_str
 
         # Test client-level usage
-        usage = mock_deployment.get_usage()
+        usage = deployment.get_usage()
         assert usage["gpt-4o-mini"]["tpm"] == "0/10000"
         assert usage["gpt-4o-mini"]["rpm"] == "0/60"
-        client_str = str(mock_deployment)
+        client_str = str(deployment)
         assert "models=" in client_str
 
         # Set and verify values
-        model = mock_deployment.models["gpt-4o-mini"]
+        model = deployment.models["gpt-4o-mini"]
         model.spend_tokens(100)
         model.spend_request(5)
         usage = model.get_usage()
         assert usage["tpm"] == "100/10000"
         assert usage["rpm"] == "5/60"
 
-        usage = mock_deployment.get_usage()
+        usage = deployment.get_usage()
         assert usage["gpt-4o-mini"]["tpm"] == "100/10000"
         assert usage["gpt-4o-mini"]["rpm"] == "5/60"
 
         # Reset and verify again
-        mock_deployment.reset_usage()
-        usage = mock_deployment.get_usage()
+        deployment.reset_usage()
+        usage = deployment.get_usage()
         assert usage["gpt-4o-mini"]["tpm"] == "0/10000"
         assert usage["gpt-4o-mini"]["rpm"] == "0/60"
         assert model._last_reset > 0
 
-    async def test_utilization(self, mock_deployment: Deployment):
+    async def test_utilization(self):
         """Test utilization calculation."""
 
-        model = mock_deployment.models["gpt-4o-mini"]
+        deployment = Deployment(azure_config("test1"))
+
+        model = deployment.models["gpt-4o-mini"]
 
         # Check initial utilization (nonzero due to random splay)
-        initial_util = mock_deployment.util("gpt-4o-mini")
+        initial_util = deployment.util("gpt-4o-mini")
         assert 0 <= initial_util < 0.02
 
         # Test token-based utilization
@@ -190,96 +210,84 @@ class TestDeployment(BaseTestCase):
         model.cooldown()
         assert model.util == 1
 
-    async def test_concurrency(self, mock_deployment: Deployment):
+    async def test_multiple_models(self, mock_client: respx.MockRouter):
+        """Test that multiple models are handled correctly."""
+
+        deployment = Deployment(azure_config("test1"))
+
+        gpt4o = deployment.models["gpt-4o"]
+        gpt4o_mini = deployment.models["gpt-4o-mini"]
+
+        assert gpt4o is not None
+        assert gpt4o_mini is not None
+
+        mock_client.post(
+            "/openai/deployments/gpt-4o/chat/completions",
+            name="gpt-4o",
+        ).respond(status_code=200, json=MOCK_COMPLETION_JSON)
+
+        _ = await deployment.create(
+            model="gpt-4o", messages=self.basic_args["messages"]
+        )
+        assert mock_client.routes["gpt-4o"].call_count == 1
+        assert gpt4o._rpm_usage == 1
+        assert gpt4o._tpm_usage > 0
+        assert gpt4o_mini._tpm_usage == 0
+        assert gpt4o_mini._rpm_usage == 0
+
+        _ = await deployment.create(
+            model="gpt-4o-mini", messages=self.basic_args["messages"]
+        )
+        assert mock_client.routes["gpt-4o-mini"].call_count == 1
+
+        assert gpt4o._rpm_usage == 1
+        assert gpt4o._tpm_usage > 0
+        assert gpt4o_mini._tpm_usage > 0
+        assert gpt4o_mini._rpm_usage == 1
+
+    async def test_concurrency(self, mock_client: respx.MockRouter):
         """Test handling of multiple concurrent requests."""
-        mock_deployment.reset_usage()
+        deployment = Deployment(azure_config("test1"))
+
         # Create and run concurrent requests
         num_requests = 10
-        tasks = [mock_deployment.create(**self.basic_args) for _ in range(num_requests)]
+        tasks = [deployment.create(**self.basic_args) for _ in range(num_requests)]
         responses = await asyncio.gather(*tasks)
 
         # Verify results
-        model = mock_deployment.models["gpt-4o-mini"]
+        model = deployment.models["gpt-4o-mini"]
         assert len(responses) == num_requests
         assert all(r == MOCK_COMPLETION for r in responses)
-        assert mock_deployment.client.chat.completions.create.call_count == num_requests
+        assert mock_client.routes["gpt-4o-mini"].call_count == num_requests
         usage = model.get_usage()
-        assert usage["tpm"] == f"{11 * num_requests}/10000"
+        assert usage["tpm"] == f"{18 * num_requests}/10000"
         assert usage["rpm"] == f"{num_requests}/60"
 
-    @pytest.fixture
-    def d1_mock(self):
-        with respx.mock(base_url="https://test1.openai.azure.com") as respx_mock:
-            respx_mock.post(
-                "/openai/deployments/gpt-4o-mini/chat/completions",
-                name="completion",
-            )
-            yield respx_mock
-
-    @pytest.fixture
-    def test_client(self):
-        """Create a real Client instance using the default factory, but use
-        respx to mock out the underlying httpx client so we can verify
-        the retry logic.
-        """
-        return azure_client_factory(TEST_DEPLOYMENT_1)
-
-    async def test_timeout_retry(self, d1_mock, test_client):
+    async def test_timeout_retry(self, mock_client: respx.MockRouter):
         """Test timeout retry behavior."""
+
+        deployment = Deployment(azure_config("test1"))
+
         # Test successful retry after timeouts
-        expected_response = Response(status_code=200, json=MOCK_COMPLETION_RAW)
-        d1_mock.routes["completion"].side_effect = [
+        expected_response = Response(status_code=200, json=MOCK_COMPLETION_JSON)
+        mock_client.routes["gpt-4o-mini"].side_effect = [
             TimeoutException("Timeout 1"),
             TimeoutException("Timeout 2"),
             expected_response,
         ]
-        response = await test_client.create(**self.basic_args)
-        assert response == ChatCompletion.model_validate(MOCK_COMPLETION_RAW)
-        assert d1_mock.routes["completion"].call_count == 3
+        response = await deployment.create(**self.basic_args)
+        assert response == MOCK_COMPLETION
+        assert mock_client.routes["gpt-4o-mini"].call_count == 3
 
         # Test failure after max retries
-        d1_mock.routes["completion"].reset()
-        d1_mock.routes["completion"].side_effect = [
+        mock_client.routes["gpt-4o-mini"].reset()
+        mock_client.routes["gpt-4o-mini"].side_effect = [
             TimeoutException("Timeout 1"),
             TimeoutException("Timeout 2"),
             TimeoutException("Timeout 3"),
         ]
 
         with pytest.raises(openai.APITimeoutError):
-            await test_client.create(**self.basic_args)
-        assert d1_mock.routes["completion"].call_count == 3
-        assert not test_client.is_healthy("gpt-4o-mini")
-
-
-MOCK_COMPLETION_RAW = {
-    "choices": [
-        {
-            "finish_reason": "stop",
-            "index": 0,
-            "logprobs": None,
-            "message": {
-                "content": "Hello! How can I assist you today?",
-                "refusal": None,
-                "role": "assistant",
-            },
-        }
-    ],
-    "created": 1741124380,
-    "id": "chatcmpl-test",
-    "model": "gpt-4o-mini",
-    "object": "chat.completion",
-    "service_tier": "default",
-    "system_fingerprint": "fp_06737a9306",
-    "usage": {
-        "completion_tokens": 10,
-        "completion_tokens_details": {
-            "accepted_prediction_tokens": 0,
-            "audio_tokens": 0,
-            "reasoning_tokens": 0,
-            "rejected_prediction_tokens": 0,
-        },
-        "prompt_tokens": 8,
-        "prompt_tokens_details": {"audio_tokens": 0, "cached_tokens": 0},
-        "total_tokens": 18,
-    },
-}
+            await deployment.create(**self.basic_args)
+        assert mock_client.routes["gpt-4o-mini"].call_count == 3
+        assert not deployment.is_healthy("gpt-4o-mini")

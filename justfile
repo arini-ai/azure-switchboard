@@ -3,7 +3,7 @@ set fallback
 install:
   uv sync --frozen
 
-test *args='':
+test *args='--cov=azure_switchboard --cov-report=term-missing:skip-covered':
   uv run pytest {{args}}
 
 lint *args='':

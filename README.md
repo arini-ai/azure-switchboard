@@ -12,69 +12,74 @@ pip install azure-switchboard
 
 ## Overview
 
-`azure-switchboard` is a asyncio-only Python 3 library that provides an intelligent client loadbalancer for Azure OpenAI. You instantiate the Switchboard client with a set of Azure deployments, and the client distributes your chat completion requests across the provided deployments using the [power of two random choices](https://www.eecs.harvard.edu/~michaelm/postscripts/handbook2001.pdf) method based on utilization. In this sense, it serves as a lightweight service mesh between your application and Azure OpenAI. The basic idea is inspired by [ServiceRouter](https://www.usenix.org/system/files/osdi23-saokar.pdf).
+`azure-switchboard` is a Python 3 asyncio library that provides an intelligent, API-compatible client loadbalancer for Azure OpenAI. You instantiate a Switchboard client with a set of deployments, and the client distributes your chat completion requests across the available deployments using the [power of two random choices](https://www.eecs.harvard.edu/~michaelm/postscripts/handbook2001.pdf) method. In this sense, it functions as a lightweight service mesh between your application and Azure OpenAI. The basic idea is inspired by [ServiceRouter](https://www.usenix.org/system/files/osdi23-saokar.pdf).
 
 ## Features
 
-- **API Compatibility**: `Switchboard.create` is a fully-typed, transparent drop-in replacement for `OpenAI.chat.completions.create`
-- **Coordination-Free**: Pick-2 algorithm does not require coordination between client instances to achieve excellent load distribution characteristics
-- **Utilization-Aware**: Load is distributed by TPM/RPM utilization per model per deployment
+- **API Compatibility**: `Switchboard.create` is a transparently-typed drop-in proxy for `OpenAI.chat.completions.create`.
+- **Coordination-Free**: The default Two Random Choices algorithm does not require coordination between client instances to achieve excellent load distribution characteristics.
+- **Utilization-Aware**: TPM/RPM ratelimit utilization is tracked per model per deployment for use during selection.
 - **Batteries Included**:
     - **Session Affinity**: Provide a `session_id` to route requests in the same session to the same deployment, optimizing for prompt caching
-    - **Automatic Failover**: Client retries automatically up to `retries` times on deployment failure, with fallback to OpenAI configurable through the `fallback` parameter
-- **Lightweight**: Only three runtime dependencies: `openai`, `tenacity`, `wrapt`
-- **100% Test Coverage**: Implementation is fully unit tested.
+    - **Automatic Failover**: Client automatically retries 3 times on request failure, with optional fallback to OpenAI by providing an `OpenAIDeployment` in  `deployments`. The retry policy can also be customized by passing a tenacity
+    `AsyncRetrying` instance to `failover_policy`.
+    - **Pluggable Selection**: Custom selection algorithms can be
+    provided by passing a callable to the `selector` parameter on the Switchboard constructor.
 
-## Basic Usage
+- **Lightweight**: sub-400 LOC implementation with only three runtime dependencies: `openai`, `tenacity`, `wrapt`. <1ms overhead per request.
+- **100% Test Coverage**: There are twice as many lines in the tests as in the implementation.
 
-See `tools/readme_example.py` for a runnable example.
+## Runnable Example
 
 ```python
+#!/usr/bin/env python3
+#
+# To run this, use:
+#   uv run readme_example.py
+#
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "azure-switchboard",
+# ]
+# ///
+
 import asyncio
 import os
-from contextlib import asynccontextmanager
 
-from azure_switchboard import DeploymentConfig, Model, Switchboard
+from azure_switchboard import AzureDeployment, Model, OpenAIDeployment, Switchboard
 
-# use demo parameters from environment if available
-api_base = os.getenv("AZURE_OPENAI_ENDPOINT", "https://test.openai.azure.com/")
-api_key = os.getenv("AZURE_OPENAI_API_KEY", "your-api-key")
-openai_api_key = os.getenv("OPENAI_API_KEY", "your-openai-api-key")
+azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+azure_openai_api_key = os.getenv("AZURE_OPENAI_API_KEY")
+openai_api_key = os.getenv("OPENAI_API_KEY", None)
 
-# define deployments
 deployments = []
-for name in ("east", "west", "south"):
-    deployments.append(
-        DeploymentConfig(
-            name=name,
-            api_base=api_base,  # can reuse since the implementation doesn't know
-            api_key=api_key,
-            models=[Model(name="gpt-4o-mini", tpm=10000, rpm=60)],
+if azure_openai_endpoint and azure_openai_api_key:
+    # create 3 deployments. reusing the endpoint
+    # is fine for the purposes of this demo
+    for name in ("east", "west", "south"):
+        deployments.append(
+            AzureDeployment(
+                name=name,
+                endpoint=azure_openai_endpoint,
+                api_key=azure_openai_api_key,
+                models=[Model(name="gpt-4o-mini")],
+            )
         )
-    )
 
-fallback = DeploymentConfig(
-    name="openai",
-    api_base="",  # gets populated by AsyncOpenAI automatically
-    api_key=openai_api_key,
-    models=[Model(name="gpt-4o-mini", tpm=10000, rpm=60)],
-)
+if openai_api_key:
+    # we can use openai as a fallback deployment
+    # it will pick up the api key from the environment
+    deployments.append(OpenAIDeployment())
 
 
-@asynccontextmanager
-async def get_switchboard():
-    """Use a pattern analogous to FastAPI dependency
-    injection for automatic cleanup.
-    """
+async def main():
+    async with Switchboard(deployments=deployments) as sb:
+        print("Basic functionality:")
+        await basic_functionality(sb)
 
-    # Create Switchboard and start background tasks
-    switchboard = Switchboard(deployments=deployments, fallback=fallback)
-    switchboard.start()
-
-    try:
-        yield switchboard
-    finally:
-        await switchboard.stop()
+        print("Session affinity (should warn):")
+        await session_affinity(sb)
 
 
 async def basic_functionality(switchboard: Switchboard):
@@ -106,80 +111,85 @@ async def session_affinity(switchboard: Switchboard):
 
     # First message will select a random healthy
     # deployment and associate it with the session_id
-    _ = await switchboard.create(
+    r = await switchboard.create(
         session_id=session_id,
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Who won the World Series in 2020?"}],
     )
 
+    d1 = switchboard.select_deployment(model="gpt-4o-mini", session_id=session_id)
+    print("deployment 1:", d1)
+    print("response 1:", r.choices[0].message.content)
+
     # Follow-up requests with the same session_id will route to the same deployment
-    _ = await switchboard.create(
+    r2 = await switchboard.create(
         session_id=session_id,
         model="gpt-4o-mini",
         messages=[
             {"role": "user", "content": "Who won the World Series in 2020?"},
-            {
-                "role": "assistant",
-                "content": "The Los Angeles Dodgers won the World Series in 2020.",
-            },
+            {"role": "assistant", "content": r.choices[0].message.content},
             {"role": "user", "content": "Who did they beat?"},
         ],
     )
 
-    # If the deployment becomes unhealthy,
-    # requests will fall back to a healthy one
+    print("response 2:", r2.choices[0].message.content)
 
     # Simulate a failure by marking down the deployment
-    original_client = switchboard.select_deployment(
-        model="gpt-4o-mini", session_id=session_id
-    )
-    print("original client:", original_client)
-    original_client.models["gpt-4o-mini"].cooldown()
+    d1.models["gpt-4o-mini"].cooldown()
 
     # A new deployment will be selected for this session_id
-    _ = await switchboard.create(
+    r3 = await switchboard.create(
         session_id=session_id,
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Who won the World Series in 2021?"}],
     )
 
-    new_client = switchboard.select_deployment(
-        model="gpt-4o-mini", session_id=session_id
-    )
-    print("new client:", new_client)
-    assert new_client != original_client
-
-
-async def main():
-    async with get_switchboard() as sb:
-        print("Basic functionality:")
-        await basic_functionality(sb)
-
-        print("Session affinity (should warn):")
-        await session_affinity(sb)
+    d2 = switchboard.select_deployment(model="gpt-4o-mini", session_id=session_id)
+    print("deployment 2:", d2)
+    print("response 3:", r3.choices[0].message.content)
+    assert d2 != d1
 
 
 if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## Configuration Options
+## Performance
+
+```bash
+(azure-switchboard) .venv > uv run tools/bench.py -r 1000 -d 5
+Distributing 1000 requests across 5 deployments
+{
+    'bench_0': {'gpt-4o-mini': {'util': 0.337, 'tpm': '20200/100000', 'rpm': '201/600'}},
+    'bench_1': {'gpt-4o-mini': {'util': 0.341, 'tpm': '20412/100000', 'rpm': '201/600'}},
+    'bench_2': {'gpt-4o-mini': {'util': 0.333, 'tpm': '20017/100000', 'rpm': '199/600'}},
+    'bench_3': {'gpt-4o-mini': {'util': 0.336, 'tpm': '20462/100000', 'rpm': '200/600'}},
+    'bench_4': {'gpt-4o-mini': {'util': 0.335, 'tpm': '20088/100000', 'rpm': '199/600'}}
+}
+Distribution overhead: 886.08ms
+Average response latency: 3727.36ms
+Total latency: 12423.68ms
+Requests per second: 1128.57
+Overhead per request: 0.89ms
+```
+
+## Configuration Reference
 
 ### switchboard.Model Parameters
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `name` | Configured model name, e.g. "gpt-4o" or "gpt-4o-mini" | Required |
-| `tpm` | Tokens per minute rate limit | 0 (unlimited) |
-| `rpm` | Requests per minute rate limit | 0 (unlimited) |
+| `tpm` | Configured TPM rate limit | 0 (unlimited) |
+| `rpm` | Configured RPM rate limit | 0 (unlimited) |
 | `default_cooldown` | Default cooldown period in seconds | 10.0 |
 
-### switchboard.DeploymentConfig Parameters
+### switchboard.AzureDeployment Parameters
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `name` | Unique identifier for the deployment | Required |
-| `api_base` | Azure OpenAI endpoint URL | Required |
+| `endpoint` | Azure OpenAI endpoint URL | Required |
 | `api_key` | Azure OpenAI API key | Required |
 | `api_version` | Azure OpenAI API version | "2024-10-21" |
 | `timeout` | Default timeout in seconds | 600.0 |
@@ -189,11 +199,10 @@ if __name__ == "__main__":
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `deployments` | List of DeploymentConfig objects | Required |
-| `ratelimit_window` | Seconds before resetting usage counters | 60 |
-| `fallback` | Fallback DeploymentConfig | None |
-| `retries` | Number of retries on deployment failure | 2 |
-| `deployment_factory` | Factory for creating Deployments | azure_client_factory |
+| `deployments` | List of Deployment config objects | Required |
+| `selector` | Selection algorithm | `two_random_choices` |
+| `failover_policy` | Policy for handling failed requests | `AsyncRetrying(stop=stop_after_attempt(2))` |
+
 
 ## Development
 
@@ -234,9 +243,10 @@ uv build
 
 # TODO
 
-* client inherit from azure client?
+* deployment inherits from azure client?
 * opentelemetry integration
 * lru list for usage tracking / better ratelimit handling
+* add sync support?
 
 ## License
 

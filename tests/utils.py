@@ -1,14 +1,15 @@
 from unittest.mock import AsyncMock
 
-from fixtures import MOCK_COMPLETION, MOCK_STREAM_CHUNKS
 from openai import AsyncStream
 from openai.types.chat import ChatCompletionChunk
 
+from azure_switchboard import AzureDeployment, Model, OpenAIDeployment
 
-def create_mock_azure_client() -> AsyncMock:
-    """Create a basic mock client that returns MOCK_COMPLETION."""
-    mock = AsyncMock()
-    mock.models.list = AsyncMock()
+from .fixtures import MOCK_COMPLETION, MOCK_STREAM_CHUNKS
+
+
+def chat_completion_mock():
+    """Basic mock that replicates openai client chat completion behavior."""
 
     async def _stream(items: list):
         for item in items:
@@ -19,8 +20,26 @@ def create_mock_azure_client() -> AsyncMock:
             return _stream(MOCK_STREAM_CHUNKS)
         return MOCK_COMPLETION
 
-    mock.chat.completions.create = AsyncMock(side_effect=side_effect)
-    return mock
+    return AsyncMock(side_effect=side_effect)
+
+
+def azure_config(name: str) -> AzureDeployment:
+    return AzureDeployment(
+        name=name,
+        endpoint=f"https://{name}.openai.azure.com/",
+        api_key=name,
+        models=[
+            Model(name="gpt-4o-mini", tpm=10000, rpm=60),
+            Model(name="gpt-4o", tpm=10000, rpm=60),
+        ],
+    )
+
+
+def openai_config() -> OpenAIDeployment:
+    return OpenAIDeployment(
+        api_key="test",
+        models=[Model(name="gpt-4o-mini"), Model(name="gpt-4o")],
+    )
 
 
 class BaseTestCase:
