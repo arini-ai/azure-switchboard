@@ -26,7 +26,7 @@ pip install azure-switchboard
     - **Pluggable Selection**: Custom selection algorithms can be
     provided by passing a callable to the `selector` parameter on the Switchboard constructor.
 
-- **Lightweight**: sub-400 LOC implementation with only three runtime dependencies: `openai`, `tenacity`, `wrapt`
+- **Lightweight**: sub-400 LOC implementation with only three runtime dependencies: `openai`, `tenacity`, `wrapt`. <1ms overhead per request.
 - **100% Test Coverage**: There are twice as many lines in the tests as in the implementation.
 
 ## Runnable Example
@@ -154,7 +154,26 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## Configuration Options
+## Performance
+
+```bash
+(azure-switchboard) .venv > uv run tools/bench.py -r 1000 -d 5
+Distributing 1000 requests across 5 deployments
+{
+    'bench_0': {'gpt-4o-mini': {'util': 0.337, 'tpm': '20200/100000', 'rpm': '201/600'}},
+    'bench_1': {'gpt-4o-mini': {'util': 0.341, 'tpm': '20412/100000', 'rpm': '201/600'}},
+    'bench_2': {'gpt-4o-mini': {'util': 0.333, 'tpm': '20017/100000', 'rpm': '199/600'}},
+    'bench_3': {'gpt-4o-mini': {'util': 0.336, 'tpm': '20462/100000', 'rpm': '200/600'}},
+    'bench_4': {'gpt-4o-mini': {'util': 0.335, 'tpm': '20088/100000', 'rpm': '199/600'}}
+}
+Distribution overhead: 886.08ms
+Average response latency: 3727.36ms
+Total latency: 12423.68ms
+Requests per second: 1128.57
+Overhead per request: 0.89ms
+```
+
+## Configuration Reference
 
 ### switchboard.Model Parameters
 
