@@ -17,3 +17,5 @@
 - **Classes**: Use pydantic BaseModel for configuration classes
 - **Async**: Project uses async/await patterns extensively
 - **Testing**: Comprehensive unit tests with fixtures and mocks for API calls
+- **Principles**: Prefer simple implementations over complex ones, avoid premature optimization.
+  Use preparatory refactoring if necessary to make a problem simpler, if that is the appropriate approach.
