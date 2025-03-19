@@ -16,13 +16,21 @@ from .fixtures import (
 from .utils import BaseTestCase, azure_config, chat_completion_mock
 
 
-@pytest.fixture
-def mock_client():
+@pytest.fixture(scope="function")
+def mock_client(request: pytest.FixtureRequest):
     with respx.mock(base_url="https://test1.openai.azure.com") as respx_mock:
-        respx_mock.post(
-            "/openai/deployments/gpt-4o-mini/chat/completions",
-            name="gpt-4o-mini",
-        ).respond(status_code=200, json=MOCK_COMPLETION_JSON)
+        # By default, we don't assert all routes were called
+        respx_mock._assert_all_called = False
+
+        if provided_models := request.node.get_closest_marker("mock_models"):
+            respx_mock._assert_all_called = True
+
+            # Add routes for each model
+            for model in provided_models.args:
+                respx_mock.post(
+                    f"/openai/deployments/{model}/chat/completions",
+                    name=model,
+                ).respond(status_code=200, json=MOCK_COMPLETION_JSON)
 
         yield respx_mock
 
@@ -30,6 +38,7 @@ def mock_client():
 class TestDeployment(BaseTestCase):
     """Deployment functionality tests."""
 
+    @pytest.mark.mock_models("gpt-4o-mini")
     async def test_completion(self, mock_client: respx.MockRouter):
         """Test basic chat completion functionality."""
 
@@ -210,6 +219,7 @@ class TestDeployment(BaseTestCase):
         model.cooldown()
         assert model.util == 1
 
+    @pytest.mark.mock_models("gpt-4o-mini", "gpt-4o")
     async def test_multiple_models(self, mock_client: respx.MockRouter):
         """Test that multiple models are handled correctly."""
 
@@ -220,11 +230,6 @@ class TestDeployment(BaseTestCase):
 
         assert gpt4o is not None
         assert gpt4o_mini is not None
-
-        mock_client.post(
-            "/openai/deployments/gpt-4o/chat/completions",
-            name="gpt-4o",
-        ).respond(status_code=200, json=MOCK_COMPLETION_JSON)
 
         _ = await deployment.create(
             model="gpt-4o", messages=self.basic_args["messages"]
@@ -245,6 +250,7 @@ class TestDeployment(BaseTestCase):
         assert gpt4o_mini._tpm_usage > 0
         assert gpt4o_mini._rpm_usage == 1
 
+    @pytest.mark.mock_models("gpt-4o-mini")
     async def test_concurrency(self, mock_client: respx.MockRouter):
         """Test handling of multiple concurrent requests."""
         deployment = Deployment(azure_config("test1"))
@@ -263,6 +269,7 @@ class TestDeployment(BaseTestCase):
         assert usage["tpm"] == f"{18 * num_requests}/10000"
         assert usage["rpm"] == f"{num_requests}/60"
 
+    @pytest.mark.mock_models("gpt-4o-mini")
     async def test_timeout_retry(self, mock_client: respx.MockRouter):
         """Test timeout retry behavior."""
 
