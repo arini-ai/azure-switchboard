@@ -21,13 +21,38 @@ def switchboard(request: pytest.FixtureRequest):
 
 
 @pytest.fixture(scope="function", autouse=True)
-def mock_client():
+def mock_client(request: pytest.FixtureRequest):
     with respx.mock() as respx_mock:
-        respx_mock.route(
-            name="gpt-4o-mini",
-            method="POST",
-            path="/openai/deployments/gpt-4o-mini/chat/completions",
-        ).respond(status_code=200, json=MOCK_COMPLETION_JSON)
+        # By default, we don't assert all routes were called
+        respx_mock._assert_all_called = False
+
+        # Check if we have specific models to mock
+        mock_models_marker = request.node.get_closest_marker("mock_models")
+        models_to_mock = []
+
+        if mock_models_marker:
+            # Get models from marker
+            models_to_mock = mock_models_marker.args
+
+            # If models were specified, enable assert_all_called
+            if models_to_mock:
+                respx_mock._assert_all_called = True
+
+        # Add routes for each model
+        for model in models_to_mock:
+            if model == "openai":
+                respx_mock.route(
+                    name="openai",
+                    method="POST",
+                    host="api.openai.com",
+                    path="/v1/chat/completions",
+                ).respond(status_code=200, json=MOCK_COMPLETION_JSON)
+            else:
+                respx_mock.route(
+                    name=model,
+                    method="POST",
+                    path=f"/openai/deployments/{model}/chat/completions",
+                ).respond(status_code=200, json=MOCK_COMPLETION_JSON)
 
         yield respx_mock
 
@@ -35,6 +60,7 @@ def mock_client():
 class TestSwitchboard(BaseTestCase):
     """Basic switchboard functionality tests."""
 
+    @pytest.mark.mock_models("gpt-4o-mini")
     async def test_completion(
         self, switchboard: Switchboard, mock_client: respx.MockRouter
     ):
@@ -58,8 +84,6 @@ class TestSwitchboard(BaseTestCase):
     ):
         """Test streaming through switchboard."""
 
-        mock_client._assert_all_called = False
-
         with patch("azure_switchboard.deployment.Deployment.create") as mock:
             mock.side_effect = chat_completion_mock()
             stream = await switchboard.create(stream=True, **self.basic_args)
@@ -68,6 +92,7 @@ class TestSwitchboard(BaseTestCase):
             assert mock.call_count == 1
             assert content == "Hello, world!"
 
+    @pytest.mark.mock_models("gpt-4o-mini")
     async def test_selection(
         self, switchboard: Switchboard, mock_client: respx.MockRouter
     ):
@@ -118,8 +143,6 @@ class TestSwitchboard(BaseTestCase):
     ) -> None:
         """Test session stickiness and failover."""
 
-        mock_client._assert_all_called = False
-
         # Test consistent deployment selection for session
         client_1 = switchboard.select_deployment(session_id="test", model="gpt-4o-mini")
         client_2 = switchboard.select_deployment(session_id="test", model="gpt-4o-mini")
@@ -134,6 +157,7 @@ class TestSwitchboard(BaseTestCase):
         client_4 = switchboard.select_deployment(session_id="test", model="gpt-4o-mini")
         assert client_4.config.name == client_3.config.name
 
+    @pytest.mark.mock_models("gpt-4o-mini")
     async def test_session_stickiness_failover(
         self, switchboard: Switchboard, mock_client: respx.MockRouter
     ):
@@ -169,16 +193,11 @@ class TestSwitchboard(BaseTestCase):
         assert response4 == MOCK_COMPLETION
         assert switchboard._sessions[session_id] == fallback_deployment
 
+    @pytest.mark.mock_models("gpt-4o-mini", "openai")
     async def test_fallback_to_openai(self, mock_client: respx.MockRouter):
         """Test that the switchboard can fallback to OpenAI."""
 
         switchboard = Switchboard(deployments=[azure_config("test1"), openai_config()])
-        mock_client.route(
-            name="openai",
-            method="POST",
-            host="api.openai.com",
-            path="/v1/chat/completions",
-        ).respond(status_code=200, json=MOCK_COMPLETION_JSON)
 
         assert switchboard.fallback is not None
         assert isinstance(switchboard.fallback.config, OpenAIDeployment)
@@ -232,6 +251,7 @@ class TestSwitchboard(BaseTestCase):
             1 + tolerance
         )
 
+    @pytest.mark.mock_models("gpt-4o-mini")
     async def test_load_distribution(self, switchboard: Switchboard):
         """Test that load is distributed across healthy deployments."""
 
@@ -248,6 +268,7 @@ class TestSwitchboard(BaseTestCase):
                 max=40,
             )
 
+    @pytest.mark.mock_models("gpt-4o-mini")
     async def test_load_distribution_health_awareness(self, switchboard: Switchboard):
         """Test load distribution when some deployments are unhealthy."""
 
@@ -275,6 +296,7 @@ class TestSwitchboard(BaseTestCase):
             max=60,
         )
 
+    @pytest.mark.mock_models("gpt-4o-mini")
     async def test_load_distribution_utilization_awareness(
         self, switchboard: Switchboard
     ):
@@ -302,6 +324,7 @@ class TestSwitchboard(BaseTestCase):
                 tolerance=0.1,
             )
 
+    @pytest.mark.mock_models("gpt-4o-mini")
     async def test_load_distribution_session_stickiness(self, switchboard: Switchboard):
         """Test that session stickiness works correctly with load distribution."""
 
@@ -329,11 +352,12 @@ class TestSwitchboard(BaseTestCase):
             "5 sessions into 3 deployments should create 1:2:2 distribution"
         )
 
+    @pytest.mark.mock_models("gpt-4o-mini")
     async def test_ratelimit_reset(self, switchboard: Switchboard):
         """Test that the ratelimit is reset correctly."""
 
-        # create an empty switchboard to verify autostart
-        async with Switchboard(deployments=[]) as sb:
+        # create an simple switchboard to verify autostart
+        async with Switchboard(deployments=[azure_config("test1")]) as sb:
             assert sb.ratelimit_reset_task
 
         # speed things up a bit
@@ -360,3 +384,9 @@ class TestSwitchboard(BaseTestCase):
             assert m._rpm_usage == 0
 
         await switchboard.stop()
+
+    async def test_no_deployments(self):
+        """Test that the switchboard raises an error if no deployments are provided."""
+
+        with pytest.raises(SwitchboardError, match="No deployments provided"):
+            Switchboard(deployments=[])
