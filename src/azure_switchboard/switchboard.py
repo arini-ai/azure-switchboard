@@ -43,6 +43,9 @@ class Switchboard:
         self.deployments: dict[str, Deployment] = {}
         self.fallback: Deployment | None = None
 
+        if not deployments:
+            raise SwitchboardError("No deployments provided")
+
         for deployment in deployments:
             if isinstance(deployment, OpenAIDeployment):
                 self.fallback = Deployment(deployment)
