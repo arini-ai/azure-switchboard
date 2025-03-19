@@ -45,7 +45,6 @@ asyncio_default_fixture_loop_scope = "function"
 addopts = "-s -v --import-mode=importlib"
 markers = [
     "mock_models(*models): specify which models to mock for API testing",
-    "deployments: override default deployments for testing",
 ]
 
 [tool.bumpver]

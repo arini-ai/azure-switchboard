@@ -11,8 +11,8 @@ from .utils import BaseTestCase, azure_config, chat_completion_mock, openai_conf
 
 
 @pytest.fixture(scope="function")
-def switchboard(request: pytest.FixtureRequest):
-    deployments = request.node.get_closest_marker("deployments") or [
+def switchboard():
+    deployments = [
         azure_config("test1"),
         azure_config("test2"),
         azure_config("test3"),
@@ -79,9 +79,7 @@ class TestSwitchboard(BaseTestCase):
             )
         )
 
-    async def test_streaming(
-        self, switchboard: Switchboard, mock_client: respx.MockRouter
-    ):
+    async def test_streaming(self, switchboard: Switchboard):
         """Test streaming through switchboard."""
 
         with patch("azure_switchboard.deployment.Deployment.create") as mock:
@@ -138,9 +136,7 @@ class TestSwitchboard(BaseTestCase):
 
         assert len(set([host_0, host_1, host_2, host_3])) > 1
 
-    async def test_session_stickiness(
-        self, switchboard: Switchboard, mock_client: respx.MockRouter
-    ) -> None:
+    async def test_session_stickiness(self, switchboard: Switchboard) -> None:
         """Test session stickiness and failover."""
 
         # Test consistent deployment selection for session
