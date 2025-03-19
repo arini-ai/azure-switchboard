@@ -17,9 +17,6 @@ jobs:
     permissions:
       contents: write # For pushing tag, commit and creating release
 
-    outputs:
-      version: ${{ steps.bumpver.outputs.version }}
-
     # Only run if push is from a human (not another workflow, to avoid loops on tag push)
     if: github.actor != 'github-actions[bot]' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
 
@@ -53,36 +50,4 @@ jobs:
         run: |
           git push
           git push origin ${{ steps.bumpver.outputs.version }}
-
-  publish:
-    needs: release
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write # For pushing tag, commit and creating release
-      id-token: write # For trusted publishing to PyPI
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.release.outputs.version }}
-
-      - name: Setup uv
-        uses: astral-sh/setup-uv@v5
-
-      - name: Build package
-        run: uv build --no-sources
-
-      - name: Create GitHub release
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: >-
-          gh release create
-          "${{ needs.release.outputs.version }}"
-          --repo "$GITHUB_REPOSITORY"
-          --title "${{ needs.release.outputs.version }}"
-          --generate-notes
-          dist/*
-
-      - name: Publish to PyPI
-        run: uv publish
 
