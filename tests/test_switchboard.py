@@ -26,33 +26,24 @@ def mock_client(request: pytest.FixtureRequest):
         # By default, we don't assert all routes were called
         respx_mock._assert_all_called = False
 
-        # Check if we have specific models to mock
-        mock_models_marker = request.node.get_closest_marker("mock_models")
-        models_to_mock = []
+        if provided_models := request.node.get_closest_marker("mock_models"):
+            respx_mock._assert_all_called = True
 
-        if mock_models_marker:
-            # Get models from marker
-            models_to_mock = mock_models_marker.args
-
-            # If models were specified, enable assert_all_called
-            if models_to_mock:
-                respx_mock._assert_all_called = True
-
-        # Add routes for each model
-        for model in models_to_mock:
-            if model == "openai":
-                respx_mock.route(
-                    name="openai",
-                    method="POST",
-                    host="api.openai.com",
-                    path="/v1/chat/completions",
-                ).respond(status_code=200, json=MOCK_COMPLETION_JSON)
-            else:
-                respx_mock.route(
-                    name=model,
-                    method="POST",
-                    path=f"/openai/deployments/{model}/chat/completions",
-                ).respond(status_code=200, json=MOCK_COMPLETION_JSON)
+            # Add routes for each model
+            for model in provided_models.args:
+                if model == "openai":
+                    respx_mock.route(
+                        name="openai",
+                        method="POST",
+                        host="api.openai.com",
+                        path="/v1/chat/completions",
+                    ).respond(status_code=200, json=MOCK_COMPLETION_JSON)
+                else:
+                    respx_mock.route(
+                        name=model,
+                        method="POST",
+                        path=f"/openai/deployments/{model}/chat/completions",
+                    ).respond(status_code=200, json=MOCK_COMPLETION_JSON)
 
         yield respx_mock
 
