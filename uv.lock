@@ -60,7 +60,7 @@ wheels = [
 
 [[package]]
 name = "azure-switchboard"
-version = "2025.3.24"
+version = "2025.3.26"
 source = { editable = "." }
 dependencies = [
     { name = "openai" },

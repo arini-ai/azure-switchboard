@@ -10,7 +10,7 @@ on:
 jobs:
   # Only run if the push is from GitHub Actions bot (version bump commit)
   publish:
-    if: github.actor == 'actions-user'
+    if: github.actor == 'github-actions[bot]' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: write # For creating GitHub release
@@ -22,7 +22,7 @@ jobs:
       - name: Get version from pyproject.toml
         id: get_version
         run: |
-          VERSION=$(grep -m1 'current_version = ' pyproject.toml | cut -d'"' -f2)
+          VERSION="$(grep -m1 'current_version = ' pyproject.toml | cut -d'"' -f2)"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Setup uv
