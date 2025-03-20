@@ -1,6 +1,6 @@
 [project]
 name = "azure-switchboard"
-version = "2025.3.24"
+version = "2025.3.25"
 description = "Batteries-included loadbalancing client for Azure OpenAI"
 readme = "README.md"
 license = { text = "MIT" }
@@ -60,7 +60,7 @@ markers = [
 ]
 
 [tool.bumpver]
-current_version = "2025.3.24"
+current_version = "2025.3.25"
 version_pattern = "YYYY.MM.INC0"
 commit_message = "release: {new_version}"
 tag_message = "{new_version}"
