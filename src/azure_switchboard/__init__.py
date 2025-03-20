@@ -2,9 +2,9 @@ from .deployment import (
     AzureDeployment,
     Deployment,
     DeploymentError,
-    Model,
     OpenAIDeployment,
 )
+from .model import Model
 from .switchboard import Switchboard, SwitchboardError
 
 __all__ = [

@@ -1,3 +1,4 @@
+from typing import Any, Literal
 from unittest.mock import AsyncMock
 
 import pytest
@@ -5,9 +6,19 @@ import respx
 from openai import AsyncStream
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from openai.types.chat.chat_completion_chunk import Choice, ChoiceDelta
-from openai.types.completion_usage import CompletionUsage
+from openai.types.completion_usage import (
+    CompletionTokensDetails,
+    CompletionUsage,
+    PromptTokensDetails,
+)
 
-from azure_switchboard import AzureDeployment, Model, OpenAIDeployment, Switchboard
+from azure_switchboard import (
+    AzureDeployment,
+    Deployment,
+    Model,
+    OpenAIDeployment,
+    Switchboard,
+)
 
 
 async def collect_chunks(
@@ -57,7 +68,7 @@ def chat_completion_mock():
     return AsyncMock(side_effect=side_effect)
 
 
-@pytest.fixture(scope="function", autouse=True)
+@pytest.fixture(autouse=True)
 def mock_client(request: pytest.FixtureRequest):
     with respx.mock() as respx_mock:
         if provided_models := request.node.get_closest_marker("mock_models"):
@@ -75,7 +86,17 @@ def mock_client(request: pytest.FixtureRequest):
         yield respx_mock
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
+def model():
+    return Model(name="gpt-4o-mini", tpm=1000, rpm=6)
+
+
+@pytest.fixture
+def deployment():
+    return Deployment(azure_config("test1"))
+
+
+@pytest.fixture
 async def switchboard():
     deployments = [
         azure_config("test1"),
@@ -86,7 +107,7 @@ async def switchboard():
         yield sb
 
 
-COMPLETION_PARAMS = {
+COMPLETION_PARAMS: dict[Literal["model", "messages"], Any] = {
     "model": "gpt-4o-mini",
     "messages": [{"role": "user", "content": "Hello, world!"}],
 }
@@ -150,6 +171,8 @@ COMPLETION_STREAM_CHUNKS = [
             completion_tokens=5,
             prompt_tokens=15,
             total_tokens=20,
+            completion_tokens_details=CompletionTokensDetails(reasoning_tokens=5),
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=15),
         ),
     ),
 ]
@@ -179,12 +202,12 @@ COMPLETION_RESPONSE_JSON = {
         "completion_tokens_details": {
             "accepted_prediction_tokens": 0,
             "audio_tokens": 0,
-            "reasoning_tokens": 0,
+            "reasoning_tokens": 5,
             "rejected_prediction_tokens": 0,
         },
-        "prompt_tokens": 8,
-        "prompt_tokens_details": {"audio_tokens": 0, "cached_tokens": 0},
-        "total_tokens": 18,
+        "prompt_tokens": 10,
+        "prompt_tokens_details": {"audio_tokens": 0, "cached_tokens": 8},
+        "total_tokens": 20,
     },
 }
 

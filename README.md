@@ -21,13 +21,14 @@ pip install azure-switchboard
 - **Utilization-Aware**: TPM/RPM ratelimit utilization is tracked per model per deployment for use during selection.
 - **Batteries Included**:
     - **Session Affinity**: Provide a `session_id` to route requests in the same session to the same deployment, optimizing for prompt caching
-    - **Automatic Failover**: Client automatically retries 3 times on request failure, with optional fallback to OpenAI by providing an `OpenAIDeployment` in  `deployments`. The retry policy can also be customized by passing a tenacity
+    - **Automatic Failover**: Client automatically retries on request failure, with optional fallback to OpenAI by providing an `OpenAIDeployment` in  `deployments`. The retry policy can also be customized by passing a tenacity
     `AsyncRetrying` instance to `failover_policy`.
     - **Pluggable Selection**: Custom selection algorithms can be
     provided by passing a callable to the `selector` parameter on the Switchboard constructor.
+    - **OpenTelemetry Integration**: Comprehensive metrics and instrumentation for monitoring deployment health and utilization.
 
-- **Lightweight**: sub-400 LOC implementation with only three runtime dependencies: `openai`, `tenacity`, `wrapt`. <1ms overhead per request.
-- **100% Test Coverage**: There are twice as many lines in the tests as in the implementation.
+- **Lightweight**: sub-400 LOC implementation with minimal dependencies: `openai`, `tenacity`, `wrapt`, and `opentelemetry-api`. <1ms overhead per request.
+- **100% Test Coverage**: Comprehensive test suite with pytest.
 
 ## Runnable Example
 
@@ -35,7 +36,7 @@ pip install azure-switchboard
 #!/usr/bin/env python3
 #
 # To run this, use:
-#   uv run readme_example.py
+#   uv run --env-file .env tools/readme_example.py
 #
 # /// script
 # requires-python = ">=3.10"
@@ -154,23 +155,56 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## Performance
+## Benchmarks
 
 ```bash
-(azure-switchboard) .venv > uv run tools/bench.py -r 1000 -d 5
-Distributing 1000 requests across 5 deployments
+just bench
+uv run --env-file .env tools/bench.py -v -r 1000 -d 10 -e 500
+Distributing 1000 requests across 10 deployments
+Max inflight requests: 1000
+
+Request 500/1000 completed
+Utilization Distribution:
+0.000 - 0.200 |   0
+0.200 - 0.400 |  10 ..............................
+0.400 - 0.600 |   0
+0.600 - 0.800 |   0
+0.800 - 1.000 |   0
+Avg utilization: 0.339 (0.332 - 0.349)
+Std deviation: 0.006
+
 {
-    'bench_0': {'gpt-4o-mini': {'util': 0.337, 'tpm': '20200/100000', 'rpm': '201/600'}},
-    'bench_1': {'gpt-4o-mini': {'util': 0.341, 'tpm': '20412/100000', 'rpm': '201/600'}},
-    'bench_2': {'gpt-4o-mini': {'util': 0.333, 'tpm': '20017/100000', 'rpm': '199/600'}},
-    'bench_3': {'gpt-4o-mini': {'util': 0.336, 'tpm': '20462/100000', 'rpm': '200/600'}},
-    'bench_4': {'gpt-4o-mini': {'util': 0.335, 'tpm': '20088/100000', 'rpm': '199/600'}}
+    'bench_0': {'gpt-4o-mini': {'util': 0.361, 'tpm': '10556/30000', 'rpm': '100/300'}},
+    'bench_1': {'gpt-4o-mini': {'util': 0.339, 'tpm': '9819/30000', 'rpm': '100/300'}},
+    'bench_2': {'gpt-4o-mini': {'util': 0.333, 'tpm': '9405/30000', 'rpm': '97/300'}},
+    'bench_3': {'gpt-4o-mini': {'util': 0.349, 'tpm': '10188/30000', 'rpm': '100/300'}},
+    'bench_4': {'gpt-4o-mini': {'util': 0.346, 'tpm': '10210/30000', 'rpm': '99/300'}},
+    'bench_5': {'gpt-4o-mini': {'util': 0.341, 'tpm': '10024/30000', 'rpm': '99/300'}},
+    'bench_6': {'gpt-4o-mini': {'util': 0.343, 'tpm': '10194/30000', 'rpm': '100/300'}},
+    'bench_7': {'gpt-4o-mini': {'util': 0.352, 'tpm': '10362/30000', 'rpm': '102/300'}},
+    'bench_8': {'gpt-4o-mini': {'util': 0.35, 'tpm': '10362/30000', 'rpm': '102/300'}},
+    'bench_9': {'gpt-4o-mini': {'util': 0.365, 'tpm': '10840/30000', 'rpm': '101/300'}}
 }
-Distribution overhead: 886.08ms
-Average response latency: 3727.36ms
-Total latency: 12423.68ms
-Requests per second: 1128.57
-Overhead per request: 0.89ms
+
+Utilization Distribution:
+0.000 - 0.100 |   0
+0.100 - 0.200 |   0
+0.200 - 0.300 |   0
+0.300 - 0.400 |  10 ..............................
+0.400 - 0.500 |   0
+0.500 - 0.600 |   0
+0.600 - 0.700 |   0
+0.700 - 0.800 |   0
+0.800 - 0.900 |   0
+0.900 - 1.000 |   0
+Avg utilization: 0.348 (0.333 - 0.365)
+Std deviation: 0.009
+
+Distribution overhead: 926.14ms
+Average response latency: 5593.77ms
+Total latency: 17565.37ms
+Requests per second: 1079.75
+Overhead per request: 0.93ms
 ```
 
 Distribution overhead scales ~linearly with the number of deployments.
@@ -204,12 +238,14 @@ Distribution overhead scales ~linearly with the number of deployments.
 | `deployments` | List of Deployment config objects | Required |
 | `selector` | Selection algorithm | `two_random_choices` |
 | `failover_policy` | Policy for handling failed requests | `AsyncRetrying(stop=stop_after_attempt(2))` |
+| `ratelimit_window` | Ratelimit window in seconds | 60.0 |
+| `max_sessions` | Maximum number of sessions | 1024 |
 
 
 ## Development
 
 This project uses [uv](https://github.com/astral-sh/uv) for package management,
-and [just](https://github.com/casey/just) for task automation. See the [justfile](https://github.com/abizer/switchboard/blob/master/justfile)
+and [just](https://github.com/casey/just) for task automation. See the [justfile](https://github.com/arini-ai/azure-switchboard/blob/master/justfile)
 for available commands.
 
 ```bash
@@ -235,20 +271,67 @@ Locally, the package can be built with uv:
 uv build
 ```
 
+### OpenTelemetry Integration
+
+The library provides instrumentation for monitoring deployment health and performance metrics:
+
+```bash
+(azure-switchboard) .venv > just otel-run
+uv run --env-file .env opentelemetry-instrument python tools/bench.py -r 5 -d 3
+Distributing 5 requests across 3 deployments
+Max inflight requests: 1000
+
+Distribution overhead: 10.53ms
+Average response latency: 2164.03ms
+Total latency: 3869.06ms
+Requests per second: 475.03
+Overhead per request: 2.11ms
+{
+    "resource_metrics": [
+        {
+            "resource": {
+                "attributes": {
+                    "telemetry.sdk.language": "python",
+                    "telemetry.sdk.name": "opentelemetry",
+                    "telemetry.sdk.version": "1.31.0",
+                    "service.name": "switchboard",
+                    "telemetry.auto.version": "0.52b0"
+                },
+                "schema_url": ""
+            },
+            "scope_metrics": [
+                {
+                    "scope": {
+                        "name": "azure_switchboard.deployment",
+                        "version": "",
+                        "schema_url": "",
+                        "attributes": null
+                    },
+                    "metrics": [
+                        {
+                            "name": "model_utilization",
+                            "description": "Current utilization of a model deployment (0-1)",
+                            "unit": "percent",
+                            "data": {
+                                "data_points": [
+                                    {
+                                        "attributes": {
+                                            "model": "gpt-4o-mini"
+                                        },
+                                        "start_time_unix_nano": null,
+                                        "time_unix_nano": 1742461487509982000,
+                                        "value": 0.008,
+                                        "exemplars": []
+...
+```
+
 ## Contributing
 
 1. Fork/clone repo
 2. Make changes
 3. Run tests with `just test`
-4. Lint with `just lint --fix`
+4. Lint with `just lint`
 5. Commit and make a PR
-
-# TODO
-
-* deployment inherits from azure client?
-* opentelemetry integration
-* lru list for usage tracking / better ratelimit handling
-* add sync support?
 
 ## License
 
