@@ -173,6 +173,8 @@ Requests per second: 1128.57
 Overhead per request: 0.89ms
 ```
 
+Distribution overhead scales ~linearly with the number of deployments.
+
 ## Configuration Reference
 
 ### switchboard.Model Parameters
