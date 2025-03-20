@@ -149,11 +149,7 @@ class Switchboard:
             filter(lambda d: d.is_healthy(model), self.deployments.values())
         )
 
-        # # rofl
-        # deployment_util.set(
-        #     eligible_deployments[0].util(model),
-        #     {"model": model, "deployment": eligible_deployments[0].config.name},
-        # )
+        # TODO: otel metric collection here
 
         # Record healthy deployments count metric
         healthy_deployments_gauge.set(len(eligible_deployments), {"model": model})
