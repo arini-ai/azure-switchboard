@@ -65,7 +65,7 @@ version_pattern = "YYYY.MM.INC0"
 commit_message = "release: {new_version}"
 tag_message = "{new_version}"
 tag_scope = "default"
-tag = true
+tag = false
 commit = false
 push = false
 
