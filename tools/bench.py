@@ -28,7 +28,7 @@ async def bench(args: argparse.Namespace) -> None:
             name=f"bench_{n}",
             endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
             api_key=os.environ["AZURE_OPENAI_API_KEY"],
-            models=[Model(name="gpt-4o-mini", tpm=600000, rpm=1000)],
+            models=[Model(name="gpt-4o-mini", tpm=30000, rpm=300)],
         )
         for n in range(args.deployments)
     ]
@@ -38,13 +38,14 @@ async def bench(args: argparse.Namespace) -> None:
             f"Distributing {args.requests} requests across {args.deployments} deployments"
         )
         print(f"Max inflight requests: {args.inflight}")
+        print()
 
         inflight_requests = asyncio.Semaphore(args.inflight)
 
         async def _request(i: int):
             async with inflight_requests:
                 start = time.perf_counter()
-                response = await switchboard.create(
+                await switchboard.create(
                     model="gpt-4o-mini",
                     messages=[
                         {
@@ -55,9 +56,8 @@ async def bench(args: argparse.Namespace) -> None:
                 )
                 end = time.perf_counter()
 
-            if i % args.every == 0 and args.verbose:
-                print(response.choices[0].message.content)
-                print()
+            if args.verbose and (i > 0 and i % args.every == 0):
+                print(f"Request {i}/{args.requests} completed")
                 print_usage_histogram(switchboard.get_usage(), bins=5, absolute=True)
                 print()
 
@@ -81,16 +81,18 @@ async def bench(args: argparse.Namespace) -> None:
         if args.verbose:
             usage = switchboard.get_usage()
             print(usage)
+            print()
             print_usage_histogram(usage, absolute=True)
+            print()
 
         print(f"Distribution overhead: {distribution_latency:.2f}ms")
         print(f"Average response latency: {avg_response_latency:.2f}ms")
         print(f"Total latency: {total_latency:.2f}ms")
-        print(f"RPS: {(args.requests / distribution_latency) * 1000:.2f}")
-        print(f"Overhead per request: {(distribution_latency) / args.requests:.2f}ms")
+        print(f"Requests per second: {args.requests / distribution_latency * 1000:.2f}")
+        print(f"Overhead per request: {distribution_latency / args.requests:.2f}ms")
 
 
-def print_usage_histogram(data: dict, width=50, bins=10, absolute=False):
+def print_usage_histogram(data: dict, width=30, bins=10, absolute=False):
     """
     Generate a histogram showing the distribution of utilization values.
 
@@ -143,22 +145,20 @@ def print_usage_histogram(data: dict, width=50, bins=10, absolute=False):
 
         # Calculate the bar length based on the count
         bar_length = round(width * count / max_count) if max_count > 0 else 0
-        bar = "█" * bar_length
+        bar = "." * bar_length  # "█" * bar_length
 
-        print(f"{start:.3f} - {end:.3f} | {bar} {count}")
-
-    print(f"Total deployments: {len(all_utils)}")
+        print(f"{start:.3f} - {end:.3f} | {count:>3} {bar}")
 
     # Calculate and print statistics
     avg_util = sum(all_utils) / len(all_utils)
+    min_util = min(all_utils)
+    max_util = max(all_utils)
 
-    print(f"Min utilization: {min(all_utils):.3f}")
-    print(f"Max utilization: {max(all_utils):.3f}")
-    print(f"Avg utilization: {avg_util:.3f}")
+    print(f"Avg utilization: {avg_util:.3f} ({min_util:.3f} - {max_util:.3f})")
     if len(all_utils) > 1:
         variance = sum((u - avg_util) ** 2 for u in all_utils) / len(all_utils)
         stddev = math.sqrt(variance)
-        print(f"Std deviation:   {stddev:.3f}")
+        print(f"Std deviation: {stddev:.3f}")
 
 
 if __name__ == "__main__":
@@ -195,7 +195,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Do not reset the usage counter.",
     )
-
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Use real endpoint, otherwise mock.",
+    )
     args = parser.parse_args()
 
     asyncio.run(bench(args))

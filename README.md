@@ -154,23 +154,56 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## Performance
+## Benchmarks
 
 ```bash
-(azure-switchboard) .venv > uv run tools/bench.py -r 1000 -d 5
-Distributing 1000 requests across 5 deployments
+(azure-switchboard) .venv > just bench
+uv run --env-file .env tools/bench.py -v -r 1000 -d 10 -e 500
+Distributing 1000 requests across 10 deployments
+Max inflight requests: 1000
+
+Request 500/1000 completed
+Utilization Distribution:
+0.000 - 0.200 |   0
+0.200 - 0.400 |  10 ..............................
+0.400 - 0.600 |   0
+0.600 - 0.800 |   0
+0.800 - 1.000 |   0
+Avg utilization: 0.339 (0.332 - 0.349)
+Std deviation: 0.006
+
 {
-    'bench_0': {'gpt-4o-mini': {'util': 0.337, 'tpm': '20200/100000', 'rpm': '201/600'}},
-    'bench_1': {'gpt-4o-mini': {'util': 0.341, 'tpm': '20412/100000', 'rpm': '201/600'}},
-    'bench_2': {'gpt-4o-mini': {'util': 0.333, 'tpm': '20017/100000', 'rpm': '199/600'}},
-    'bench_3': {'gpt-4o-mini': {'util': 0.336, 'tpm': '20462/100000', 'rpm': '200/600'}},
-    'bench_4': {'gpt-4o-mini': {'util': 0.335, 'tpm': '20088/100000', 'rpm': '199/600'}}
+    'bench_0': {'gpt-4o-mini': {'util': 0.361, 'tpm': '10556/30000', 'rpm': '100/300'}},
+    'bench_1': {'gpt-4o-mini': {'util': 0.339, 'tpm': '9819/30000', 'rpm': '100/300'}},
+    'bench_2': {'gpt-4o-mini': {'util': 0.333, 'tpm': '9405/30000', 'rpm': '97/300'}},
+    'bench_3': {'gpt-4o-mini': {'util': 0.349, 'tpm': '10188/30000', 'rpm': '100/300'}},
+    'bench_4': {'gpt-4o-mini': {'util': 0.346, 'tpm': '10210/30000', 'rpm': '99/300'}},
+    'bench_5': {'gpt-4o-mini': {'util': 0.341, 'tpm': '10024/30000', 'rpm': '99/300'}},
+    'bench_6': {'gpt-4o-mini': {'util': 0.343, 'tpm': '10194/30000', 'rpm': '100/300'}},
+    'bench_7': {'gpt-4o-mini': {'util': 0.352, 'tpm': '10362/30000', 'rpm': '102/300'}},
+    'bench_8': {'gpt-4o-mini': {'util': 0.35, 'tpm': '10362/30000', 'rpm': '102/300'}},
+    'bench_9': {'gpt-4o-mini': {'util': 0.365, 'tpm': '10840/30000', 'rpm': '101/300'}}
 }
-Distribution overhead: 886.08ms
-Average response latency: 3727.36ms
-Total latency: 12423.68ms
-Requests per second: 1128.57
-Overhead per request: 0.89ms
+
+Utilization Distribution:
+0.000 - 0.100 |   0
+0.100 - 0.200 |   0
+0.200 - 0.300 |   0
+0.300 - 0.400 |  10 ..............................
+0.400 - 0.500 |   0
+0.500 - 0.600 |   0
+0.600 - 0.700 |   0
+0.700 - 0.800 |   0
+0.800 - 0.900 |   0
+0.900 - 1.000 |   0
+Avg utilization: 0.348 (0.333 - 0.365)
+Std deviation: 0.009
+
+Distribution overhead: 926.14ms
+Average response latency: 5593.77ms
+Total latency: 17565.37ms
+Requests per second: 1079.75
+Overhead per request: 0.93ms
 ```
 
 Distribution overhead scales ~linearly with the number of deployments.
@@ -204,6 +237,8 @@ Distribution overhead scales ~linearly with the number of deployments.
 | `deployments` | List of Deployment config objects | Required |
 | `selector` | Selection algorithm | `two_random_choices` |
 | `failover_policy` | Policy for handling failed requests | `AsyncRetrying(stop=stop_after_attempt(2))` |
+| `ratelimit_window` | Ratelimit window in seconds | 60.0 |
+| `max_sessions` | Maximum number of sessions | 1024 |
 
 
 ## Development
@@ -240,12 +275,11 @@ uv build
 1. Fork/clone repo
 2. Make changes
 3. Run tests with `just test`
-4. Lint with `just lint --fix`
+4. Lint with `just lint`
 5. Commit and make a PR
 
 # TODO
 
-* deployment inherits from azure client?
 * opentelemetry integration
 * lru list for usage tracking / better ratelimit handling
 * add sync support?

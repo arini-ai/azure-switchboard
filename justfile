@@ -2,6 +2,7 @@ set fallback
 
 install:
   uv sync --frozen
+  uv run pre-commit install
 
 test *args='-n 4':
   uv run pytest {{args}}
@@ -19,6 +20,9 @@ clean:
 
 run what:
   uv run --env-file .env tools/{{ what }}
+
+bench *args='-v -r 1000 -d 10 -e 500':
+  uv run --env-file .env tools/bench.py {{args}}
 
 demo:
   @grep -q "AZURE_OPENAI_ENDPOINT" .env || echo "please set AZURE_OPENAI_ENDPOINT in .env"
