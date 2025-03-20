@@ -34,9 +34,9 @@ dev = [
     "bumpver>=2024.1130",
     "ipykernel>=6.29.5",
     "ipython>=8.0.0,!=9.0.0",
-    "opentelemetry-distro>=0.51b0",
+    "opentelemetry-distro[otlp]>=0.51b0",
     "opentelemetry-exporter-otlp>=1.30.0",
-    "opentelemetry-instrumentation-asyncio>=0.52b0",
+    "opentelemetry-instrumentation>=0.52b0",
     "opentelemetry-instrumentation-httpx>=0.52b0",
     "opentelemetry-instrumentation-logging>=0.52b0",
     "opentelemetry-instrumentation-openai-v2>=2.1b0",
@@ -55,7 +55,6 @@ dev = [
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 addopts = "-s -v --import-mode=importlib --cov=src/azure_switchboard --cov-report=term-missing:skip-covered"
-
 markers = [
     "mock_models(*models): specify which models to mock for API testing",
 ]

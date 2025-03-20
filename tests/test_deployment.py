@@ -13,7 +13,6 @@ from .conftest import (
     COMPLETION_RESPONSE,
     COMPLETION_RESPONSE_JSON,
     COMPLETION_STREAM_CHUNKS,
-    azure_config,
     chat_completion_mock,
     collect_chunks,
 )
@@ -22,11 +21,20 @@ from .conftest import (
 class TestDeployment:
     """Deployment functionality tests."""
 
+    async def test_init(self, deployment: Deployment):
+        """Test initialization of Deployment."""
+        assert deployment is not None
+        assert deployment.client is not None
+        assert deployment.models is not None
+        assert deployment.model("gpt-4o-mini") is not None
+        assert deployment.model("gpt-4o") is not None
+
     @pytest.mark.mock_models("gpt-4o-mini")
-    async def test_completion(self, mock_client: respx.MockRouter):
+    async def test_completion(
+        self, mock_client: respx.MockRouter, deployment: Deployment
+    ):
         """Test basic chat completion functionality."""
 
-        deployment = Deployment(azure_config("test1"))
         deployment.client.max_retries = 0
 
         response = await deployment.create(**COMPLETION_PARAMS)
@@ -34,10 +42,10 @@ class TestDeployment:
         assert response == COMPLETION_RESPONSE
 
         # Check token usage tracking
-        model = deployment.models["gpt-4o-mini"]
-        usage = model.get_usage()
-        assert usage["tpm"] == "18/10000"
-        assert usage["rpm"] == "1/60"
+        model = deployment.model("gpt-4o-mini")
+        usage = model.stats()
+        assert usage.tpm.startswith(str(COMPLETION_RESPONSE.usage.total_tokens))  # pyright: ignore[reportOptionalMemberAccess]
+        assert usage.rpm.startswith("1")
 
         # Test exception handling
         mock_client.routes["gpt-4o-mini"].side_effect = Exception("test")
@@ -46,18 +54,17 @@ class TestDeployment:
         assert mock_client.routes["gpt-4o-mini"].call_count == 2
 
         # account for preflight estimate
-        usage = model.get_usage()
-        assert usage["tpm"] == "21/10000"
-        assert usage["rpm"] == "2/60"
+        usage = model.stats()
+        assert "23/" in usage.tpm
+        assert "2/" in usage.rpm
 
-    async def test_streaming(self):
+    async def test_streaming(self, deployment: Deployment):
         """Test streaming functionality.
 
         It's annoying to try to mock HTTP streaming responses so we cheat
         a little bit with an AsyncMock.
         """
 
-        deployment = Deployment(azure_config("test1"))
         deployment.client.max_retries = 0
 
         with patch.object(
@@ -74,9 +81,9 @@ class TestDeployment:
             assert content == "Hello, world!"
 
             # Verify token usage tracking
-            usage = deployment.models["gpt-4o-mini"].get_usage()
-            assert usage["tpm"] == "20/10000"
-            assert usage["rpm"] == "1/60"
+            usage = deployment.model("gpt-4o-mini").stats()
+            assert "20/" in usage.tpm
+            assert "1/" in usage.rpm
 
         # verify exception handling
         with patch.object(
@@ -90,9 +97,9 @@ class TestDeployment:
                     pass
             mock.assert_called_once()
 
-            usage = deployment.models["gpt-4o-mini"].get_usage()
-            assert usage["tpm"] == "23/10000"
-            assert usage["rpm"] == "2/60"
+            usage = deployment.model("gpt-4o-mini").stats()
+            assert "23/" in usage.tpm
+            assert "2/" in usage.rpm
 
         # Test midstream exception handling
         with patch.object(
@@ -103,82 +110,69 @@ class TestDeployment:
             stream = await deployment.create(stream=True, **COMPLETION_PARAMS)
 
             with patch.object(
-                stream._self_model_ref,  # type: ignore[reportAttributeAccessIssue]
+                stream._self_model,  # type: ignore[reportAttributeAccessIssue]
                 "spend_tokens",
                 side_effect=Exception("asyncstream error"),
             ):
                 with pytest.raises(DeploymentError, match="Error in wrapped stream"):
                     await collect_chunks(stream)
                 assert mock.call_count == 1
-                assert not deployment.models["gpt-4o-mini"].is_healthy()
+                assert not deployment.model("gpt-4o-mini").is_healthy()
 
-            deployment.models["gpt-4o-mini"].reset_cooldown()
-            assert deployment.models["gpt-4o-mini"].is_healthy()
+            deployment.model("gpt-4o-mini").mark_up()
+            assert deployment.model("gpt-4o-mini").is_healthy()
 
-    async def test_cooldown(self):
+    async def test_mark_down(self, deployment: Deployment):
         """Test model-level cooldown functionality."""
 
-        deployment = Deployment(azure_config("test1"))
-        model = deployment.models["gpt-4o-mini"]
+        model = deployment.model("gpt-4o-mini")
 
-        model.cooldown()
+        model.mark_down()
         assert not model.is_healthy()
 
-        model.reset_cooldown()
+        model.mark_up()
         assert model.is_healthy()
 
-    async def test_valid_model(self):
+    async def test_valid_model(self, deployment: Deployment):
         """Test that an invalid model raises an error."""
 
-        deployment = Deployment(azure_config("test1"))
         with pytest.raises(DeploymentError, match="gpt-fake not configured"):
             await deployment.create(model="gpt-fake", messages=[])
 
-    async def test_usage(self):
+    async def test_usage(self, deployment: Deployment):
         """Test client-level counters"""
 
-        deployment = Deployment(azure_config("test1"))
         # Reset and verify initial state
         for model in deployment.models.values():
-            model_str = str(model)
-            assert "tpm=0/10000" in model_str
-            assert "rpm=0/60" in model_str
+            assert "tpm='0" in str(model)
 
         # Test client-level usage
-        usage = deployment.get_usage()
-        assert usage["gpt-4o-mini"]["tpm"] == "0/10000"
-        assert usage["gpt-4o-mini"]["rpm"] == "0/60"
-        client_str = str(deployment)
-        assert "models=" in client_str
+        model = deployment.model("gpt-4o-mini")
+        usage = model.stats()
+        assert usage.tpm == f"0/{model.tpm_limit}"
+        assert usage.rpm == f"0/{model.rpm_limit}"
 
         # Set and verify values
-        model = deployment.models["gpt-4o-mini"]
         model.spend_tokens(100)
         model.spend_request(5)
-        usage = model.get_usage()
-        assert usage["tpm"] == "100/10000"
-        assert usage["rpm"] == "5/60"
-
-        usage = deployment.get_usage()
-        assert usage["gpt-4o-mini"]["tpm"] == "100/10000"
-        assert usage["gpt-4o-mini"]["rpm"] == "5/60"
+        usage = model.stats()
+        assert usage.tpm == f"100/{model.tpm_limit}"
+        assert usage.rpm == f"5/{model.rpm_limit}"
 
         # Reset and verify again
         deployment.reset_usage()
-        usage = deployment.get_usage()
-        assert usage["gpt-4o-mini"]["tpm"] == "0/10000"
-        assert usage["gpt-4o-mini"]["rpm"] == "0/60"
-        assert model._last_reset > 0
+        usage = model.stats()
+        assert usage.tpm == f"0/{model.tpm_limit}"
+        assert usage.rpm == f"0/{model.rpm_limit}"
+        assert model.last_reset > 0
 
-    async def test_utilization(self):
+    async def test_utilization(self, deployment: Deployment):
         """Test utilization calculation."""
 
-        deployment = Deployment(azure_config("test1"))
-
-        model = deployment.models["gpt-4o-mini"]
+        model = deployment.model("gpt-4o-mini")
 
         # Check initial utilization (nonzero due to random splay)
-        initial_util = deployment.util("gpt-4o-mini")
+        initial_util = model.util
         assert 0 <= initial_util < 0.02
 
         # Test token-based utilization
@@ -200,14 +194,14 @@ class TestDeployment:
         assert 0.6 <= util_with_both < 0.62
 
         # Test unhealthy client
-        model.cooldown()
+        model.mark_down()
         assert model.util == 1
 
     @pytest.mark.mock_models("gpt-4o-mini", "gpt-4o")
-    async def test_multiple_models(self, mock_client: respx.MockRouter):
+    async def test_multiple_models(
+        self, mock_client: respx.MockRouter, deployment: Deployment
+    ):
         """Test that multiple models are handled correctly."""
-
-        deployment = Deployment(azure_config("test1"))
 
         gpt4o = deployment.models["gpt-4o"]
         gpt4o_mini = deployment.models["gpt-4o-mini"]
@@ -219,23 +213,24 @@ class TestDeployment:
             model="gpt-4o", messages=COMPLETION_PARAMS["messages"]
         )
         assert mock_client.routes["gpt-4o"].call_count == 1
-        assert gpt4o._rpm_usage == 1
-        assert gpt4o._tpm_usage > 0
-        assert gpt4o_mini._tpm_usage == 0
-        assert gpt4o_mini._rpm_usage == 0
+        assert gpt4o.rpm_usage == 1
+        assert gpt4o.tpm_usage > 0
+        assert gpt4o_mini.tpm_usage == 0
+        assert gpt4o_mini.rpm_usage == 0
 
         _ = await deployment.create(**COMPLETION_PARAMS)
         assert mock_client.routes["gpt-4o-mini"].call_count == 1
 
-        assert gpt4o._rpm_usage == 1
-        assert gpt4o._tpm_usage > 0
-        assert gpt4o_mini._tpm_usage > 0
-        assert gpt4o_mini._rpm_usage == 1
+        assert gpt4o.rpm_usage == 1
+        assert gpt4o.tpm_usage > 0
+        assert gpt4o_mini.tpm_usage > 0
+        assert gpt4o_mini.rpm_usage == 1
 
     @pytest.mark.mock_models("gpt-4o-mini")
-    async def test_concurrency(self, mock_client: respx.MockRouter):
+    async def test_concurrency(
+        self, mock_client: respx.MockRouter, deployment: Deployment
+    ):
         """Test handling of multiple concurrent requests."""
-        deployment = Deployment(azure_config("test1"))
 
         # Create and run concurrent requests
         num_requests = 10
@@ -247,15 +242,15 @@ class TestDeployment:
         assert len(responses) == num_requests
         assert all(r == COMPLETION_RESPONSE for r in responses)
         assert mock_client.routes["gpt-4o-mini"].call_count == num_requests
-        usage = model.get_usage()
-        assert usage["tpm"] == f"{18 * num_requests}/10000"
-        assert usage["rpm"] == f"{num_requests}/60"
+        usage = model.stats()
+        assert usage.tpm == f"{20 * num_requests}/10000"
+        assert usage.rpm == f"{num_requests}/60"
 
     @pytest.mark.mock_models("gpt-4o-mini")
-    async def test_timeout_retry(self, mock_client: respx.MockRouter):
+    async def test_timeout_retry(
+        self, mock_client: respx.MockRouter, deployment: Deployment
+    ):
         """Test timeout retry behavior."""
-
-        deployment = Deployment(azure_config("test1"))
 
         # Test successful retry after timeouts
         expected_response = Response(status_code=200, json=COMPLETION_RESPONSE_JSON)

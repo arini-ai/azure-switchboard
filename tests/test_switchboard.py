@@ -33,8 +33,8 @@ class TestSwitchboard:
 
         assert any(
             filter(
-                lambda d: d["gpt-4o-mini"].get("rpm") == "1/60",
-                switchboard.get_usage().values(),
+                lambda d: d.get("gpt-4o-mini").rpm == "1/60",  # pyright: ignore[reportAttributeAccessIssue]
+                switchboard.stats().values(),
             )
         )
 
@@ -67,27 +67,27 @@ class TestSwitchboard:
         host_0 = mock_client["gpt-4o-mini"].calls.last.request.url.host
 
         # Mark first deployment as unhealthy
-        deployments[0].models["gpt-4o-mini"].cooldown()
+        deployments[0].models["gpt-4o-mini"].mark_down()
         response = await switchboard.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
         assert mock_client["gpt-4o-mini"].call_count == 2
         host_1 = mock_client["gpt-4o-mini"].calls.last.request.url.host
 
         # Mark second deployment as unhealthy
-        deployments[1].models["gpt-4o-mini"].cooldown()
+        deployments[1].models["gpt-4o-mini"].mark_down()
         response = await switchboard.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
         assert mock_client["gpt-4o-mini"].call_count == 3
         host_2 = mock_client["gpt-4o-mini"].calls.last.request.url.host
 
         # Mark last deployment as unhealthy
-        deployments[2].models["gpt-4o-mini"].cooldown()
+        deployments[2].models["gpt-4o-mini"].mark_down()
         with pytest.raises(SwitchboardError, match="All attempts failed"):
             await switchboard.create(**COMPLETION_PARAMS)
         assert mock_client["gpt-4o-mini"].call_count == 3
 
         # Restore first deployment
-        deployments[0].models["gpt-4o-mini"].reset_cooldown()
+        deployments[0].models["gpt-4o-mini"].mark_up()
         response = await switchboard.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
         assert mock_client["gpt-4o-mini"].call_count == 4
@@ -104,7 +104,7 @@ class TestSwitchboard:
         assert client_1.config.name == client_2.config.name
 
         # Test failover when selected deployment is unhealthy
-        client_1.models["gpt-4o-mini"].cooldown()
+        client_1.models["gpt-4o-mini"].mark_down()
         client_3 = switchboard.select_deployment(session_id="test", model="gpt-4o-mini")
         assert client_3.config.name != client_1.config.name
 
@@ -135,7 +135,7 @@ class TestSwitchboard:
 
         # Make assigned deployment unhealthy
         model = original_deployment.models["gpt-4o-mini"]
-        model.cooldown()
+        model.mark_down()
 
         # Verify failover
         response3 = await switchboard.create(session_id=session_id, **COMPLETION_PARAMS)
@@ -168,7 +168,7 @@ class TestSwitchboard:
         assert mock_client["gpt-4o-mini"].call_count == 1
 
         # make deployment unhealthy so it falls back to openai
-        switchboard.deployments["test1"].models["gpt-4o-mini"].cooldown()
+        switchboard.deployments["test1"].models["gpt-4o-mini"].mark_down()
         await switchboard.create(**COMPLETION_PARAMS)
         assert mock_client["openai"].call_count == 2
 
@@ -180,12 +180,12 @@ class TestSwitchboard:
         assert mock_client["openai"].call_count == 5
 
         # bring the deployment back, verify we use it
-        switchboard.deployments["test1"].models["gpt-4o-mini"].reset_cooldown()
+        switchboard.deployments["test1"].models["gpt-4o-mini"].mark_up()
         await switchboard.create(**COMPLETION_PARAMS)
         assert mock_client["gpt-4o-mini"].call_count == 2
 
         # make everything unhealthy, verify it throws
-        switchboard.deployments["test1"].models["gpt-4o-mini"].cooldown()
+        switchboard.deployments["test1"].models["gpt-4o-mini"].mark_down()
         with pytest.raises(SwitchboardError, match="Fallback to OpenAI failed"):
             await switchboard.create(**COMPLETION_PARAMS)
         assert mock_client["openai"].call_count == 8
@@ -196,7 +196,7 @@ class TestSwitchboard:
         assert mock_client["openai"].call_count == 9
 
         # reset the deployment and verify it gets used again
-        switchboard.deployments["test1"].models["gpt-4o-mini"].reset_cooldown()
+        switchboard.deployments["test1"].models["gpt-4o-mini"].mark_up()
         await switchboard.create(**COMPLETION_PARAMS)
         assert mock_client["gpt-4o-mini"].call_count == 3
 
@@ -218,7 +218,7 @@ class TestSwitchboard:
         # Verify all deployments were used
         for deployment in switchboard.deployments.values():
             assert self._within_bounds(
-                val=deployment.models["gpt-4o-mini"]._rpm_usage,
+                val=deployment.models["gpt-4o-mini"].rpm_usage,
                 min=25,
                 max=40,
             )
@@ -228,7 +228,7 @@ class TestSwitchboard:
         """Test load distribution when some deployments are unhealthy."""
 
         # Mark one deployment as unhealthy
-        switchboard.deployments["test2"].models["gpt-4o-mini"].cooldown()
+        switchboard.deployments["test2"].models["gpt-4o-mini"].mark_down()
 
         # Make 100 requests
         for _ in range(100):
@@ -236,17 +236,17 @@ class TestSwitchboard:
 
         # Verify distribution
         assert self._within_bounds(
-            val=switchboard.deployments["test1"].models["gpt-4o-mini"]._rpm_usage,
+            val=switchboard.deployments["test1"].models["gpt-4o-mini"].rpm_usage,
             min=40,
             max=60,
         )
         assert self._within_bounds(
-            val=switchboard.deployments["test2"].models["gpt-4o-mini"]._rpm_usage,
+            val=switchboard.deployments["test2"].models["gpt-4o-mini"].rpm_usage,
             min=0,
             max=0,
         )
         assert self._within_bounds(
-            val=switchboard.deployments["test3"].models["gpt-4o-mini"]._rpm_usage,
+            val=switchboard.deployments["test3"].models["gpt-4o-mini"].rpm_usage,
             min=40,
             max=60,
         )
@@ -273,7 +273,7 @@ class TestSwitchboard:
         # (ie, we preferred to send requests to the underutilized deployment)
         for client in switchboard.deployments.values():
             assert self._within_bounds(
-                val=client.models["gpt-4o-mini"]._rpm_usage,
+                val=client.models["gpt-4o-mini"].rpm_usage,
                 min=60,
                 max=70,
                 tolerance=0.1,
@@ -298,7 +298,7 @@ class TestSwitchboard:
         # Check distribution (should be uneven due to session stickiness)
         request_counts = sorted(
             [
-                client.models["gpt-4o-mini"]._rpm_usage
+                client.models["gpt-4o-mini"].rpm_usage
                 for client in switchboard.deployments.values()
             ]
         )
@@ -326,16 +326,16 @@ class TestSwitchboard:
 
             for d in switchboard.deployments.values():
                 m = d.models["gpt-4o-mini"]
-                assert m._tpm_usage > 0
-                assert m._rpm_usage > 0
+                assert m.tpm_usage > 0
+                assert m.rpm_usage > 0
 
             # wait for the ratelimit to reset
             await asyncio.sleep(1)
 
             for d in switchboard.deployments.values():
                 m = d.models["gpt-4o-mini"]
-                assert m._tpm_usage == 0
-                assert m._rpm_usage == 0
+                assert m.tpm_usage == 0
+                assert m.rpm_usage == 0
 
     async def test_no_deployments(self):
         """Test that the switchboard raises an error if no deployments are provided."""

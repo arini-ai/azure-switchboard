@@ -11,10 +11,19 @@ from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from opentelemetry import metrics
 from tenacity import AsyncRetrying, RetryError, stop_after_attempt
 
+from azure_switchboard.model import Stats
+
 from .deployment import (
     AzureDeployment,
     Deployment,
     OpenAIDeployment,
+)
+
+meter = metrics.get_meter("azure_switchboard.switchboard")
+deployment_util = meter.create_gauge(
+    name="switchboard.deployment.model.utilization",
+    description="Utilization of a model on a deployment",
+    unit="%",
 )
 
 logger = logging.getLogger(__name__)
@@ -114,8 +123,10 @@ class Switchboard:
         for client in self.deployments.values():
             client.reset_usage()
 
-    def get_usage(self) -> dict[str, dict]:
-        return {name: client.get_usage() for name, client in self.deployments.items()}
+    def stats(self) -> dict[str, dict[str, Stats]]:
+        return {
+            name: deployment.stats() for name, deployment in self.deployments.items()
+        }
 
     def select_deployment(
         self, *, model: str, session_id: str | None = None
@@ -137,6 +148,12 @@ class Switchboard:
         eligible_deployments = list(
             filter(lambda d: d.is_healthy(model), self.deployments.values())
         )
+
+        # # rofl
+        # deployment_util.set(
+        #     eligible_deployments[0].util(model),
+        #     {"model": model, "deployment": eligible_deployments[0].config.name},
+        # )
 
         # Record healthy deployments count metric
         healthy_deployments_gauge.set(len(eligible_deployments), {"model": model})

@@ -58,7 +58,7 @@ async def bench(args: argparse.Namespace) -> None:
 
             if args.verbose and (i > 0 and i % args.every == 0):
                 print(f"Request {i}/{args.requests} completed")
-                print_usage_histogram(switchboard.get_usage(), bins=5, absolute=True)
+                print_usage_histogram(switchboard.stats(), bins=5, absolute=True)
                 print()
 
             return start, end
@@ -75,11 +75,11 @@ async def bench(args: argparse.Namespace) -> None:
             ) / len(results)
         except Exception as e:
             print(e)
-            print(switchboard.get_usage())
+            print(switchboard.stats())
             return
 
         if args.verbose:
-            usage = switchboard.get_usage()
+            usage = switchboard.stats()
             print(usage)
             print()
             print_usage_histogram(usage, absolute=True)

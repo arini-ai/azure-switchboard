@@ -101,7 +101,7 @@ async def session_affinity(switchboard: Switchboard):
     print("response 2:", r2.choices[0].message.content)
 
     # Simulate a failure by marking down the deployment
-    d1.models["gpt-4o-mini"].cooldown()
+    d1.models["gpt-4o-mini"].mark_down()
 
     # A new deployment will be selected for this session_id
     r3 = await switchboard.create(
