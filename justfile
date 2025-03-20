@@ -4,6 +4,13 @@ install:
   uv sync --frozen
   uv run pre-commit install
 
+update:
+  uv sync
+  uv run pre-commit autoupdate
+
+pre-commit:
+  uv run pre-commit run --all-files
+
 test *args='-n 4':
   uv run pytest {{args}}
 alias tests := test
