@@ -8,34 +8,18 @@ from httpx import Response, TimeoutException
 
 from azure_switchboard import Deployment, DeploymentError
 
-from .fixtures import (
-    MOCK_COMPLETION,
-    MOCK_COMPLETION_JSON,
-    MOCK_STREAM_CHUNKS,
+from .conftest import (
+    COMPLETION_PARAMS,
+    COMPLETION_RESPONSE,
+    COMPLETION_RESPONSE_JSON,
+    COMPLETION_STREAM_CHUNKS,
+    azure_config,
+    chat_completion_mock,
+    collect_chunks,
 )
-from .utils import BaseTestCase, azure_config, chat_completion_mock
 
 
-@pytest.fixture(scope="function")
-def mock_client(request: pytest.FixtureRequest):
-    with respx.mock(base_url="https://test1.openai.azure.com") as respx_mock:
-        # By default, we don't assert all routes were called
-        respx_mock._assert_all_called = False
-
-        if provided_models := request.node.get_closest_marker("mock_models"):
-            respx_mock._assert_all_called = True
-
-            # Add routes for each model
-            for model in provided_models.args:
-                respx_mock.post(
-                    f"/openai/deployments/{model}/chat/completions",
-                    name=model,
-                ).respond(status_code=200, json=MOCK_COMPLETION_JSON)
-
-        yield respx_mock
-
-
-class TestDeployment(BaseTestCase):
+class TestDeployment:
     """Deployment functionality tests."""
 
     @pytest.mark.mock_models("gpt-4o-mini")
@@ -45,9 +29,9 @@ class TestDeployment(BaseTestCase):
         deployment = Deployment(azure_config("test1"))
         deployment.client.max_retries = 0
 
-        response = await deployment.create(**self.basic_args)
+        response = await deployment.create(**COMPLETION_PARAMS)
         assert mock_client.routes["gpt-4o-mini"].call_count == 1
-        assert response == MOCK_COMPLETION
+        assert response == COMPLETION_RESPONSE
 
         # Check token usage tracking
         model = deployment.models["gpt-4o-mini"]
@@ -58,7 +42,7 @@ class TestDeployment(BaseTestCase):
         # Test exception handling
         mock_client.routes["gpt-4o-mini"].side_effect = Exception("test")
         with pytest.raises(openai.APIConnectionError):
-            await deployment.create(**self.basic_args)
+            await deployment.create(**COMPLETION_PARAMS)
         assert mock_client.routes["gpt-4o-mini"].call_count == 2
 
         # account for preflight estimate
@@ -81,12 +65,12 @@ class TestDeployment(BaseTestCase):
             "create",
             side_effect=chat_completion_mock(),
         ) as mock:
-            stream = await deployment.create(stream=True, **self.basic_args)
+            stream = await deployment.create(stream=True, **COMPLETION_PARAMS)
             mock.assert_called_once()
 
             # verify basic behavior
-            received_chunks, content = await self.collect_chunks(stream)
-            assert len(received_chunks) == len(MOCK_STREAM_CHUNKS)
+            received_chunks, content = await collect_chunks(stream)
+            assert len(received_chunks) == len(COMPLETION_STREAM_CHUNKS)
             assert content == "Hello, world!"
 
             # Verify token usage tracking
@@ -101,7 +85,7 @@ class TestDeployment(BaseTestCase):
             side_effect=Exception("test"),
         ) as mock:
             with pytest.raises(Exception, match="test"):
-                stream = await deployment.create(stream=True, **self.basic_args)
+                stream = await deployment.create(stream=True, **COMPLETION_PARAMS)
                 async for _ in stream:
                     pass
             mock.assert_called_once()
@@ -116,7 +100,7 @@ class TestDeployment(BaseTestCase):
             "create",
             side_effect=chat_completion_mock(),
         ) as mock:
-            stream = await deployment.create(stream=True, **self.basic_args)
+            stream = await deployment.create(stream=True, **COMPLETION_PARAMS)
 
             with patch.object(
                 stream._self_model_ref,  # type: ignore[reportAttributeAccessIssue]
@@ -124,7 +108,7 @@ class TestDeployment(BaseTestCase):
                 side_effect=Exception("asyncstream error"),
             ):
                 with pytest.raises(DeploymentError, match="Error in wrapped stream"):
-                    await self.collect_chunks(stream)
+                    await collect_chunks(stream)
                 assert mock.call_count == 1
                 assert not deployment.models["gpt-4o-mini"].is_healthy()
 
@@ -232,7 +216,7 @@ class TestDeployment(BaseTestCase):
         assert gpt4o_mini is not None
 
         _ = await deployment.create(
-            model="gpt-4o", messages=self.basic_args["messages"]
+            model="gpt-4o", messages=COMPLETION_PARAMS["messages"]
         )
         assert mock_client.routes["gpt-4o"].call_count == 1
         assert gpt4o._rpm_usage == 1
@@ -240,9 +224,7 @@ class TestDeployment(BaseTestCase):
         assert gpt4o_mini._tpm_usage == 0
         assert gpt4o_mini._rpm_usage == 0
 
-        _ = await deployment.create(
-            model="gpt-4o-mini", messages=self.basic_args["messages"]
-        )
+        _ = await deployment.create(**COMPLETION_PARAMS)
         assert mock_client.routes["gpt-4o-mini"].call_count == 1
 
         assert gpt4o._rpm_usage == 1
@@ -257,13 +239,13 @@ class TestDeployment(BaseTestCase):
 
         # Create and run concurrent requests
         num_requests = 10
-        tasks = [deployment.create(**self.basic_args) for _ in range(num_requests)]
+        tasks = [deployment.create(**COMPLETION_PARAMS) for _ in range(num_requests)]
         responses = await asyncio.gather(*tasks)
 
         # Verify results
         model = deployment.models["gpt-4o-mini"]
         assert len(responses) == num_requests
-        assert all(r == MOCK_COMPLETION for r in responses)
+        assert all(r == COMPLETION_RESPONSE for r in responses)
         assert mock_client.routes["gpt-4o-mini"].call_count == num_requests
         usage = model.get_usage()
         assert usage["tpm"] == f"{18 * num_requests}/10000"
@@ -276,14 +258,14 @@ class TestDeployment(BaseTestCase):
         deployment = Deployment(azure_config("test1"))
 
         # Test successful retry after timeouts
-        expected_response = Response(status_code=200, json=MOCK_COMPLETION_JSON)
+        expected_response = Response(status_code=200, json=COMPLETION_RESPONSE_JSON)
         mock_client.routes["gpt-4o-mini"].side_effect = [
             TimeoutException("Timeout 1"),
             TimeoutException("Timeout 2"),
             expected_response,
         ]
-        response = await deployment.create(**self.basic_args)
-        assert response == MOCK_COMPLETION
+        response = await deployment.create(**COMPLETION_PARAMS)
+        assert response == COMPLETION_RESPONSE
         assert mock_client.routes["gpt-4o-mini"].call_count == 3
 
         # Test failure after max retries
@@ -295,6 +277,6 @@ class TestDeployment(BaseTestCase):
         ]
 
         with pytest.raises(openai.APITimeoutError):
-            await deployment.create(**self.basic_args)
+            await deployment.create(**COMPLETION_PARAMS)
         assert mock_client.routes["gpt-4o-mini"].call_count == 3
         assert not deployment.is_healthy("gpt-4o-mini")

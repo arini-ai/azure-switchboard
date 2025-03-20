@@ -39,10 +39,10 @@ async def bench(args: argparse.Namespace) -> None:
         )
         print(f"Max inflight requests: {args.inflight}")
 
-        _inflight = asyncio.Semaphore(args.inflight)
+        inflight_requests = asyncio.Semaphore(args.inflight)
 
         async def _request(i: int):
-            async with _inflight:
+            async with inflight_requests:
                 start = time.perf_counter()
                 response = await switchboard.create(
                     model="gpt-4o-mini",
@@ -188,6 +188,12 @@ if __name__ == "__main__":
         type=int,
         default=100,
         help="Print every Nth response.",
+    )
+    parser.add_argument(
+        "-n",
+        "--no-reset",
+        action="store_true",
+        help="Do not reset the usage counter.",
     )
 
     args = parser.parse_args()

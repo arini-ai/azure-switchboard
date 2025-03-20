@@ -58,6 +58,8 @@ class Switchboard:
         deployments: Sequence[AzureDeployment | OpenAIDeployment],
         selector: Callable[[str, list[Deployment]], Deployment] = two_random_choices,
         failover_policy: AsyncRetrying = AsyncRetrying(stop=stop_after_attempt(2)),
+        ratelimit_window: float = 60.0,
+        max_sessions: int = 1024,
     ) -> None:
         self.deployments: dict[str, Deployment] = {}
         self.fallback: Deployment | None = None
@@ -75,11 +77,11 @@ class Switchboard:
 
         self.failover_policy = failover_policy
 
-        # expire old sessions
-        self._sessions = _LRUDict(max_size=1024)
+        # LRUDict to expire old sessions
+        self.sessions = _LRUDict(max_size=max_sessions)
 
-        # reset usage every minute
-        self._ratelimit_window = 60.0
+        # reset usage every N seconds
+        self.ratelimit_window = ratelimit_window
 
     async def __aenter__(self) -> Switchboard:
         self.start()
@@ -90,8 +92,11 @@ class Switchboard:
 
     def start(self) -> None:
         async def periodic_reset():
+            if not self.ratelimit_window:
+                return
+
             while True:
-                await asyncio.sleep(self._ratelimit_window)
+                await asyncio.sleep(self.ratelimit_window)
                 logger.debug("Resetting usage counters")
                 self.reset_usage()
 
@@ -120,8 +125,8 @@ class Switchboard:
         If session_id is provided, try to use that specific deployment first.
         """
         # Handle session-based routing first
-        if session_id and session_id in self._sessions:
-            client = self._sessions[session_id]
+        if session_id and session_id in self.sessions:
+            client = self.sessions[session_id]
             if client.is_healthy(model):
                 logger.debug(f"Reusing {client} for session {session_id}")
                 return client
@@ -146,7 +151,7 @@ class Switchboard:
         logger.debug(f"Selected {selection}")
 
         if session_id:
-            self._sessions[session_id] = selection
+            self.sessions[session_id] = selection
 
         return selection
 
