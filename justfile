@@ -3,10 +3,11 @@ set fallback
 install:
   uv sync --frozen
 
-test *args='--cov=azure_switchboard --cov-report=term-missing:skip-covered':
+test *args='-n 4':
   uv run pytest {{args}}
+alias tests := test
 
-lint *args='':
+lint *args='--fix':
   uv run ruff check . {{args}}
 
 bump-version *args='':

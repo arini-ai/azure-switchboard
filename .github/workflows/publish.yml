@@ -9,7 +9,7 @@ on:
 jobs:
   # Only run if the push is from GitHub Actions bot (version bump commit)
   publish:
-    if: github.actor == 'github-actions[bot]'
+    if: github.actor == 'actions-user'
     runs-on: ubuntu-latest
     permissions:
       contents: write # For creating GitHub release

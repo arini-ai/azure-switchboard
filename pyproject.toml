@@ -52,8 +52,9 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-asyncio_default_fixture_loop_scope = "function"
-addopts = "-s -v --import-mode=importlib"
+asyncio_default_fixture_loop_scope = "session"
+addopts = "-s -v --import-mode=importlib --cov=src/azure_switchboard --cov-report=term-missing:skip-covered"
+
 markers = [
     "mock_models(*models): specify which models to mock for API testing",
 ]
@@ -61,11 +62,11 @@ markers = [
 [tool.bumpver]
 current_version = "2025.3.24"
 version_pattern = "YYYY.MM.INC0"
-commit_message = "new release {old_version} -> {new_version}"
+commit_message = "release: {new_version}"
 tag_message = "{new_version}"
 tag_scope = "default"
-commit = true
 tag = true
+commit = false
 push = false
 
 [tool.bumpver.file_patterns]

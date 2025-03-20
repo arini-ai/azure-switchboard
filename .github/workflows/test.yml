@@ -21,8 +21,10 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Run pytest # pytest args are set in pyproject.toml
-        run: uv run pytest
-
       - name: Lint with ruff
         run: uv run ruff check .
+
+      - name: Run pytest # pytest args are set in pyproject.toml
+        run: uv run pytest -n 4
+
+
