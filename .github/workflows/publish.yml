@@ -10,7 +10,7 @@ on:
 jobs:
   # Only run if the push is from GitHub Actions bot (version bump commit)
   publish:
-    if: github.actor == 'github-actions[bot]' || github.event_name == 'workflow_dispatch'
+    if: ${{ github.actor == 'github-actions[bot]' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write # For creating GitHub release
