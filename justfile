@@ -28,7 +28,7 @@ otel:
   OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED=true \
   OTEL_SERVICE_NAME=switchboard_readme \
   OTEL_TRACES_EXPORTER=console,otlp \
-  OTEL_METRICS_EXPORTER=otlp \
+  OTEL_METRICS_EXPORTER=console,otlp \
   OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318" \
   OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf" \
   uv run --env-file .env opentelemetry-instrument python tools/readme_example.py

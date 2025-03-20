@@ -9,9 +9,28 @@ from typing import AsyncIterator, Literal, cast, overload
 import wrapt
 from openai import AsyncAzureOpenAI, AsyncOpenAI, AsyncStream
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
+from opentelemetry import metrics
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
+
+# Create a meter for recording metrics
+meter = metrics.get_meter("azure_switchboard.deployment")
+model_util_gauge = meter.create_gauge(
+    name="model_utilization",
+    description="Current utilization of a model deployment (0-1)",
+    unit="percent",
+)
+token_usage_counter = meter.create_counter(
+    name="token_usage",
+    description="Number of tokens used by a model deployment",
+    unit="tokens",
+)
+request_usage_counter = meter.create_counter(
+    name="request_usage",
+    description="Number of requests sent to a model deployment",
+    unit="requests",
+)
 
 
 class Model:
@@ -67,7 +86,12 @@ class Model:
 
         # Use the higher of the two utilizations as the weight
         # Add a small random factor to prevent oscillation
-        return round(max(token_util, request_util) + random.uniform(0, 0.01), 3)
+        utilization = round(max(token_util, request_util) + random.uniform(0, 0.01), 3)
+
+        # Record the utilization metric
+        model_util_gauge.set(utilization, {"model": self.name})
+
+        return utilization
 
     def reset_usage(self) -> None:
         """Call periodically to reset usage counters"""
@@ -86,6 +110,8 @@ class Model:
 
     def spend_request(self, n: int = 1) -> None:
         self._rpm_usage += n
+        # Record request usage metric
+        request_usage_counter.add(n, {"model": self.name})
 
     def spend_tokens(self, n: int) -> None:
         self._tpm_usage += n

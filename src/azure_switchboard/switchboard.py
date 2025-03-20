@@ -8,6 +8,7 @@ from typing import Callable, Literal, Sequence, overload
 
 from openai import AsyncStream
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
+from opentelemetry import metrics
 from tenacity import AsyncRetrying, RetryError, stop_after_attempt
 
 from .deployment import (
@@ -17,6 +18,24 @@ from .deployment import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Create a meter for recording metrics
+meter = metrics.get_meter("azure_switchboard.switchboard")
+healthy_deployments_gauge = meter.create_gauge(
+    name="healthy_deployments_count",
+    description="Number of healthy deployments available for a model",
+    unit="1",
+)
+deployment_failures_counter = meter.create_counter(
+    name="deployment_failures",
+    description="Number of deployment failures",
+    unit="1",
+)
+request_counter = meter.create_counter(
+    name="requests",
+    description="Number of requests sent through the switchboard",
+    unit="1",
+)
 
 
 class SwitchboardError(Exception):
@@ -39,6 +58,8 @@ class Switchboard:
         deployments: Sequence[AzureDeployment | OpenAIDeployment],
         selector: Callable[[str, list[Deployment]], Deployment] = two_random_choices,
         failover_policy: AsyncRetrying = AsyncRetrying(stop=stop_after_attempt(2)),
+        ratelimit_window: float = 60.0,
+        max_sessions: int = 1024,
     ) -> None:
         self.deployments: dict[str, Deployment] = {}
         self.fallback: Deployment | None = None
@@ -56,11 +77,11 @@ class Switchboard:
 
         self.failover_policy = failover_policy
 
-        # expire old sessions
-        self._sessions = _LRUDict(max_size=1024)
+        # LRUDict to expire old sessions
+        self.sessions = _LRUDict(max_size=max_sessions)
 
-        # reset usage every minute
-        self._ratelimit_window = 60.0
+        # reset usage every N seconds
+        self.ratelimit_window = ratelimit_window
 
     async def __aenter__(self) -> Switchboard:
         self.start()
@@ -71,8 +92,11 @@ class Switchboard:
 
     def start(self) -> None:
         async def periodic_reset():
+            if not self.ratelimit_window:
+                return
+
             while True:
-                await asyncio.sleep(self._ratelimit_window)
+                await asyncio.sleep(self.ratelimit_window)
                 logger.debug("Resetting usage counters")
                 self.reset_usage()
 
@@ -101,8 +125,8 @@ class Switchboard:
         If session_id is provided, try to use that specific deployment first.
         """
         # Handle session-based routing first
-        if session_id and session_id in self._sessions:
-            client = self._sessions[session_id]
+        if session_id and session_id in self.sessions:
+            client = self.sessions[session_id]
             if client.is_healthy(model):
                 logger.debug(f"Reusing {client} for session {session_id}")
                 return client
@@ -113,6 +137,10 @@ class Switchboard:
         eligible_deployments = list(
             filter(lambda d: d.is_healthy(model), self.deployments.values())
         )
+
+        # Record healthy deployments count metric
+        healthy_deployments_gauge.set(len(eligible_deployments), {"model": model})
+
         if not eligible_deployments:
             raise SwitchboardError(f"No eligible deployments available for {model}")
 
@@ -123,7 +151,7 @@ class Switchboard:
         logger.debug(f"Selected {selection}")
 
         if session_id:
-            self._sessions[session_id] = selection
+            self.sessions[session_id] = selection
 
         return selection
 
@@ -155,15 +183,35 @@ class Switchboard:
                     client = self.select_deployment(model=model, session_id=session_id)
                     logger.debug(f"Sending completion request to {client}")
                     response = await client.create(model=model, stream=stream, **kwargs)
+                    # Record successful request
+                    request_counter.add(
+                        1,
+                        {
+                            "model": model,
+                            "provider": "azure",
+                            "deployment": client.config.name,
+                        },
+                    )
                     return response
         except RetryError:
             logger.exception("Azure failovers exhausted")
+            # Record Azure deployment failure
+            deployment_failures_counter.add(1, {"model": model, "provider": "azure"})
 
         if self.fallback:
             logger.warning("Attempting fallback to OpenAI")
             try:
-                return await self.fallback.create(model=model, stream=stream, **kwargs)
+                response = await self.fallback.create(
+                    model=model, stream=stream, **kwargs
+                )
+                # Record successful fallback request
+                request_counter.add(1, {"model": model, "provider": "openai"})
+                return response
             except Exception as e:
+                # Record OpenAI fallback failure
+                deployment_failures_counter.add(
+                    1, {"model": model, "provider": "openai"}
+                )
                 raise SwitchboardError("Fallback to OpenAI failed") from e
         else:
             raise SwitchboardError("All attempts failed")
