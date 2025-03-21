@@ -1,6 +1,6 @@
 [project]
 name = "azure-switchboard"
-version = "2025.3.28"
+version = "2025.3.29"
 description = "Batteries-included loadbalancing client for Azure OpenAI"
 readme = "README.md"
 license = { text = "MIT" }
@@ -58,7 +58,7 @@ addopts = "-s -v --import-mode=importlib --cov=src/azure_switchboard --cov-repor
 markers = ["mock_models(*models): specify which models to mock for API testing"]
 
 [tool.bumpver]
-current_version = "2025.3.28"
+current_version = "2025.3.29"
 version_pattern = "YYYY.MM.INC0"
 commit_message = "release: {new_version}"
 tag_message = "{new_version}"
