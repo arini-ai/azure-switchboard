@@ -8,6 +8,7 @@ jobs:
   trunk_check:
     name: Trunk Code Quality Runner
     runs-on: ubuntu-latest
+    # trunk-ignore(checkov/CKV2_GHA_1)
     permissions:
       checks: write # For trunk to post annotations
       contents: read # For repo checkout
