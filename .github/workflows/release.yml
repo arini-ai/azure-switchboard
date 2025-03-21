@@ -1,4 +1,4 @@
-name: Release New Version
+name: Cut Release
 
 on:
   push:
@@ -10,6 +10,11 @@ on:
       - pyproject.toml
   workflow_dispatch:
 
+permissions:
+  contents: write # For pushing tag, commit and creating release
+  checks: write # For trunk check to post annotations
+  id-token: write # For trusted publishing to PyPI
+
 jobs:
   preflight-check:
     uses: ./.github/workflows/trunk-check.yml
@@ -17,10 +22,6 @@ jobs:
   taxi:
     needs: preflight-check
     runs-on: ubuntu-latest
-    # trunk-ignore(checkov/CKV2_GHA_1)
-    permissions:
-      contents: write # For pushing tag, commit and creating release
-      id-token: write # Needed for downstream publish workflow
 
     steps:
       - uses: actions/checkout@v4
