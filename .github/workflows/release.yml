@@ -20,6 +20,7 @@ jobs:
     # trunk-ignore(checkov/CKV2_GHA_1)
     permissions:
       contents: write # For pushing tag, commit and creating release
+      id-token: write # Needed for downstream publish workflow
 
     steps:
       - uses: actions/checkout@v4
