@@ -11,7 +11,7 @@ from openai.types.completion_usage import CompletionUsage
 from opentelemetry import trace
 from pydantic import BaseModel, Field
 
-from azure_switchboard.model import Stats
+from azure_switchboard.model import UtilStats
 
 from .model import Model
 
@@ -81,7 +81,7 @@ class Deployment:
         for model in self.models.values():
             model.reset_usage()
 
-    def stats(self) -> dict[str, Stats]:
+    def stats(self) -> dict[str, UtilStats]:
         return {name: model.stats() for name, model in self.models.items()}
 
     def is_healthy(self, model: str) -> bool:
