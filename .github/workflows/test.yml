@@ -4,8 +4,6 @@ permissions:
 
 on:
   workflow_call:
-  pull_request:
-    branches: [master]
   workflow_dispatch:
 
 jobs:
@@ -22,11 +20,6 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
-
-      - name: Trunk Check
-        uses: trunk-io/trunk-action@v1
-        with:
-          post-annotations: true
 
       - name: Run pytest # pytest args are set in pyproject.toml
         run: uv run pytest -n 4
