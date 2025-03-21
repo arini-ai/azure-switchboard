@@ -12,7 +12,7 @@ on:
 
 jobs:
   preflight-check:
-    uses: ./.github/workflows/test.yml
+    uses: ./.github/workflows/trunk-check.yml
 
   taxi:
     needs: preflight-check
