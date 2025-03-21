@@ -1,0 +1,42 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+Based on my analysis of the codebase, I've identified several additional testing scenarios that would further validate the behavior of the Azure Switchboard library:
+Custom Selector Strategy Testing
+While the library uses "power of two random choices" by default, it allows for custom selector implementations
+Test a custom selector strategy that picks based on different criteria (e.g., lowest RPM usage only, or round-robin)
+This would verify the selector plugin architecture works correctly
+Configurable Retry/Failover Policy Testing
+Test different retry policies with varying attempt counts, backoff strategies
+The constructor takes a customizable failover_policy, but current tests only cover the default behavior
+Edge Case Load Distribution
+Test extremely uneven deployment capabilities (e.g., one deployment with 10x capacity)
+Test behavior when deployments have very different limits (some with RPM limits, others with TPM limits)
+This would verify the load balancing works correctly across heterogeneous deployments
+Performance Degradation Scenarios
+Test behavior when deployments slow down but don't fail completely
+Simulate "brown-out" conditions where requests take longer to process
+This would verify the system adaptation to real-world degradation patterns
+OpenTelemetry Integration
+The code uses OpenTelemetry metrics, but the tests don't verify these metrics
+Add tests to ensure metrics are emitted correctly during different scenarios
+Verify that metrics reflect actual system behavior
+Session Management Edge Cases
+Test when sessions expire from the LRU cache (LRUDict implementation)
+Test behavior with very large numbers of concurrent sessions
+This would verify the session management scales properly
+Error Message Propagation
+Test that specific error types from Azure/OpenAI are properly propagated
+Verify that downstream errors include enough context for debugging
+This would help ensure the library provides good observability
+Configuration Validation
+Test invalid or incomplete deployment configurations
+Ensure the library properly validates model names, API versions, etc.
+This would improve user experience by providing clear error messages during setup
+Ratelimit Window Customization
+Test different ratelimit_window values and verify usage counters reset appropriately
+Test with ratelimit_window=0 (no resets) specifically
+This would verify the usage tracking behavior is configurable
+These scenarios would provide more comprehensive coverage of the library's behavior in diverse and potentially challenging situations that real-world users might encounter.

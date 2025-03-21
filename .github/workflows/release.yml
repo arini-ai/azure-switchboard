@@ -4,24 +4,23 @@ on:
   push:
     branches: [master]
     paths:
-      - "src/**/*.py"
-      - "tests/**/*.py"
-      - "tools/**/*.py"
-      - "pyproject.toml"
+      - src/**/*.py
+      - tests/**/*.py
+      - tools/**/*.py
+      - pyproject.toml
   workflow_dispatch:
 
 jobs:
   preflight-check:
     uses: ./.github/workflows/test.yml
 
-  release:
+  taxi:
     needs: preflight-check
     runs-on: ubuntu-latest
+    # trunk-ignore(checkov/CKV2_GHA_1)
     permissions:
       contents: write # For pushing tag, commit and creating release
 
-    # Only run if push is from a human (not another workflow, to avoid loops on tag push)
-    if: github.actor != 'actions-user'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,11 +43,14 @@ jobs:
         id: bumpver
         run: |
           uv run --frozen bumpver update --commit --tag-commit
-          # Extract the new version
-          NEW_VERSION="$(grep -m1 'current_version = ' pyproject.toml | cut -d'"' -f2)"
+          NEW_VERSION=$(grep -m1 'current_version = ' pyproject.toml | cut -d'"' -f2)
           echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
       - name: Tag and push
         run: |
           git push
           git push origin ${{ steps.bumpver.outputs.version }}
+
+  takeoff:
+    needs: taxi
+    uses: ./.github/workflows/publish.yml

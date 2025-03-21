@@ -20,12 +20,13 @@ pip install azure-switchboard
 - **Coordination-Free**: The default Two Random Choices algorithm does not require coordination between client instances to achieve excellent load distribution characteristics.
 - **Utilization-Aware**: TPM/RPM ratelimit utilization is tracked per model per deployment for use during selection.
 - **Batteries Included**:
-    - **Session Affinity**: Provide a `session_id` to route requests in the same session to the same deployment, optimizing for prompt caching
-    - **Automatic Failover**: Client automatically retries on request failure, with optional fallback to OpenAI by providing an `OpenAIDeployment` in  `deployments`. The retry policy can also be customized by passing a tenacity
+
+  - **Session Affinity**: Provide a `session_id` to route requests in the same session to the same deployment, optimizing for prompt caching
+  - **Automatic Failover**: Client automatically retries on request failure, with optional fallback to OpenAI by providing an `OpenAIDeployment` in `deployments`. The retry policy can also be customized by passing a tenacity
     `AsyncRetrying` instance to `failover_policy`.
-    - **Pluggable Selection**: Custom selection algorithms can be
+  - **Pluggable Selection**: Custom selection algorithms can be
     provided by passing a callable to the `selector` parameter on the Switchboard constructor.
-    - **OpenTelemetry Integration**: Comprehensive metrics and instrumentation for monitoring deployment health and utilization.
+  - **OpenTelemetry Integration**: Comprehensive metrics and instrumentation for monitoring deployment health and utilization.
 
 - **Lightweight**: sub-400 LOC implementation with minimal dependencies: `openai`, `tenacity`, `wrapt`, and `opentelemetry-api`. <1ms overhead per request.
 - **100% Test Coverage**: Comprehensive test suite with pytest.
@@ -213,34 +214,33 @@ Distribution overhead scales ~linearly with the number of deployments.
 
 ### switchboard.Model Parameters
 
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `name` | Configured model name, e.g. "gpt-4o" or "gpt-4o-mini" | Required |
-| `tpm` | Configured TPM rate limit | 0 (unlimited) |
-| `rpm` | Configured RPM rate limit | 0 (unlimited) |
-| `default_cooldown` | Default cooldown period in seconds | 10.0 |
+| Parameter          | Description                                           | Default       |
+| ------------------ | ----------------------------------------------------- | ------------- |
+| `name`             | Configured model name, e.g. "gpt-4o" or "gpt-4o-mini" | Required      |
+| `tpm`              | Configured TPM rate limit                             | 0 (unlimited) |
+| `rpm`              | Configured RPM rate limit                             | 0 (unlimited) |
+| `default_cooldown` | Default cooldown period in seconds                    | 10.0          |
 
 ### switchboard.AzureDeployment Parameters
 
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `name` | Unique identifier for the deployment | Required |
-| `endpoint` | Azure OpenAI endpoint URL | Required |
-| `api_key` | Azure OpenAI API key | Required |
-| `api_version` | Azure OpenAI API version | "2024-10-21" |
-| `timeout` | Default timeout in seconds | 600.0 |
-| `models` | List of Models configured for this deployment | Required |
+| Parameter     | Description                                   | Default      |
+| ------------- | --------------------------------------------- | ------------ |
+| `name`        | Unique identifier for the deployment          | Required     |
+| `endpoint`    | Azure OpenAI endpoint URL                     | Required     |
+| `api_key`     | Azure OpenAI API key                          | Required     |
+| `api_version` | Azure OpenAI API version                      | "2024-10-21" |
+| `timeout`     | Default timeout in seconds                    | 600.0        |
+| `models`      | List of Models configured for this deployment | Required     |
 
 ### switchboard.Switchboard Parameters
 
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `deployments` | List of Deployment config objects | Required |
-| `selector` | Selection algorithm | `two_random_choices` |
-| `failover_policy` | Policy for handling failed requests | `AsyncRetrying(stop=stop_after_attempt(2))` |
-| `ratelimit_window` | Ratelimit window in seconds | 60.0 |
-| `max_sessions` | Maximum number of sessions | 1024 |
-
+| Parameter          | Description                         | Default                                     |
+| ------------------ | ----------------------------------- | ------------------------------------------- |
+| `deployments`      | List of Deployment config objects   | Required                                    |
+| `selector`         | Selection algorithm                 | `two_random_choices`                        |
+| `failover_policy`  | Policy for handling failed requests | `AsyncRetrying(stop=stop_after_attempt(2))` |
+| `ratelimit_window` | Ratelimit window in seconds         | 60.0                                        |
+| `max_sessions`     | Maximum number of sessions          | 1024                                        |
 
 ## Development
 
