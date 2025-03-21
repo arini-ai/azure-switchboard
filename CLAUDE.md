@@ -6,7 +6,7 @@
 - **Description**: Batteries-included, coordination-free client loadbalancing for Azure OpenAI
 - **Version**: 2025.3.24 (uses CalVer versioning)
 - **License**: MIT
-- **Repository**: https://github.com/arini-ai/azure-switchboard
+- **Repository**: [azure-switchboard](https://github.com/arini-ai/azure-switchboard)
 
 ## Build & Test Commands
 

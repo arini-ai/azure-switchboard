@@ -61,12 +61,15 @@ def two_random_choices(model: str, options: list[Deployment]) -> Deployment:
     return min(selected, key=lambda d: d.util(model))
 
 
+DEFAULT_FAILOVER_POLICY = AsyncRetrying(stop=stop_after_attempt(2))
+
+
 class Switchboard:
     def __init__(
         self,
         deployments: Sequence[AzureDeployment | OpenAIDeployment],
         selector: Callable[[str, list[Deployment]], Deployment] = two_random_choices,
-        failover_policy: AsyncRetrying = AsyncRetrying(stop=stop_after_attempt(2)),
+        failover_policy: AsyncRetrying = DEFAULT_FAILOVER_POLICY,
         ratelimit_window: float = 60.0,
         max_sessions: int = 1024,
     ) -> None:
