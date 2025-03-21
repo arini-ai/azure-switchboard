@@ -3,7 +3,7 @@ permissions: read-all
 
 on:
   workflow_run:
-    workflows: [Pull Request]
+    workflows: [Trunk Check]
     types: [completed]
 
 jobs:
