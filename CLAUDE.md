@@ -1,13 +1,15 @@
 # CLAUDE.md - Azure Switchboard Development Guide
 
 ## Project Overview
+
 - **Name**: Azure Switchboard
 - **Description**: Batteries-included, coordination-free client loadbalancing for Azure OpenAI
 - **Version**: 2025.3.24 (uses CalVer versioning)
 - **License**: MIT
-- **Repository**: https://github.com/arini-ai/azure-switchboard
+- **Repository**: [azure-switchboard](https://github.com/arini-ai/azure-switchboard)
 
 ## Build & Test Commands
+
 - Install dependencies: `just install` (uses uv)
 - Update dependencies: `just update`
 - Run tests: `just test` or `uv run pytest -s -v` (supports xdist with `-n 4` by default)
@@ -22,6 +24,7 @@
 - Clean: `just clean`
 
 ## Code Style Guidelines
+
 - **Imports**: Standard modules first, third-party libraries next, local modules last
 - **Type Annotations**: Use typing module extensively with generics, Annotated, overload
 - **Formatting**: Clean 4-space indentation, docstrings in triple quotes
@@ -34,13 +37,16 @@
 - **Pre-commit Hooks**: ruff for linting/formatting, actionlint for GitHub Actions
 
 ## Dependencies
+
 ### Runtime
+
 - openai>=1.62.0
 - opentelemetry-api>=1.30.0
 - tenacity>=9.0.0
 - wrapt>=1.17.2
 
 ### Development
+
 - uv for package management
 - just for task automation
 - pytest with asyncio, coverage, xdist for testing
@@ -50,6 +56,7 @@
 - OpenTelemetry instrumentation for observability
 
 ## Project Structure
+
 - `src/azure_switchboard/`: Core implementation
   - `switchboard.py`: Main client implementation with load balancing logic
   - `deployment.py`: Deployment configuration and API client management
@@ -57,6 +64,7 @@
 - `tools/`: Demo and benchmark utilities
 
 ## Key Features
+
 - API-compatible drop-in replacement for OpenAI's ChatCompletion API
 - Coordination-free load balancing with "power of two random choices" algorithm
 - TPM/RPM rate limit tracking per model/deployment

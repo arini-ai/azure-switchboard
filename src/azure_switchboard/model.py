@@ -4,7 +4,7 @@ import time
 from pydantic import BaseModel
 
 
-class Stats(BaseModel):
+class UtilStats(BaseModel):
     util: float
     tpm: str
     rpm: str
@@ -56,9 +56,11 @@ class Model:
             return 1
 
         # Calculate token utilization (as a percentage of max)
+        # Azure buckets tokens on a non-sliding 60 second window
         token_util = self.tpm_usage / self.tpm_limit if self.tpm_limit > 0 else 0
 
         # Azure allocates RPM at a ratio of 6:1000 to TPM
+        # Limits are enforced proportionally to the 60s limit in 1-10s sliding windows
         request_util = self.rpm_usage / self.rpm_limit if self.rpm_limit > 0 else 0
 
         # Use the higher of the two utilizations as the weight
@@ -72,8 +74,8 @@ class Model:
         self.rpm_usage = 0
         self.last_reset = time.time()
 
-    def stats(self) -> Stats:
-        return Stats(
+    def stats(self) -> UtilStats:
+        return UtilStats(
             util=self.util,
             tpm=f"{self.tpm_usage}/{self.tpm_limit}",
             rpm=f"{self.rpm_usage}/{self.rpm_limit}",

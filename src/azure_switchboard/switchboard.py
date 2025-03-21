@@ -11,7 +11,7 @@ from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from opentelemetry import metrics
 from tenacity import AsyncRetrying, RetryError, stop_after_attempt
 
-from azure_switchboard.model import Stats
+from azure_switchboard.model import UtilStats
 
 from .deployment import (
     AzureDeployment,
@@ -61,12 +61,15 @@ def two_random_choices(model: str, options: list[Deployment]) -> Deployment:
     return min(selected, key=lambda d: d.util(model))
 
 
+DEFAULT_FAILOVER_POLICY = AsyncRetrying(stop=stop_after_attempt(2))
+
+
 class Switchboard:
     def __init__(
         self,
         deployments: Sequence[AzureDeployment | OpenAIDeployment],
         selector: Callable[[str, list[Deployment]], Deployment] = two_random_choices,
-        failover_policy: AsyncRetrying = AsyncRetrying(stop=stop_after_attempt(2)),
+        failover_policy: AsyncRetrying = DEFAULT_FAILOVER_POLICY,
         ratelimit_window: float = 60.0,
         max_sessions: int = 1024,
     ) -> None:
@@ -123,7 +126,7 @@ class Switchboard:
         for client in self.deployments.values():
             client.reset_usage()
 
-    def stats(self) -> dict[str, dict[str, Stats]]:
+    def stats(self) -> dict[str, dict[str, UtilStats]]:
         return {
             name: deployment.stats() for name, deployment in self.deployments.items()
         }

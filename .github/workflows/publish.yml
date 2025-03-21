@@ -2,16 +2,12 @@ name: Publish Package
 
 on:
   workflow_dispatch:
-  push:
-    branches: [master]
-    paths:
-      - "pyproject.toml"  # Only run when pyproject.toml changes (containing version)
+  workflow_call:
 
 jobs:
-  # Only run if the push is from GitHub Actions bot (version bump commit)
   publish:
-    if: ${{ github.actor == 'github-actions[bot]' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
+    # trunk-ignore(checkov/CKV2_GHA_1)
     permissions:
       contents: write # For creating GitHub release
       id-token: write # For trusted publishing to PyPI

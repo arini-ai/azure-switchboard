@@ -2,14 +2,13 @@ set fallback
 
 install:
   uv sync --frozen
-  uv run pre-commit install
+  # uv run pre-commit install
+  trunk actions enable trunk-fmt-pre-commit
+  trunk actions enable trunk-fmt-pre-push
 
 update:
   uv sync --upgrade
   uv run pre-commit autoupdate
-
-pre-commit:
-  uv run pre-commit run --all-files
 
 test *args='-n 4':
   uv run pytest {{args}}
@@ -56,3 +55,9 @@ otel-run *cmd='tools/bench.py -r 5 -d 3':
   # export OTEL_METRICS_EXPORTER=console,otlp
   export OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"
   just run opentelemetry-instrument python {{ cmd }}
+
+trunk-check:
+  trunk check --all --fix
+
+trunk-fmt:
+  trunk fmt
