@@ -1,7 +1,6 @@
 import asyncio
 from unittest.mock import patch
 
-import openai
 import pytest
 import respx
 from httpx import Response, TimeoutException
@@ -49,7 +48,7 @@ class TestDeployment:
 
         # Test exception handling
         mock_client.routes["gpt-4o-mini"].side_effect = Exception("test")
-        with pytest.raises(openai.APIConnectionError):
+        with pytest.raises(DeploymentError):  # (openai.APIConnectionError):
             await deployment.create(**COMPLETION_PARAMS)
         assert mock_client.routes["gpt-4o-mini"].call_count == 2
 
@@ -91,7 +90,7 @@ class TestDeployment:
             "create",
             side_effect=Exception("test"),
         ) as mock:
-            with pytest.raises(Exception, match="test"):
+            with pytest.raises(DeploymentError):
                 stream = await deployment.create(stream=True, **COMPLETION_PARAMS)
                 async for _ in stream:
                     pass
@@ -271,7 +270,7 @@ class TestDeployment:
             TimeoutException("Timeout 3"),
         ]
 
-        with pytest.raises(openai.APITimeoutError):
+        with pytest.raises(DeploymentError):  # (openai.APITimeoutError):
             await deployment.create(**COMPLETION_PARAMS)
         assert mock_client.routes["gpt-4o-mini"].call_count == 3
         assert not deployment.is_healthy("gpt-4o-mini")

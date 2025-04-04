@@ -40,6 +40,7 @@ dev = [
   "opentelemetry-instrumentation-httpx>=0.52b0",
   "opentelemetry-instrumentation-logging>=0.52b0",
   "opentelemetry-instrumentation-openai-v2>=2.1b0",
+  "pandas>=2.2.3",
   "pre-commit>=4.2.0",
   "pytest>=8.3.4",
   "pytest-asyncio>=0.25.3",
@@ -49,6 +50,7 @@ dev = [
   "respx>=0.22.0",
   "rich>=13.9.4",
   "ruff>=0.9.6",
+  "seaborn>=0.13.2",
 ]
 
 [tool.pytest.ini_options]
