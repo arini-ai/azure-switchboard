@@ -158,10 +158,12 @@ class Deployment:
                     self._set_span_attributes(response.usage)
 
                 return response
-        except Exception:
-            logger.exception(f"marking down {self.config.name}/{model} for error")
+        except Exception as e:
+            logger.exception(
+                f"marking down {self.config.name}/{model} for chat completion error"
+            )
             self.models[model].mark_down()
-            raise
+            raise DeploymentError("Error in deployment chat completion") from e
 
     def _estimate_token_usage(self, kwargs: dict) -> int:
         # loose estimate of token cost. were only considering
@@ -213,7 +215,7 @@ class _AsyncStreamWrapper(wrapt.ObjectProxy):
 
                 yield chunk
         except asyncio.CancelledError:  # pragma: no cover
-            logger.error("Cancelled mid-stream")
+            logger.exception("Cancelled mid-stream")
             return
         except Exception as e:
             logger.exception(

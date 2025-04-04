@@ -196,16 +196,20 @@ class Switchboard:
         try:
             async for attempt in self.failover_policy:
                 with attempt:
-                    client = self.select_deployment(model=model, session_id=session_id)
-                    logger.debug(f"Sending completion request to {client}")
-                    response = await client.create(model=model, stream=stream, **kwargs)
+                    deployment = self.select_deployment(
+                        model=model, session_id=session_id
+                    )
+                    logger.debug(f"Sending completion request to {deployment}")
+                    response = await deployment.create(
+                        model=model, stream=stream, **kwargs
+                    )
                     # Record successful request
                     request_counter.add(
                         1,
                         {
                             "model": model,
                             "provider": "azure",
-                            "deployment": client.config.name,
+                            "deployment": deployment.config.name,
                         },
                     )
                     return response
