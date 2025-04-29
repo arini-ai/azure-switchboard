@@ -3,7 +3,7 @@
 Batteries-included, coordination-free client loadbalancing for Azure OpenAI.
 
 ```bash
-pip install azure-switchboard
+uv add azure-switchboard
 ```
 
 [![PyPI - Version](https://img.shields.io/pypi/v/azure-switchboard)](https://pypi.org/project/azure-switchboard/)
