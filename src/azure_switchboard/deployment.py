@@ -46,7 +46,13 @@ class OpenAIDeployment(BaseModel, arbitrary_types_allowed=True):
     base_url: str | None = None
     timeout: float = 600.0
     models: list[Model] = Field(
-        default_factory=lambda: [Model(name="gpt-4o-mini"), Model(name="gpt-4o")]
+        default_factory=lambda: [
+            Model(name="gpt-4o"),
+            Model(name="gpt-4o-mini"),
+            Model(name="gpt-4.1"),
+            Model(name="gpt-4.1-mini"),
+            Model(name="gpt-4.1-nano"),
+        ]
     )
     client: AsyncOpenAI | None = None
 

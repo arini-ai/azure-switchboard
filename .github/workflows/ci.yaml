@@ -1,12 +1,18 @@
-name: Trunk Check
-on: [pull_request, workflow_call, workflow_dispatch]
+name: Lint and Test
+on:
+  push:
+    branches: master
+  pull_request:
+    branches: master
+  workflow_call:
+  workflow_dispatch:
+
 concurrency:
   group: ${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:
-  trunk_check:
-    name: Trunk Code Quality Runner
+  lint:
     runs-on: ubuntu-latest
     # trunk-ignore(checkov/CKV2_GHA_1)
     permissions:
@@ -20,6 +26,5 @@ jobs:
       - name: Trunk Code Quality
         uses: trunk-io/trunk-action@v1
 
-  pytest:
-    needs: trunk_check
-    uses: ./.github/workflows/test.yml
+  test:
+    uses: ./.github/workflows/test.yaml

@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   preflight-check:
-    uses: ./.github/workflows/trunk-check.yml
+    uses: ./.github/workflows/ci.yaml
 
   release:
     needs: preflight-check
