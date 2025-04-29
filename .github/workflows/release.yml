@@ -1,4 +1,4 @@
-name: Cut Release
+name: Release and Publish
 
 on:
   push:
@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write # For pushing tag, commit and creating release
+  contents: write # For pushing tag, commit, and creating release
   checks: write # For trunk check to post annotations
   id-token: write # For trusted publishing to PyPI
 
@@ -19,12 +19,13 @@ jobs:
   preflight-check:
     uses: ./.github/workflows/trunk-check.yml
 
-  taxi:
+  release:
     needs: preflight-check
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0 # Fetch all history for bumpver
 
@@ -48,11 +49,30 @@ jobs:
           NEW_VERSION=$(grep -m1 'current_version = ' pyproject.toml | cut -d'"' -f2)
           echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
-      - name: Tag and push
+      - name: Push new version
         run: |
           git push
           git push origin ${{ steps.bumpver.outputs.version }}
 
-  takeoff:
-    needs: taxi
-    uses: ./.github/workflows/publish.yml
+      # Check out the newly created tag
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.bumpver.outputs.version }}
+
+      - name: Build package
+        run: uv build --no-sources
+
+      - name: Create GitHub release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create
+          "${{ steps.bumpver.outputs.version }}"
+          --repo "$GITHUB_REPOSITORY"
+          --title "${{ steps.bumpver.outputs.version }}"
+          --generate-notes
+          dist/*
+
+      - name: Publish to PyPI
+        run: uv publish
