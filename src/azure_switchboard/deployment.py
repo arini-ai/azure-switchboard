@@ -141,7 +141,7 @@ class Deployment:
                     **kwargs,
                 )
 
-                # streaming util gets updated inside the WrappedAsyncStream
+                # streaming util gets updated inside _AsyncStreamWrapper
                 return _AsyncStreamWrapper(
                     stream=response_stream,
                     deployment=self,
