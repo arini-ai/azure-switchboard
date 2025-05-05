@@ -91,10 +91,10 @@ class Deployment:
         return {name: model.stats() for name, model in self.models.items()}
 
     def is_healthy(self, model: str) -> bool:
-        return self.model(model).is_healthy()
+        return self.model(model).is_healthy() if model in self.models else False
 
     def util(self, model: str) -> float:
-        return self.model(model).util
+        return self.model(model).util if model in self.models else 0.0
 
     def model(self, name: str) -> Model:
         return self.models[name]

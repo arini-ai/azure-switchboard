@@ -82,7 +82,9 @@ class TestSwitchboard:
 
         # Mark last deployment as unhealthy
         deployments[2].models["gpt-4o-mini"].mark_down()
-        with pytest.raises(SwitchboardError, match="All attempts failed"):
+        with pytest.raises(
+            SwitchboardError, match="No eligible deployments available for gpt-4o-mini"
+        ):
             await switchboard.create(**COMPLETION_PARAMS)
         assert mock_client["gpt-4o-mini"].call_count == 3
 
@@ -342,3 +344,12 @@ class TestSwitchboard:
 
         with pytest.raises(SwitchboardError, match="No deployments provided"):
             Switchboard(deployments=[])
+
+    async def test_invalid_model(self, switchboard: Switchboard):
+        """Test that an invalid model is not eligible on a deployment."""
+
+        with pytest.raises(
+            SwitchboardError,
+            match="No eligible deployments available for invalid-model",
+        ):
+            await switchboard.create(model="invalid-model", messages=[])
