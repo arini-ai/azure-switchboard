@@ -91,6 +91,8 @@ class Deployment:
         return {name: model.stats() for name, model in self.models.items()}
 
     def is_healthy(self, model: str) -> bool:
+        if model not in self.models:
+            return False
         return self.model(model).is_healthy()
 
     def util(self, model: str) -> float:

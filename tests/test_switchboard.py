@@ -343,26 +343,27 @@ class TestSwitchboard:
         with pytest.raises(SwitchboardError, match="No deployments provided"):
             Switchboard(deployments=[])
 
-    @pytest.mark.mock_models("gpt-4", "gpt-3.5-turbo", "gpt-4.1")
-    async def test_model_specific_selection(self, mock_client: respx.MockRouter):
+    async def test_model_specific_selection(
+        self,
+    ):
         """Test that only deployments with the requested model are selected."""
-        
+
         # Create deployments with different model configurations
-        deployment1 = azure_config("test1", models=["gpt-4"])
-        deployment2 = azure_config("test2", models=["gpt-3.5-turbo"])
-        deployment3 = azure_config("test3", models=["gpt-4", "gpt-3.5-turbo"])
-        deployment4 = azure_config("test4", models=["gpt-4.1"])
+        deployment1 = azure_config("test1", model_names=["gpt-4"])
+        deployment2 = azure_config("test2", model_names=["gpt-4", "gpt-4.1"])
+        deployment3 = azure_config("test3", model_names=["gpt-4.1"])
+        deployment4 = azure_config("test4", model_names=["gpt-4o-mini"])
 
         switchboard = Switchboard(deployments=[deployment1, deployment2, deployment3, deployment4])
 
         # Test selection for gpt-4
         client = switchboard.select_deployment(model="gpt-4")
-        assert client.config.name in ["test1", "test3"]
-
-        # Test selection for gpt-3.5-turbo
-        client = switchboard.select_deployment(model="gpt-3.5-turbo")
-        assert client.config.name in ["test2", "test3"]
+        assert client.config.name in ["test1", "test2"]
 
         # Test selection for gpt-4.1
         client = switchboard.select_deployment(model="gpt-4.1")
+        assert client.config.name in ["test2", "test3"]
+
+        # Test selection for gpt-4o-mini
+        client = switchboard.select_deployment(model="gpt-4o-mini")
         assert client.config.name in ["test4"]

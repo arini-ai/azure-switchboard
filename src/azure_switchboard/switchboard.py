@@ -148,10 +148,9 @@ class Switchboard:
             logger.warning(f"{client} is unhealthy, falling back to selection")
 
         # Get eligible deployments for the requested model
-        eligible_deployments = [
-            d for d in self.deployments.values()
-            if model in d.models and d.is_healthy(model)
-        ]
+        eligible_deployments = list(
+            filter(lambda d: d.is_healthy(model), self.deployments.values())
+        )
 
         # TODO: otel metric collection here
 
