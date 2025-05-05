@@ -9,7 +9,12 @@ from typing import Callable, Literal, Sequence, overload
 from openai import AsyncStream
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from opentelemetry import metrics
-from tenacity import AsyncRetrying, RetryError, stop_after_attempt
+from tenacity import (
+    AsyncRetrying,
+    RetryError,
+    retry_if_not_exception_type,
+    stop_after_attempt,
+)
 
 from azure_switchboard.model import UtilStats
 
@@ -61,7 +66,11 @@ def two_random_choices(model: str, options: list[Deployment]) -> Deployment:
     return min(selected, key=lambda d: d.util(model))
 
 
-DEFAULT_FAILOVER_POLICY = AsyncRetrying(stop=stop_after_attempt(2))
+DEFAULT_FAILOVER_POLICY = AsyncRetrying(
+    stop=stop_after_attempt(2),
+    retry=retry_if_not_exception_type(SwitchboardError),
+    reraise=True,
+)
 
 
 class Switchboard:
@@ -154,11 +163,11 @@ class Switchboard:
 
         # TODO: otel metric collection here
 
-        # Record healthy deployments count metric
-        healthy_deployments_gauge.set(len(eligible_deployments), {"model": model})
-
         if not eligible_deployments:
             raise SwitchboardError(f"No eligible deployments available for {model}")
+
+        # Record healthy deployments count metric
+        healthy_deployments_gauge.set(len(eligible_deployments), {"model": model})
 
         if len(eligible_deployments) == 1:
             return eligible_deployments[0]
@@ -192,7 +201,6 @@ class Switchboard:
         """
         Send a chat completion request to the selected deployment, with automatic fallback.
         """
-
         try:
             async for attempt in self.failover_policy:
                 with attempt:
@@ -213,28 +221,27 @@ class Switchboard:
                         },
                     )
                     return response
-        except RetryError:
+        except (SwitchboardError, RetryError):
             logger.exception("Azure failovers exhausted")
             # Record Azure deployment failure
             deployment_failures_counter.add(1, {"model": model, "provider": "azure"})
 
-        if self.fallback:
-            logger.warning("Attempting fallback to OpenAI")
-            try:
-                response = await self.fallback.create(
-                    model=model, stream=stream, **kwargs
-                )
-                # Record successful fallback request
-                request_counter.add(1, {"model": model, "provider": "openai"})
-                return response
-            except Exception as e:
-                # Record OpenAI fallback failure
-                deployment_failures_counter.add(
-                    1, {"model": model, "provider": "openai"}
-                )
-                raise SwitchboardError("Fallback to OpenAI failed") from e
-        else:
-            raise SwitchboardError("All attempts failed")
+            if self.fallback:
+                logger.warning("Attempting fallback to OpenAI")
+                try:
+                    response = await self.fallback.create(
+                        model=model, stream=stream, **kwargs
+                    )
+                    # Record successful fallback request
+                    request_counter.add(1, {"model": model, "provider": "openai"})
+                    return response
+                except Exception as e_prime:
+                    # Record OpenAI fallback failure
+                    deployment_failures_counter.add(
+                        1, {"model": model, "provider": "openai"}
+                    )
+                    raise SwitchboardError("Fallback to OpenAI failed") from e_prime
+            raise
 
     def __repr__(self) -> str:
         return f"Switchboard({self.deployments})"

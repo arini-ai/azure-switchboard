@@ -274,3 +274,8 @@ class TestDeployment:
             await deployment.create(**COMPLETION_PARAMS)
         assert mock_client.routes["gpt-4o-mini"].call_count == 3
         assert not deployment.is_healthy("gpt-4o-mini")
+
+    async def test_invalid_model(self, deployment: Deployment):
+        """Test that an invalid or unconfigured model is not eligible on a deployment."""
+
+        assert not deployment.is_healthy("invalid-model")
