@@ -41,15 +41,12 @@ def openai_config() -> OpenAIDeployment:
     )
 
 
-def azure_config(name: str) -> AzureDeployment:
+def azure_config(name: str, model_names: list[str] = ["gpt-4o-mini", "gpt-4o"]) -> AzureDeployment:
     return AzureDeployment(
         name=name,
         endpoint=f"https://{name}.openai.azure.com/",
         api_key=name,
-        models=[
-            Model(name="gpt-4o-mini", tpm=10000, rpm=60),
-            Model(name="gpt-4o", tpm=10000, rpm=60),
-        ],
+        models=[Model(name=model_name, tpm=10000, rpm=60) for model_name in model_names],
     )
 
 
