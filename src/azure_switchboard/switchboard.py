@@ -21,6 +21,7 @@ from azure_switchboard.model import UtilStats
 from .deployment import (
     AzureDeployment,
     Deployment,
+    DeploymentError,
     OpenAIDeployment,
 )
 
@@ -221,7 +222,7 @@ class Switchboard:
                         },
                     )
                     return response
-        except (SwitchboardError, RetryError):
+        except (SwitchboardError, DeploymentError, RetryError):
             logger.exception("Azure failovers exhausted")
             # Record Azure deployment failure
             deployment_failures_counter.add(1, {"model": model, "provider": "azure"})
