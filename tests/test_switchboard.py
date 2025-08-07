@@ -176,7 +176,7 @@ class TestSwitchboard:
 
         # make openai fallback unhealthy, verify it throws
         mock_client["openai"].side_effect = Exception("test")
-        with pytest.raises(SwitchboardError, match="Fallback to OpenAI failed"):
+        with pytest.raises(SwitchboardError, match="No eligible deployments available for gpt-4o-mini"):
             await switchboard.create(**COMPLETION_PARAMS)
         # 3 total additional calls were made, because openai retries twice internally
         assert mock_client["openai"].call_count == 5
@@ -188,14 +188,16 @@ class TestSwitchboard:
 
         # make everything unhealthy, verify it throws
         switchboard.deployments["test1"].models["gpt-4o-mini"].mark_down()
-        with pytest.raises(SwitchboardError, match="Fallback to OpenAI failed"):
+        with pytest.raises(SwitchboardError, match="No eligible deployments available for gpt-4o-mini"):
             await switchboard.create(**COMPLETION_PARAMS)
-        assert mock_client["openai"].call_count == 8
+        # With the new implementation, no additional calls are made when all deployments are unhealthy
+        assert mock_client["openai"].call_count == 5
 
         # reset fallback, verify it works
         mock_client["openai"].side_effect = None
+        switchboard.fallback.models["gpt-4o-mini"].mark_up()
         await switchboard.create(**COMPLETION_PARAMS)
-        assert mock_client["openai"].call_count == 9
+        assert mock_client["openai"].call_count == 6
 
         # reset the deployment and verify it gets used again
         switchboard.deployments["test1"].models["gpt-4o-mini"].mark_up()
