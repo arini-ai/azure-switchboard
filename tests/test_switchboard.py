@@ -4,6 +4,7 @@ from unittest.mock import patch
 import pytest
 import respx
 
+
 from azure_switchboard import OpenAIDeployment, Switchboard, SwitchboardError
 
 from .conftest import (
@@ -355,3 +356,74 @@ class TestSwitchboard:
             match="No eligible deployments available for invalid-model",
         ):
             await switchboard.create(model="invalid-model", messages=[])
+
+    @pytest.mark.mock_models("openai")
+    async def test_only_openai_deployment(self, mock_client: respx.MockRouter):
+        """Test the edge case where only OpenAI deployment is configured."""
+        # Create switchboard with only OpenAI deployment
+        switchboard = Switchboard(deployments=[openai_config()])
+
+        assert switchboard.fallback is not None
+        assert isinstance(switchboard.fallback.config, OpenAIDeployment)
+        assert len(switchboard.deployments) == 0
+
+        # Verify that OpenAI deployment is selected
+        deployment = switchboard.select_deployment(model="gpt-4o-mini")
+        assert deployment == switchboard.fallback
+
+        # Verify with session_id to cover line 171
+        deployment_with_session = switchboard.select_deployment(model="gpt-4o-mini", session_id="test")
+        assert deployment_with_session == switchboard.fallback
+        assert switchboard.sessions["test"] == switchboard.fallback
+
+        # Verify that requests work correctly
+        response = await switchboard.create(**COMPLETION_PARAMS)
+        assert response == COMPLETION_RESPONSE
+        assert mock_client["openai"].call_count == 1
+
+    async def test_no_fallback_no_deployments(self):
+        """Test error when no deployments available and no fallback configured."""
+        # Create a switchboard with an Azure deployment but no fallback
+        switchboard = Switchboard(deployments=[azure_config("test1")])
+
+        # Mark the deployment as unhealthy
+        switchboard.deployments["test1"].models["gpt-4o-mini"].mark_down()
+
+        # This should raise an error since there's no fallback
+        with pytest.raises(
+            SwitchboardError,
+            match="No eligible deployments available for gpt-4o-mini",
+        ):
+            await switchboard.create(**COMPLETION_PARAMS)
+
+    async def test_retry_exhausted_edge_case(self):
+        """Test the edge case where retry policy returns without raising RetryError."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        # Create a mock retry policy that yields once then exits without raising
+        class MockAttempt:
+            def __enter__(self):
+                return self
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                # Suppress the exception so retry continues
+                return True
+
+        async def mock_retry_policy():
+            yield MockAttempt()
+            # Exit without raising StopAsyncIteration or RetryError
+            return
+
+        mock_policy = AsyncMock()
+        mock_policy.__aiter__ = lambda self: mock_retry_policy()
+
+        switchboard = Switchboard(
+            deployments=[azure_config("test1")],
+            failover_policy=mock_policy
+        )
+
+        # This should hit the "should never be reached" line
+        with pytest.raises(
+            SwitchboardError,
+            match="All retry attempts exhausted for model gpt-4o-mini",
+        ):
+            await switchboard.create(**COMPLETION_PARAMS)
