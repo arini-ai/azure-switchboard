@@ -20,7 +20,6 @@ uv add azure-switchboard
 - **Coordination-Free**: The default Two Random Choices algorithm does not require coordination between client instances to achieve excellent load distribution characteristics.
 - **Utilization-Aware**: TPM/RPM ratelimit utilization is tracked per model per deployment for use during selection.
 - **Batteries Included**:
-
   - **Session Affinity**: Provide a `session_id` to route requests in the same session to the same deployment, optimizing for prompt caching
   - **Automatic Failover**: Client automatically retries on request failure, with optional fallback to OpenAI by providing an `OpenAIDeployment` in `deployments`. The retry policy can also be customized by passing a tenacity
     `AsyncRetrying` instance to `failover_policy`.

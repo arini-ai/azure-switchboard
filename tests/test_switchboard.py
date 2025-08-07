@@ -398,7 +398,7 @@ class TestSwitchboard:
 
     async def test_retry_exhausted_edge_case(self):
         """Test the edge case where retry policy returns without raising RetryError."""
-        from unittest.mock import AsyncMock, MagicMock, patch
+        from unittest.mock import AsyncMock
 
         # Create a mock retry policy that yields once then exits without raising
         class MockAttempt:
