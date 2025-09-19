@@ -400,3 +400,30 @@ class TestSwitchboard:
             match="No eligible deployments available for gpt-4o-mini",
         ):
             await switchboard.create(**COMPLETION_PARAMS)
+
+    async def test_handle_cancelled_error(self):
+        """Test that Switchboard.create gracefully handles asyncio.CancelledError."""
+
+        switchboard = Switchboard(deployments=[openai_config()])
+
+        assert switchboard.fallback is not None
+        assert isinstance(switchboard.fallback.config, OpenAIDeployment)
+        assert len(switchboard.deployments) == 0
+
+        # Patch the underlying deployment.create to raise CancelledError
+        with patch.object(
+            switchboard.fallback, "create", side_effect=asyncio.CancelledError
+        ):
+            # Should not raise, should be silently handled
+            result = await switchboard.create(**COMPLETION_PARAMS)
+            assert result is None
+
+        # Also verify that the fallback is still selected as expected
+        deployment = switchboard.select_deployment(model="gpt-4o-mini")
+        assert deployment == switchboard.fallback
+
+        deployment_with_session = switchboard.select_deployment(
+            model="gpt-4o-mini", session_id="test"
+        )
+        assert deployment_with_session == switchboard.fallback
+        assert switchboard.sessions["test"] == switchboard.fallback
