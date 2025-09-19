@@ -205,7 +205,7 @@ class Switchboard:
         session_id: str | None = None,
         stream: bool = False,
         **kwargs,
-    ) -> ChatCompletion | AsyncStream[ChatCompletionChunk]:
+    ) -> ChatCompletion | AsyncStream[ChatCompletionChunk]:  # pyright: ignore[reportReturnType]
         """
         Send a chat completion request to the selected deployment, with automatic failover.
         """
@@ -232,9 +232,6 @@ class Switchboard:
                     return response
         except asyncio.CancelledError:
             pass
-
-        # This should never be reached due to the failover_policy raising RetryError
-        # raise SwitchboardError(f"All retry attempts exhausted for model {model}")
 
     def __repr__(self) -> str:
         return f"Switchboard({self.deployments})"
