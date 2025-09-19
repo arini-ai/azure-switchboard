@@ -166,7 +166,9 @@ class Switchboard:
         if not eligible_deployments:
             # Check if fallback is available and healthy
             if self.fallback and self.fallback.is_healthy(model):
-                logger.debug(f"No Azure deployments available, using fallback: {self.fallback}")
+                logger.debug(
+                    f"No Azure deployments available, using fallback: {self.fallback}"
+                )
                 if session_id:
                     self.sessions[session_id] = self.fallback
                 return self.fallback
@@ -207,29 +209,32 @@ class Switchboard:
         """
         Send a chat completion request to the selected deployment, with automatic failover.
         """
-        async for attempt in self.failover_policy:
-            with attempt:
-                deployment = self.select_deployment(
-                    model=model, session_id=session_id
-                )
-                logger.debug(f"Sending completion request to {deployment}")
-                response = await deployment.create(
-                    model=model, stream=stream, **kwargs
-                )
-                # Record successful request
-                provider = "openai" if deployment == self.fallback else "azure"
-                request_counter.add(
-                    1,
-                    {
-                        "model": model,
-                        "provider": provider,
-                        "deployment": deployment.config.name,
-                    },
-                )
-                return response
+        try:
+            async for attempt in self.failover_policy:
+                with attempt:
+                    deployment = self.select_deployment(
+                        model=model, session_id=session_id
+                    )
+                    logger.debug(f"Sending completion request to {deployment}")
+                    response = await deployment.create(
+                        model=model, stream=stream, **kwargs
+                    )
+                    # Record successful request
+                    provider = "openai" if deployment == self.fallback else "azure"
+                    request_counter.add(
+                        1,
+                        {
+                            "model": model,
+                            "provider": provider,
+                            "deployment": deployment.config.name,
+                        },
+                    )
+                    return response
+        except asyncio.CancelledError:
+            pass
 
         # This should never be reached due to the failover_policy raising RetryError
-        raise SwitchboardError(f"All retry attempts exhausted for model {model}")
+        # raise SwitchboardError(f"All retry attempts exhausted for model {model}")
 
     def __repr__(self) -> str:
         return f"Switchboard({self.deployments})"
