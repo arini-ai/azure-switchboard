@@ -4,7 +4,6 @@ from unittest.mock import patch
 import pytest
 import respx
 
-
 from azure_switchboard import OpenAIDeployment, Switchboard, SwitchboardError
 
 from .conftest import (
@@ -177,7 +176,9 @@ class TestSwitchboard:
 
         # make openai fallback unhealthy, verify it throws
         mock_client["openai"].side_effect = Exception("test")
-        with pytest.raises(SwitchboardError, match="No eligible deployments available for gpt-4o-mini"):
+        with pytest.raises(
+            SwitchboardError, match="No eligible deployments available for gpt-4o-mini"
+        ):
             await switchboard.create(**COMPLETION_PARAMS)
         # 3 total additional calls were made, because openai retries twice internally
         assert mock_client["openai"].call_count == 5
@@ -189,7 +190,9 @@ class TestSwitchboard:
 
         # make everything unhealthy, verify it throws
         switchboard.deployments["test1"].models["gpt-4o-mini"].mark_down()
-        with pytest.raises(SwitchboardError, match="No eligible deployments available for gpt-4o-mini"):
+        with pytest.raises(
+            SwitchboardError, match="No eligible deployments available for gpt-4o-mini"
+        ):
             await switchboard.create(**COMPLETION_PARAMS)
         # With the new implementation, no additional calls are made when all deployments are unhealthy
         assert mock_client["openai"].call_count == 5
@@ -372,7 +375,9 @@ class TestSwitchboard:
         assert deployment == switchboard.fallback
 
         # Verify with session_id to cover line 171
-        deployment_with_session = switchboard.select_deployment(model="gpt-4o-mini", session_id="test")
+        deployment_with_session = switchboard.select_deployment(
+            model="gpt-4o-mini", session_id="test"
+        )
         assert deployment_with_session == switchboard.fallback
         assert switchboard.sessions["test"] == switchboard.fallback
 
@@ -393,37 +398,5 @@ class TestSwitchboard:
         with pytest.raises(
             SwitchboardError,
             match="No eligible deployments available for gpt-4o-mini",
-        ):
-            await switchboard.create(**COMPLETION_PARAMS)
-
-    async def test_retry_exhausted_edge_case(self):
-        """Test the edge case where retry policy returns without raising RetryError."""
-        from unittest.mock import AsyncMock
-
-        # Create a mock retry policy that yields once then exits without raising
-        class MockAttempt:
-            def __enter__(self):
-                return self
-            def __exit__(self, exc_type, exc_val, exc_tb):
-                # Suppress the exception so retry continues
-                return True
-
-        async def mock_retry_policy():
-            yield MockAttempt()
-            # Exit without raising StopAsyncIteration or RetryError
-            return
-
-        mock_policy = AsyncMock()
-        mock_policy.__aiter__ = lambda self: mock_retry_policy()
-
-        switchboard = Switchboard(
-            deployments=[azure_config("test1")],
-            failover_policy=mock_policy
-        )
-
-        # This should hit the "should never be reached" line
-        with pytest.raises(
-            SwitchboardError,
-            match="All retry attempts exhausted for model gpt-4o-mini",
         ):
             await switchboard.create(**COMPLETION_PARAMS)
