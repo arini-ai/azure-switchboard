@@ -28,7 +28,7 @@ class TestSwitchboard:
         assert "Switchboard" in repr(switchboard)
 
         response = await switchboard.create(**COMPLETION_PARAMS)
-        assert mock_client["gpt-4o-mini"].call_count == 1
+        assert mock_client["azure"].call_count == 1
         assert response == COMPLETION_RESPONSE
 
         assert any(
@@ -63,22 +63,22 @@ class TestSwitchboard:
         # Initial request should work
         response = await switchboard.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
-        assert mock_client["gpt-4o-mini"].call_count == 1
-        host_0 = mock_client["gpt-4o-mini"].calls.last.request.url.host
+        assert mock_client["azure"].call_count == 1
+        host_0 = mock_client["azure"].calls.last.request.url.host
 
         # Mark first deployment as unhealthy
         deployments[0].models["gpt-4o-mini"].mark_down()
         response = await switchboard.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
-        assert mock_client["gpt-4o-mini"].call_count == 2
-        host_1 = mock_client["gpt-4o-mini"].calls.last.request.url.host
+        assert mock_client["azure"].call_count == 2
+        host_1 = mock_client["azure"].calls.last.request.url.host
 
         # Mark second deployment as unhealthy
         deployments[1].models["gpt-4o-mini"].mark_down()
         response = await switchboard.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
-        assert mock_client["gpt-4o-mini"].call_count == 3
-        host_2 = mock_client["gpt-4o-mini"].calls.last.request.url.host
+        assert mock_client["azure"].call_count == 3
+        host_2 = mock_client["azure"].calls.last.request.url.host
 
         # Mark last deployment as unhealthy
         deployments[2].models["gpt-4o-mini"].mark_down()
@@ -86,14 +86,14 @@ class TestSwitchboard:
             SwitchboardError, match="No eligible deployments available for gpt-4o-mini"
         ):
             await switchboard.create(**COMPLETION_PARAMS)
-        assert mock_client["gpt-4o-mini"].call_count == 3
+        assert mock_client["azure"].call_count == 3
 
         # Restore first deployment
         deployments[0].models["gpt-4o-mini"].mark_up()
         response = await switchboard.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
-        assert mock_client["gpt-4o-mini"].call_count == 4
-        host_3 = mock_client["gpt-4o-mini"].calls.last.request.url.host
+        assert mock_client["azure"].call_count == 4
+        host_3 = mock_client["azure"].calls.last.request.url.host
 
         assert len(set([host_0, host_1, host_2, host_3])) > 1
 
@@ -125,7 +125,7 @@ class TestSwitchboard:
         # Initial request establishes session affinity
         response1 = await switchboard.create(session_id=session_id, **COMPLETION_PARAMS)
         assert response1 == COMPLETION_RESPONSE
-        assert mock_client["gpt-4o-mini"].call_count == 1
+        assert mock_client["azure"].call_count == 1
         # Get assigned deployment
         assigned_deployment = switchboard.sessions[session_id]
         original_deployment = assigned_deployment
@@ -167,7 +167,7 @@ class TestSwitchboard:
         # default: use the healthy azure deployment
         response = await switchboard.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
-        assert mock_client["gpt-4o-mini"].call_count == 1
+        assert mock_client["azure"].call_count == 1
 
         # make deployment unhealthy so it falls back to openai
         switchboard.deployments["test1"].models["gpt-4o-mini"].mark_down()
@@ -186,7 +186,7 @@ class TestSwitchboard:
         # bring the deployment back, verify we use it
         switchboard.deployments["test1"].models["gpt-4o-mini"].mark_up()
         await switchboard.create(**COMPLETION_PARAMS)
-        assert mock_client["gpt-4o-mini"].call_count == 2
+        assert mock_client["azure"].call_count == 2
 
         # make everything unhealthy, verify it throws
         switchboard.deployments["test1"].models["gpt-4o-mini"].mark_down()
@@ -206,7 +206,7 @@ class TestSwitchboard:
         # reset the deployment and verify it gets used again
         switchboard.deployments["test1"].models["gpt-4o-mini"].mark_up()
         await switchboard.create(**COMPLETION_PARAMS)
-        assert mock_client["gpt-4o-mini"].call_count == 3
+        assert mock_client["azure"].call_count == 3
 
     def _within_bounds(self, val, min, max, tolerance=0.05):
         """Check if a value is within bounds, accounting for tolerance."""

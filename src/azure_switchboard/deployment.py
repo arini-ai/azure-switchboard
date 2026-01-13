@@ -5,7 +5,7 @@ import logging
 from typing import AsyncIterator, Literal, cast, overload
 
 import wrapt
-from openai import AsyncAzureOpenAI, AsyncOpenAI, AsyncStream
+from openai import AsyncOpenAI, AsyncStream
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from openai.types.completion_usage import CompletionUsage
 from opentelemetry import trace
@@ -22,18 +22,16 @@ class AzureDeployment(BaseModel, arbitrary_types_allowed=True):
     """Metadata about an Azure deployment"""
 
     name: str
-    endpoint: str
+    base_url: str
     api_key: str
-    api_version: str = "2024-10-21"
     timeout: float = 600.0
     models: list[Model]
-    client: AsyncAzureOpenAI | None = None
+    client: AsyncOpenAI | None = None
 
-    def get_client(self) -> AsyncAzureOpenAI:
-        return AsyncAzureOpenAI(
-            azure_endpoint=self.endpoint,
+    def get_client(self) -> AsyncOpenAI:
+        return AsyncOpenAI(
             api_key=self.api_key,
-            api_version=self.api_version,
+            base_url=self.base_url,
             timeout=self.timeout,
         )
 

@@ -37,7 +37,7 @@ class TestDeployment:
         deployment.client.max_retries = 0
 
         response = await deployment.create(**COMPLETION_PARAMS)
-        assert mock_client.routes["gpt-4o-mini"].call_count == 1
+        assert mock_client.routes["azure"].call_count == 1
         assert response == COMPLETION_RESPONSE
 
         # Check token usage tracking
@@ -47,10 +47,10 @@ class TestDeployment:
         assert usage.rpm.startswith("1")
 
         # Test exception handling
-        mock_client.routes["gpt-4o-mini"].side_effect = Exception("test")
+        mock_client.routes["azure"].side_effect = Exception("test")
         with pytest.raises(DeploymentError):  # (openai.APIConnectionError):
             await deployment.create(**COMPLETION_PARAMS)
-        assert mock_client.routes["gpt-4o-mini"].call_count == 2
+        assert mock_client.routes["azure"].call_count == 2
 
         # account for preflight estimate
         usage = model.stats()
@@ -211,14 +211,14 @@ class TestDeployment:
         _ = await deployment.create(
             model="gpt-4o", messages=COMPLETION_PARAMS["messages"]
         )
-        assert mock_client.routes["gpt-4o"].call_count == 1
+        assert mock_client.routes["azure"].call_count == 1
         assert gpt4o.rpm_usage == 1
         assert gpt4o.tpm_usage > 0
         assert gpt4o_mini.tpm_usage == 0
         assert gpt4o_mini.rpm_usage == 0
 
         _ = await deployment.create(**COMPLETION_PARAMS)
-        assert mock_client.routes["gpt-4o-mini"].call_count == 1
+        assert mock_client.routes["azure"].call_count == 2
 
         assert gpt4o.rpm_usage == 1
         assert gpt4o.tpm_usage > 0
@@ -240,7 +240,7 @@ class TestDeployment:
         model = deployment.models["gpt-4o-mini"]
         assert len(responses) == num_requests
         assert all(r == COMPLETION_RESPONSE for r in responses)
-        assert mock_client.routes["gpt-4o-mini"].call_count == num_requests
+        assert mock_client.routes["azure"].call_count == num_requests
         usage = model.stats()
         assert usage.tpm == f"{20 * num_requests}/10000"
         assert usage.rpm == f"{num_requests}/60"
@@ -253,18 +253,18 @@ class TestDeployment:
 
         # Test successful retry after timeouts
         expected_response = Response(status_code=200, json=COMPLETION_RESPONSE_JSON)
-        mock_client.routes["gpt-4o-mini"].side_effect = [
+        mock_client.routes["azure"].side_effect = [
             TimeoutException("Timeout 1"),
             TimeoutException("Timeout 2"),
             expected_response,
         ]
         response = await deployment.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
-        assert mock_client.routes["gpt-4o-mini"].call_count == 3
+        assert mock_client.routes["azure"].call_count == 3
 
         # Test failure after max retries
-        mock_client.routes["gpt-4o-mini"].reset()
-        mock_client.routes["gpt-4o-mini"].side_effect = [
+        mock_client.routes["azure"].reset()
+        mock_client.routes["azure"].side_effect = [
             TimeoutException("Timeout 1"),
             TimeoutException("Timeout 2"),
             TimeoutException("Timeout 3"),
@@ -272,7 +272,7 @@ class TestDeployment:
 
         with pytest.raises(DeploymentError):  # (openai.APITimeoutError):
             await deployment.create(**COMPLETION_PARAMS)
-        assert mock_client.routes["gpt-4o-mini"].call_count == 3
+        assert mock_client.routes["azure"].call_count == 3
         assert not deployment.is_healthy("gpt-4o-mini")
 
     async def test_invalid_model(self, deployment: Deployment):
