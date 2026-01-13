@@ -13,12 +13,11 @@ from openai.types.completion_usage import (
 )
 
 from azure_switchboard import (
-    AzureDeployment,
     Deployment,
     Model,
-    OpenAIDeployment,
     Switchboard,
 )
+from azure_switchboard.deployment import _RuntimeDeployment
 
 
 async def collect_chunks(
@@ -34,15 +33,16 @@ async def collect_chunks(
     return received_chunks, content
 
 
-def openai_config() -> OpenAIDeployment:
-    return OpenAIDeployment(
+def openai_config() -> Deployment:
+    return Deployment(
+        fallback=True,
         api_key="test",
         models=[Model(name="gpt-4o-mini"), Model(name="gpt-4o")],
     )
 
 
-def azure_config(name: str) -> AzureDeployment:
-    return AzureDeployment(
+def azure_config(name: str) -> Deployment:
+    return Deployment(
         name=name,
         base_url=f"https://{name}.openai.azure.com/openai/v1/",
         api_key=name,
@@ -91,7 +91,7 @@ def model():
 
 @pytest.fixture
 def deployment():
-    return Deployment(azure_config("test1"))
+    return _RuntimeDeployment(azure_config("test1"))
 
 
 @pytest.fixture

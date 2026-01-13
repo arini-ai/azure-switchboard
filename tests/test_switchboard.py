@@ -4,7 +4,7 @@ from unittest.mock import patch
 import pytest
 import respx
 
-from azure_switchboard import OpenAIDeployment, Switchboard, SwitchboardError
+from azure_switchboard import Switchboard, SwitchboardError
 
 from .conftest import (
     COMPLETION_PARAMS,
@@ -41,7 +41,7 @@ class TestSwitchboard:
     async def test_streaming(self, switchboard: Switchboard):
         """Test streaming through switchboard."""
 
-        with patch("azure_switchboard.deployment.Deployment.create") as mock:
+        with patch("azure_switchboard.deployment._RuntimeDeployment.create") as mock:
             mock.side_effect = chat_completion_mock()
             stream = await switchboard.create(stream=True, **COMPLETION_PARAMS)
             _, content = await collect_chunks(stream)
@@ -157,7 +157,7 @@ class TestSwitchboard:
         switchboard = Switchboard(deployments=[azure_config("test1"), openai_config()])
 
         assert switchboard.fallback is not None
-        assert isinstance(switchboard.fallback.config, OpenAIDeployment)
+        assert switchboard.fallback.config.fallback is True
 
         # basic test to verify the fallback works
         response = await switchboard.fallback.create(**COMPLETION_PARAMS)
@@ -367,7 +367,7 @@ class TestSwitchboard:
         switchboard = Switchboard(deployments=[openai_config()])
 
         assert switchboard.fallback is not None
-        assert isinstance(switchboard.fallback.config, OpenAIDeployment)
+        assert switchboard.fallback.config.fallback is True
         assert len(switchboard.deployments) == 0
 
         # Verify that OpenAI deployment is selected
@@ -402,23 +402,23 @@ class TestSwitchboard:
             await switchboard.create(**COMPLETION_PARAMS)
 
     async def test_handle_cancelled_error(self):
-        """Test that Switchboard.create gracefully handles asyncio.CancelledError."""
+        """Test that Switchboard.create properly propagates asyncio.CancelledError."""
 
         switchboard = Switchboard(deployments=[openai_config()])
 
         assert switchboard.fallback is not None
-        assert isinstance(switchboard.fallback.config, OpenAIDeployment)
+        assert switchboard.fallback.config.fallback is True
         assert len(switchboard.deployments) == 0
 
         # Patch the underlying deployment.create to raise CancelledError
         with patch.object(
             switchboard.fallback, "create", side_effect=asyncio.CancelledError
         ):
-            # Should not raise, should be silently handled
-            result = await switchboard.create(**COMPLETION_PARAMS)
-            assert result is None
+            # CancelledError should propagate to allow proper task cancellation
+            with pytest.raises(asyncio.CancelledError):
+                await switchboard.create(**COMPLETION_PARAMS)
 
-        # Also verify that the fallback is still selected as expected
+        # Verify that the fallback is still selected as expected after cancellation
         deployment = switchboard.select_deployment(model="gpt-4o-mini")
         assert deployment == switchboard.fallback
 

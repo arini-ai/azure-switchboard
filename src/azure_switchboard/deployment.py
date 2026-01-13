@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import AsyncIterator, Literal, cast, overload
 
@@ -18,31 +17,14 @@ from .model import Model
 logger = logging.getLogger(__name__)
 
 
-class AzureDeployment(BaseModel, arbitrary_types_allowed=True):
-    """Metadata about an Azure deployment"""
-
-    name: str
-    base_url: str
-    api_key: str
-    timeout: float = 600.0
-    models: list[Model]
-    client: AsyncOpenAI | None = None
-
-    def get_client(self) -> AsyncOpenAI:
-        return AsyncOpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url,
-            timeout=self.timeout,
-        )
-
-
-class OpenAIDeployment(BaseModel, arbitrary_types_allowed=True):
-    """Metadata about an OpenAI deployment"""
+class Deployment(BaseModel, arbitrary_types_allowed=True):
+    """Configuration for an OpenAI-compatible deployment."""
 
     name: str = "openai"
-    api_key: str | None = None
     base_url: str | None = None
+    api_key: str | None = None
     timeout: float = 600.0
+    fallback: bool = False
     models: list[Model] = Field(
         default_factory=lambda: [
             Model(name="gpt-4o"),
@@ -50,6 +32,18 @@ class OpenAIDeployment(BaseModel, arbitrary_types_allowed=True):
             Model(name="gpt-4.1"),
             Model(name="gpt-4.1-mini"),
             Model(name="gpt-4.1-nano"),
+            Model(name="gpt-5"),
+            Model(name="gpt-5-mini"),
+            Model(name="gpt-5-nano"),
+            Model(name="gpt-5-chat"),
+            Model(name="gpt-5.1"),
+            Model(name="gpt-5.1-mini"),
+            Model(name="gpt-5.1-nano"),
+            Model(name="gpt-5.1-chat"),
+            Model(name="gpt-5.2"),
+            Model(name="gpt-5.2-mini"),
+            Model(name="gpt-5.2-nano"),
+            Model(name="gpt-5.2-chat"),
         ]
     )
     client: AsyncOpenAI | None = None
@@ -66,12 +60,12 @@ class DeploymentError(Exception):
     pass
 
 
-class Deployment:
+class _RuntimeDeployment:
     """Runtime state of a deployment"""
 
     def __init__(
         self,
-        config: AzureDeployment | OpenAIDeployment,
+        config: Deployment,
     ) -> None:
         self.config = config
         self.client = config.get_client()
@@ -196,7 +190,7 @@ class _AsyncStreamWrapper(wrapt.ObjectProxy):
     def __init__(
         self,
         stream: AsyncStream[ChatCompletionChunk],
-        deployment: Deployment,
+        deployment: _RuntimeDeployment,
         model: Model,
         offset: int = 0,
     ):
@@ -218,9 +212,6 @@ class _AsyncStreamWrapper(wrapt.ObjectProxy):
                     self._self_deployment._set_span_attributes(chunk.usage)
 
                 yield chunk
-        except asyncio.CancelledError:  # pragma: no cover
-            logger.exception("Cancelled mid-stream")
-            return
         except Exception as e:
             logger.exception(
                 f"marking down {self._self_deployment.config.name}/{self._self_model.name} for error"
