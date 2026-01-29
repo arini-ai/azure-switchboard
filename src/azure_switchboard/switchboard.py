@@ -178,11 +178,15 @@ class Switchboard:
         # Handle session-based routing first
         if session_id and session_id in self.sessions:
             client = self.sessions[session_id]
-            if client.is_healthy(model):
+            # Verify the cached deployment is still in the active pool
+            is_active = client is self.fallback or client in self.deployments.values()
+            if is_active and client.is_healthy(model):
                 logger.debug(f"Reusing {client} for session {session_id}")
                 return client
 
-            logger.warning(f"{client} is unhealthy, falling back to selection")
+            logger.warning(
+                f"Session {session_id} deployment unavailable, falling back to selection"
+            )
 
         # Get eligible deployments for the requested model
         eligible_deployments = list(
