@@ -427,3 +427,136 @@ class TestSwitchboard:
         )
         assert deployment_with_session == switchboard.fallback
         assert switchboard.sessions["test"] == switchboard.fallback
+
+
+class TestDynamicDeployments:
+    """Tests for dynamically adding and removing deployments at runtime."""
+
+    async def test_add_azure_deployment(self):
+        """Test adding an Azure deployment at runtime."""
+        switchboard = Switchboard(deployments=[azure_config("test1")])
+        assert len(switchboard.deployments) == 1
+
+        switchboard.add_deployment(azure_config("test2"))
+        assert len(switchboard.deployments) == 2
+        assert "test2" in switchboard.deployments
+
+    async def test_add_openai_deployment_as_fallback(self):
+        """Test adding an OpenAI deployment sets it as fallback."""
+        switchboard = Switchboard(deployments=[azure_config("test1")])
+        assert switchboard.fallback is None
+
+        switchboard.add_deployment(openai_config())
+        assert switchboard.fallback is not None
+        assert isinstance(switchboard.fallback.config, OpenAIDeployment)
+
+    async def test_add_deployment_overwrites_existing(self):
+        """Test that adding a deployment with the same name overwrites it."""
+        switchboard = Switchboard(deployments=[azure_config("test1")])
+        original_deployment = switchboard.deployments["test1"]
+
+        switchboard.add_deployment(azure_config("test1"))
+        assert len(switchboard.deployments) == 1
+        assert switchboard.deployments["test1"] is not original_deployment
+
+    async def test_add_openai_replaces_existing_fallback(self):
+        """Test that adding a new OpenAI deployment replaces the existing fallback."""
+        switchboard = Switchboard(deployments=[openai_config()])
+        original_fallback = switchboard.fallback
+
+        switchboard.add_deployment(openai_config())
+        assert switchboard.fallback is not original_fallback
+
+    async def test_remove_azure_deployment(self):
+        """Test removing an Azure deployment."""
+        switchboard = Switchboard(
+            deployments=[azure_config("test1"), azure_config("test2")]
+        )
+        assert len(switchboard.deployments) == 2
+
+        removed = switchboard.remove_deployment("test1")
+        assert len(switchboard.deployments) == 1
+        assert "test1" not in switchboard.deployments
+        assert removed.config.name == "test1"
+
+    async def test_remove_openai_fallback(self):
+        """Test removing the OpenAI fallback deployment."""
+        switchboard = Switchboard(deployments=[azure_config("test1"), openai_config()])
+        assert switchboard.fallback is not None
+
+        removed = switchboard.remove_deployment("openai")
+        assert switchboard.fallback is None
+        assert removed.config.name == "openai"
+
+    async def test_remove_nonexistent_deployment_raises(self):
+        """Test that removing a non-existent deployment raises an error."""
+        switchboard = Switchboard(deployments=[azure_config("test1")])
+
+        with pytest.raises(
+            SwitchboardError, match="Deployment 'nonexistent' not found"
+        ):
+            switchboard.remove_deployment("nonexistent")
+
+    @pytest.mark.mock_models("gpt-4o-mini")
+    async def test_added_deployment_is_used(self, mock_client: respx.MockRouter):
+        """Test that a dynamically added deployment is used for requests."""
+        switchboard = Switchboard(deployments=[azure_config("test1")])
+        switchboard.deployments["test1"].models["gpt-4o-mini"].mark_down()
+
+        # No healthy deployments, should raise
+        with pytest.raises(SwitchboardError):
+            await switchboard.create(**COMPLETION_PARAMS)
+
+        # Add a new healthy deployment
+        switchboard.add_deployment(azure_config("test2"))
+        response = await switchboard.create(**COMPLETION_PARAMS)
+        assert response == COMPLETION_RESPONSE
+
+    @pytest.mark.mock_models("openai")
+    async def test_add_fallback_and_use_it(self, mock_client: respx.MockRouter):
+        """Test adding a fallback and having it used when primary is unhealthy."""
+        switchboard = Switchboard(deployments=[azure_config("test1")])
+        switchboard.deployments["test1"].models["gpt-4o-mini"].mark_down()
+
+        # No fallback, should raise
+        with pytest.raises(SwitchboardError):
+            await switchboard.create(**COMPLETION_PARAMS)
+
+        # Add fallback
+        switchboard.add_deployment(openai_config())
+        response = await switchboard.create(**COMPLETION_PARAMS)
+        assert response == COMPLETION_RESPONSE
+        assert mock_client["openai"].call_count == 1
+
+    async def test_remove_deployment_then_add_back(self):
+        """Test removing and re-adding a deployment."""
+        switchboard = Switchboard(
+            deployments=[azure_config("test1"), azure_config("test2")]
+        )
+
+        switchboard.remove_deployment("test1")
+        assert "test1" not in switchboard.deployments
+
+        switchboard.add_deployment(azure_config("test1"))
+        assert "test1" in switchboard.deployments
+        assert len(switchboard.deployments) == 2
+
+    @pytest.mark.mock_models("gpt-4o-mini")
+    async def test_incremental_construction(self, mock_client: respx.MockRouter):
+        """Test incrementally building up switchboard with add_deployment."""
+        # Start with a single deployment
+        switchboard = Switchboard(deployments=[azure_config("test1")])
+
+        # Incrementally add more
+        switchboard.add_deployment(azure_config("test2"))
+        switchboard.add_deployment(azure_config("test3"))
+
+        assert len(switchboard.deployments) == 3
+
+        # Make requests and verify distribution
+        for _ in range(30):
+            await switchboard.create(**COMPLETION_PARAMS)
+
+        # All deployments should have been used
+        for deployment in switchboard.deployments.values():
+            assert deployment.models["gpt-4o-mini"].rpm_usage > 0

@@ -134,6 +134,34 @@ class Switchboard:
         for client in self.deployments.values():
             client.reset_usage()
 
+    def add_deployment(self, deployment: AzureDeployment | OpenAIDeployment) -> None:
+        """Add a deployment to the switchboard at runtime.
+
+        If an OpenAIDeployment is added, it becomes the fallback.
+        If an AzureDeployment is added, it's added to the deployments dict.
+        Overwrites any existing deployment with the same name.
+        """
+        if isinstance(deployment, OpenAIDeployment):
+            self.fallback = Deployment(deployment)
+        else:
+            self.deployments[deployment.name] = Deployment(deployment)
+
+    def remove_deployment(self, name: str) -> Deployment:
+        """Remove a deployment from the switchboard by name.
+
+        Returns the removed deployment.
+        Raises SwitchboardError if the deployment is not found.
+        """
+        if self.fallback and self.fallback.config.name == name:
+            removed = self.fallback
+            self.fallback = None
+            return removed
+
+        if name in self.deployments:
+            return self.deployments.pop(name)
+
+        raise SwitchboardError(f"Deployment '{name}' not found")
+
     def stats(self) -> dict[str, dict[str, UtilStats]]:
         return {
             name: deployment.stats() for name, deployment in self.deployments.items()
