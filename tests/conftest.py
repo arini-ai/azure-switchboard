@@ -33,9 +33,10 @@ async def collect_chunks(
     return received_chunks, content
 
 
-def openai_config() -> Deployment:
+def openai_config(name: str = "openai") -> Deployment:
+    """Create an OpenAI deployment config for testing."""
     return Deployment(
-        fallback=True,
+        name=name,
         api_key="test",
         models=[Model(name="gpt-4o-mini"), Model(name="gpt-4o")],
     )

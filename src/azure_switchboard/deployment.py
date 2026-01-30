@@ -18,13 +18,12 @@ logger = logging.getLogger(__name__)
 
 
 class Deployment(BaseModel, arbitrary_types_allowed=True):
-    """Configuration for an OpenAI-compatible deployment."""
+    """Configuration for an Azure OpenAI or OpenAI deployment."""
 
-    name: str = "openai"
+    name: str
     base_url: str | None = None
     api_key: str | None = None
     timeout: float = 600.0
-    fallback: bool = False
     models: list[Model] = Field(
         default_factory=lambda: [
             Model(name="gpt-4o"),

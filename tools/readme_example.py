@@ -13,11 +13,10 @@
 import asyncio
 import os
 
-from azure_switchboard import AzureDeployment, Model, OpenAIDeployment, Switchboard
+from azure_switchboard import Deployment, Model, Switchboard
 
 azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
 azure_openai_api_key = os.getenv("AZURE_OPENAI_API_KEY")
-openai_api_key = os.getenv("OPENAI_API_KEY", None)
 
 deployments = []
 if azure_openai_endpoint and azure_openai_api_key:
@@ -25,18 +24,13 @@ if azure_openai_endpoint and azure_openai_api_key:
     # is fine for the purposes of this demo
     for name in ("east", "west", "south"):
         deployments.append(
-            AzureDeployment(
+            Deployment(
                 name=name,
-                endpoint=azure_openai_endpoint,
+                base_url=f"{azure_openai_endpoint}/openai/v1/",
                 api_key=azure_openai_api_key,
                 models=[Model(name="gpt-4o-mini")],
             )
         )
-
-if openai_api_key:
-    # we can use openai as a fallback deployment
-    # it will pick up the api key from the environment
-    deployments.append(OpenAIDeployment())
 
 
 async def main():

@@ -79,20 +79,16 @@ class Switchboard:
         ratelimit_window: float = 60.0,
         max_sessions: int = 1024,
     ) -> None:
-        self.deployments: dict[str, _RuntimeDeployment] = {}
-        self.fallback: _RuntimeDeployment | None = None
-
         if not deployments:
             raise SwitchboardError("No deployments provided")
 
+        self.deployments: dict[str, _RuntimeDeployment] = {}
         for deployment in deployments:
-            if deployment.fallback:
-                self.fallback = _RuntimeDeployment(deployment)
-            else:
-                self.deployments[deployment.name] = _RuntimeDeployment(deployment)
+            if deployment.name in self.deployments:
+                raise SwitchboardError(f"Duplicate deployment name: {deployment.name}")
+            self.deployments[deployment.name] = _RuntimeDeployment(deployment)
 
         self.selector = selector
-
         self.failover_policy = failover_policy
 
         # LRUDict to expire old sessions
@@ -143,7 +139,6 @@ class Switchboard:
         """
         Select a deployment using the power of two random choices algorithm.
         If session_id is provided, try to use that specific deployment first.
-        Falls back to fallback deployment if no primary deployments are available.
         """
         # Handle session-based routing first
         if session_id and session_id in self.sessions:
@@ -155,30 +150,21 @@ class Switchboard:
             logger.warning(f"{client} is unhealthy, falling back to selection")
 
         # Get eligible deployments for the requested model
-        eligible_deployments = list(
-            filter(lambda d: d.is_healthy(model), self.deployments.values())
-        )
-
-        # TODO: otel metric collection here
+        eligible_deployments = [
+            d for d in self.deployments.values() if d.is_healthy(model)
+        ]
 
         if not eligible_deployments:
-            # Check if fallback is available and healthy
-            if self.fallback and self.fallback.is_healthy(model):
-                logger.debug(
-                    f"No primary deployments available, using fallback: {self.fallback}"
-                )
-                if session_id:
-                    self.sessions[session_id] = self.fallback
-                return self.fallback
             raise SwitchboardError(f"No eligible deployments available for {model}")
 
         # Record healthy deployments count metric
         healthy_deployments_gauge.set(len(eligible_deployments), {"model": model})
 
         if len(eligible_deployments) == 1:
-            return eligible_deployments[0]
+            selection = eligible_deployments[0]
+        else:
+            selection = self.selector(model, eligible_deployments)
 
-        selection = self.selector(model, eligible_deployments)
         logger.debug(f"Selected {selection}")
 
         if session_id:
@@ -216,15 +202,8 @@ class Switchboard:
                 response = await deployment.create(
                     model=model, stream=stream, **kwargs
                 )
-                # Record successful request
-                provider = "openai" if deployment == self.fallback else "azure"
                 request_counter.add(
-                    1,
-                    {
-                        "model": model,
-                        "provider": provider,
-                        "deployment": deployment.config.name,
-                    },
+                    1, {"model": model, "deployment": deployment.config.name}
                 )
                 return response
 
