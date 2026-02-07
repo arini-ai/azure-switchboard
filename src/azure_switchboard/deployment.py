@@ -38,11 +38,11 @@ class Deployment(BaseModel, arbitrary_types_allowed=True):
             Model(name="gpt-5.1"),
             Model(name="gpt-5.1-mini"),
             Model(name="gpt-5.1-nano"),
-            Model(name="gpt-5.1-chat"), # OpenAI calls this gpt-5.1-chat-latest
+            Model(name="gpt-5.1-chat"),  # OpenAI calls this gpt-5.1-chat-latest
             Model(name="gpt-5.2"),
             Model(name="gpt-5.2-mini"),
             Model(name="gpt-5.2-nano"),
-            Model(name="gpt-5.2-chat"), # OpenAI calls this gpt-5.2-chat-latest
+            Model(name="gpt-5.2-chat"),  # OpenAI calls this gpt-5.2-chat-latest
         ]
     )
     client: AsyncOpenAI | None = None
@@ -201,6 +201,14 @@ class _AsyncStreamWrapper(wrapt.ObjectProxy):
         self._self_deployment: DeploymentState = deployment
         self._self_model: Model = model
         self._self_offset: int = offset
+        # Stream chunks are consumed after Switchboard.create() returns, so the
+        # contextualized logger scope from create() is no longer active here.
+        # Keep a bound logger on the wrapper to retain deployment/model context
+        # for mid-stream error logs.
+        self._self_logger = logger.bind(
+            deployment=deployment.name,
+            model=model.name,
+        )
 
     async def __aiter__(self) -> AsyncIterator[ChatCompletionChunk]:
         try:
@@ -216,7 +224,7 @@ class _AsyncStreamWrapper(wrapt.ObjectProxy):
 
                 yield chunk
         except Exception as e:
-            logger.exception("Marking down model for wrapped stream error")
+            self._self_logger.exception("Marking down model for wrapped stream error")
             self._self_model.mark_down()
             if isinstance(e, RateLimitError):
                 raise SwitchboardError("Rate limit exceeded in wrapped stream") from e

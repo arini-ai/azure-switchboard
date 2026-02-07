@@ -7,15 +7,16 @@ from .switchboard import Switchboard
 
 # As a library, do not configure sinks or emit logs by default.
 # Applications can opt in explicitly.
-_logger.disable("azure_switchboard")
+_LOG_NAMESPACE = "azure_switchboard"
+_logger.disable(_LOG_NAMESPACE)
 
 
 def enable_logging() -> None:
-    _logger.enable("azure_switchboard")
+    _logger.enable(_LOG_NAMESPACE)
 
 
 def disable_logging() -> None:
-    _logger.disable("azure_switchboard")
+    _logger.disable(_LOG_NAMESPACE)
 
 
 __all__ = [

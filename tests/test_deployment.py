@@ -1,13 +1,13 @@
 import asyncio
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import respx
 from httpx import Request, Response, TimeoutException
+from loguru import logger as _logger
 from openai import RateLimitError
-from unittest.mock import AsyncMock
 
-from azure_switchboard import SwitchboardError
+from azure_switchboard import SwitchboardError, disable_logging, enable_logging
 from azure_switchboard.deployment import DeploymentState
 
 from .conftest import (
@@ -111,18 +111,31 @@ class TestDeployment:
         ) as mock:
             stream = await deployment.create(stream=True, **COMPLETION_PARAMS)
 
-            with patch.object(
-                stream._self_model,  # type: ignore[reportAttributeAccessIssue]
-                "spend_tokens",
-                side_effect=Exception("asyncstream error"),
-            ):
-                with pytest.raises(RuntimeError, match="Error in wrapped stream"):
-                    await collect_chunks(stream)
-                assert mock.call_count == 1
-                assert not deployment.model("gpt-4o-mini").is_healthy()
+            records: list[dict] = []
+            sink_id = _logger.add(lambda m: records.append(m.record))
+            enable_logging()
+            try:
+                with patch.object(
+                    stream._self_model,  # type: ignore[reportAttributeAccessIssue]
+                    "spend_tokens",
+                    side_effect=Exception("asyncstream error"),
+                ):
+                    with pytest.raises(RuntimeError, match="Error in wrapped stream"):
+                        await collect_chunks(stream)
+                    assert mock.call_count == 1
+                    assert not deployment.model("gpt-4o-mini").is_healthy()
+                    assert any(
+                        r["message"] == "Marking down model for wrapped stream error"
+                        and r["extra"].get("deployment") == deployment.name
+                        and r["extra"].get("model") == "gpt-4o-mini"
+                        for r in records
+                    )
 
-            deployment.model("gpt-4o-mini").mark_up()
-            assert deployment.model("gpt-4o-mini").is_healthy()
+                deployment.model("gpt-4o-mini").mark_up()
+                assert deployment.model("gpt-4o-mini").is_healthy()
+            finally:
+                _logger.remove(sink_id)
+                disable_logging()
 
         # Test midstream rate limit handling
         rate_limit_error = RateLimitError(

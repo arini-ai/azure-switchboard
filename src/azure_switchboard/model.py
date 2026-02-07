@@ -90,7 +90,5 @@ class Model:
     def __repr__(self) -> str:
         stats = self.stats()
         return (
-            f"Model<{self.name}>("
-            f"util={stats.util} tpm='{stats.tpm}' rpm='{stats.rpm}'"
-            ")"
+            f"Model<{self.name}>(util={stats.util} tpm='{stats.tpm}' rpm='{stats.rpm}')"
         )
