@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import random
 from collections import OrderedDict
 from typing import Callable, Literal, Sequence, overload
 
+from loguru import logger
 from openai import AsyncStream
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from opentelemetry import metrics
@@ -22,8 +22,6 @@ from .deployment import (
     DeploymentState,
 )
 from .exceptions import SwitchboardError
-
-logger = logging.getLogger(__name__)
 
 meter = metrics.get_meter("azure_switchboard.switchboard")
 deployment_util = meter.create_gauge(
@@ -122,8 +120,8 @@ class Switchboard:
                 pass
 
     def reset_usage(self) -> None:
-        for client in self.deployments.values():
-            client.reset_usage()
+        for deployment in self.deployments.values():
+            deployment.reset_usage()
 
     def stats(self) -> dict[str, dict[str, UtilStats]]:
         return {
@@ -139,14 +137,13 @@ class Switchboard:
         """
         # Handle session-based routing first
         if session_id and session_id in self.sessions:
-            client = self.sessions[session_id]
-            if client.is_healthy(model):
-                logger.debug(f"Reusing deployment {client.config.name} for session {session_id}")
-                return client
+            deployment = self.sessions[session_id]
+            if deployment.is_healthy(model):
+                return deployment
 
             logger.warning(
-                f"{model} is unhealthy on {client.config.name}, falling back to selection",
-                extra={"util": vars(client.models[model].stats())},
+                f"{model} is unhealthy on {deployment.name}, falling back to selection",
+                util=vars(deployment.models[model].stats()),
             )
 
         # Get eligible deployments for the requested model
@@ -161,16 +158,16 @@ class Switchboard:
         healthy_deployments_gauge.set(len(eligible_deployments), {"model": model})
 
         if len(eligible_deployments) == 1:
-            selection = eligible_deployments[0]
+            deployment = eligible_deployments[0]
         else:
-            selection = self.selector(model, eligible_deployments)
+            deployment = self.selector(model, eligible_deployments)
 
-        logger.debug(f"Selected {selection}")
+        logger.trace(f"Selected deployment: {deployment.name}")
 
         if session_id:
-            self.sessions[session_id] = selection
+            self.sessions[session_id] = deployment
 
-        return selection
+        return deployment
 
     @overload
     async def create(
@@ -193,19 +190,21 @@ class Switchboard:
         """
         Send a chat completion request to the selected deployment, with automatic failover.
         """
-        async for attempt in self.failover_policy:
-            with attempt:
-                deployment = self.select_deployment(
-                    model=model, session_id=session_id
-                )
-                logger.debug(f"Sending completion request to {deployment}")
-                response = await deployment.create(
-                    model=model, stream=stream, **kwargs
-                )
-                request_counter.add(
-                    1, {"model": model, "deployment": deployment.config.name}
-                )
-                return response
+        with logger.contextualize(model=model, session_id=session_id):
+            async for attempt in self.failover_policy:
+                with attempt:
+                    deployment = self.select_deployment(
+                        model=model, session_id=session_id
+                    )
+                    with logger.contextualize(deployment=deployment.name):
+                        logger.trace("Sending completion request")
+                        response = await deployment.create(
+                            model=model, stream=stream, **kwargs
+                        )
+                    request_counter.add(
+                        1, {"model": model, "deployment": deployment.name}
+                    )
+                    return response
 
     def __repr__(self) -> str:
         return f"Switchboard({self.deployments})"

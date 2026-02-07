@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-import logging
 from typing import Literal, cast, overload
 
 import wrapt
+from loguru import logger
 from openai import AsyncOpenAI, AsyncStream, RateLimitError
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from openai.types.completion_usage import CompletionUsage
@@ -15,8 +15,6 @@ from azure_switchboard.model import UtilStats
 
 from .exceptions import SwitchboardError
 from .model import Model
-
-logger = logging.getLogger(__name__)
 
 
 class Deployment(BaseModel, arbitrary_types_allowed=True):
@@ -72,6 +70,10 @@ class DeploymentState:
         elems = ", ".join(map(str, self.models.values()))
         return f"Deployment<{self.config.name}>([{elems}])"
 
+    @property
+    def name(self) -> str:
+        return self.config.name
+
     def reset_usage(self) -> None:
         for model in self.models.values():
             model.reset_usage()
@@ -120,7 +122,7 @@ class DeploymentState:
         kwargs["timeout"] = kwargs.get("timeout", self.config.timeout)
         try:
             if stream:
-                logger.debug("Creating streaming completion")
+                logger.trace("Creating streaming completion")
                 response_stream = await self.client.chat.completions.create(
                     model=model,
                     stream=True,
@@ -139,7 +141,7 @@ class DeploymentState:
                 )
 
             else:
-                logger.debug("Creating chat completion")
+                logger.trace("Creating chat completion")
                 response = await self.client.chat.completions.create(
                     model=model, **kwargs
                 )
@@ -154,15 +156,13 @@ class DeploymentState:
 
                 return response
         except RateLimitError as e:
-            logger.warning(f"{self.config.name}/{model} hit rate limits")
+            logger.warning("Hit rate limits")
             self.models[model].mark_down()
             raise SwitchboardError(
                 "Rate limit exceeded in deployment chat completion"
             ) from e
         except Exception as e:
-            logger.exception(
-                f"marking down {self.config.name}/{model} for chat completion error"
-            )
+            logger.exception("Marking down model for chat completion error")
             self.models[model].mark_down()
             raise RuntimeError("Error in deployment chat completion") from e
 
@@ -216,9 +216,7 @@ class _AsyncStreamWrapper(wrapt.ObjectProxy):
 
                 yield chunk
         except Exception as e:
-            logger.exception(
-                f"marking down {self._self_deployment.config.name}/{self._self_model.name} for error"
-            )
+            logger.exception("Marking down model for wrapped stream error")
             self._self_model.mark_down()
             if isinstance(e, RateLimitError):
                 raise SwitchboardError("Rate limit exceeded in wrapped stream") from e
