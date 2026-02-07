@@ -120,7 +120,7 @@ class DeploymentState:
         kwargs["timeout"] = kwargs.get("timeout", self.config.timeout)
         try:
             if stream:
-                logging.debug("Creating streaming completion")
+                logger.debug("Creating streaming completion")
                 response_stream = await self.client.chat.completions.create(
                     model=model,
                     stream=True,
@@ -139,7 +139,7 @@ class DeploymentState:
                 )
 
             else:
-                logging.debug("Creating chat completion")
+                logger.debug("Creating chat completion")
                 response = await self.client.chat.completions.create(
                     model=model, **kwargs
                 )
@@ -156,7 +156,9 @@ class DeploymentState:
         except RateLimitError as e:
             logger.warning(f"{self.config.name}/{model} hit rate limits")
             self.models[model].mark_down()
-            raise SwitchboardError("Rate limit exceeded in deployment chat completion") from e
+            raise SwitchboardError(
+                "Rate limit exceeded in deployment chat completion"
+            ) from e
         except Exception as e:
             logger.exception(
                 f"marking down {self.config.name}/{model} for chat completion error"
