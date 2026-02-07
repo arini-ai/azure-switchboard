@@ -3,9 +3,12 @@ from unittest.mock import patch
 
 import pytest
 import respx
-from httpx import Response, TimeoutException
+from httpx import Request, Response, TimeoutException
+from openai import RateLimitError
+from unittest.mock import AsyncMock
 
-from azure_switchboard import Deployment, DeploymentError
+from azure_switchboard import SwitchboardError
+from azure_switchboard.deployment import DeploymentState
 
 from .conftest import (
     COMPLETION_PARAMS,
@@ -20,7 +23,7 @@ from .conftest import (
 class TestDeployment:
     """Deployment functionality tests."""
 
-    async def test_init(self, deployment: Deployment):
+    async def test_init(self, deployment: DeploymentState):
         """Test initialization of Deployment."""
         assert deployment is not None
         assert deployment.client is not None
@@ -30,7 +33,7 @@ class TestDeployment:
 
     @pytest.mark.mock_models("gpt-4o-mini")
     async def test_completion(
-        self, mock_client: respx.MockRouter, deployment: Deployment
+        self, mock_client: respx.MockRouter, deployment: DeploymentState
     ):
         """Test basic chat completion functionality."""
 
@@ -48,7 +51,7 @@ class TestDeployment:
 
         # Test exception handling
         mock_client.routes["azure"].side_effect = Exception("test")
-        with pytest.raises(DeploymentError):  # (openai.APIConnectionError):
+        with pytest.raises(RuntimeError):  # (openai.APIConnectionError):
             await deployment.create(**COMPLETION_PARAMS)
         assert mock_client.routes["azure"].call_count == 2
 
@@ -57,7 +60,7 @@ class TestDeployment:
         assert "23/" in usage.tpm
         assert "2/" in usage.rpm
 
-    async def test_streaming(self, deployment: Deployment):
+    async def test_streaming(self, deployment: DeploymentState):
         """Test streaming functionality.
 
         It's annoying to try to mock HTTP streaming responses so we cheat
@@ -90,7 +93,7 @@ class TestDeployment:
             "create",
             side_effect=Exception("test"),
         ) as mock:
-            with pytest.raises(DeploymentError):
+            with pytest.raises(RuntimeError):
                 stream = await deployment.create(stream=True, **COMPLETION_PARAMS)
                 async for _ in stream:
                     pass
@@ -113,7 +116,7 @@ class TestDeployment:
                 "spend_tokens",
                 side_effect=Exception("asyncstream error"),
             ):
-                with pytest.raises(DeploymentError, match="Error in wrapped stream"):
+                with pytest.raises(RuntimeError, match="Error in wrapped stream"):
                     await collect_chunks(stream)
                 assert mock.call_count == 1
                 assert not deployment.model("gpt-4o-mini").is_healthy()
@@ -121,7 +124,36 @@ class TestDeployment:
             deployment.model("gpt-4o-mini").mark_up()
             assert deployment.model("gpt-4o-mini").is_healthy()
 
-    async def test_mark_down(self, deployment: Deployment):
+        # Test midstream rate limit handling
+        rate_limit_error = RateLimitError(
+            "rate limited",
+            response=Response(
+                status_code=429,
+                request=Request(
+                    "POST", "https://test.openai.azure.com/openai/v1/chat/completions"
+                ),
+            ),
+            body={"error": {"message": "rate limited"}},
+        )
+
+        async def rate_limited_stream():
+            yield COMPLETION_STREAM_CHUNKS[0]
+            raise rate_limit_error
+
+        with patch.object(
+            deployment.client.chat.completions,
+            "create",
+            new=AsyncMock(return_value=rate_limited_stream()),
+        ) as mock:
+            stream = await deployment.create(stream=True, **COMPLETION_PARAMS)
+            with pytest.raises(
+                SwitchboardError, match="Rate limit exceeded in wrapped stream"
+            ):
+                await collect_chunks(stream)
+            assert mock.call_count == 1
+            assert not deployment.model("gpt-4o-mini").is_healthy()
+
+    async def test_mark_down(self, deployment: DeploymentState):
         """Test model-level cooldown functionality."""
 
         model = deployment.model("gpt-4o-mini")
@@ -132,13 +164,13 @@ class TestDeployment:
         model.mark_up()
         assert model.is_healthy()
 
-    async def test_valid_model(self, deployment: Deployment):
+    async def test_valid_model(self, deployment: DeploymentState):
         """Test that an invalid model raises an error."""
 
-        with pytest.raises(DeploymentError, match="gpt-fake not configured"):
+        with pytest.raises(SwitchboardError, match="gpt-fake not configured"):
             await deployment.create(model="gpt-fake", messages=[])
 
-    async def test_usage(self, deployment: Deployment):
+    async def test_usage(self, deployment: DeploymentState):
         """Test client-level counters"""
 
         # Reset and verify initial state
@@ -165,7 +197,7 @@ class TestDeployment:
         assert usage.rpm == f"0/{model.rpm_limit}"
         assert model.last_reset > 0
 
-    async def test_utilization(self, deployment: Deployment):
+    async def test_utilization(self, deployment: DeploymentState):
         """Test utilization calculation."""
 
         model = deployment.model("gpt-4o-mini")
@@ -198,7 +230,7 @@ class TestDeployment:
 
     @pytest.mark.mock_models("gpt-4o-mini", "gpt-4o")
     async def test_multiple_models(
-        self, mock_client: respx.MockRouter, deployment: Deployment
+        self, mock_client: respx.MockRouter, deployment: DeploymentState
     ):
         """Test that multiple models are handled correctly."""
 
@@ -227,7 +259,7 @@ class TestDeployment:
 
     @pytest.mark.mock_models("gpt-4o-mini")
     async def test_concurrency(
-        self, mock_client: respx.MockRouter, deployment: Deployment
+        self, mock_client: respx.MockRouter, deployment: DeploymentState
     ):
         """Test handling of multiple concurrent requests."""
 
@@ -247,7 +279,7 @@ class TestDeployment:
 
     @pytest.mark.mock_models("gpt-4o-mini")
     async def test_timeout_retry(
-        self, mock_client: respx.MockRouter, deployment: Deployment
+        self, mock_client: respx.MockRouter, deployment: DeploymentState
     ):
         """Test timeout retry behavior."""
 
@@ -270,12 +302,40 @@ class TestDeployment:
             TimeoutException("Timeout 3"),
         ]
 
-        with pytest.raises(DeploymentError):  # (openai.APITimeoutError):
+        with pytest.raises(RuntimeError):  # (openai.APITimeoutError):
             await deployment.create(**COMPLETION_PARAMS)
         assert mock_client.routes["azure"].call_count == 3
         assert not deployment.is_healthy("gpt-4o-mini")
 
-    async def test_invalid_model(self, deployment: Deployment):
+    async def test_rate_limit_is_non_retriable(self, deployment: DeploymentState):
+        """Rate limit errors should be surfaced as SwitchboardError."""
+
+        deployment.client.max_retries = 0
+        rate_limit_error = RateLimitError(
+            "rate limited",
+            response=Response(
+                status_code=429,
+                request=Request(
+                    "POST", "https://test.openai.azure.com/openai/v1/chat/completions"
+                ),
+            ),
+            body={"error": {"message": "rate limited"}},
+        )
+
+        with patch.object(
+            deployment.client.chat.completions,
+            "create",
+            side_effect=rate_limit_error,
+        ) as mock:
+            with pytest.raises(
+                SwitchboardError,
+                match="Rate limit exceeded in deployment chat completion",
+            ):
+                await deployment.create(**COMPLETION_PARAMS)
+            assert mock.call_count == 1
+            assert not deployment.model("gpt-4o-mini").is_healthy()
+
+    async def test_invalid_model(self, deployment: DeploymentState):
         """Test that an invalid or unconfigured model is not eligible on a deployment."""
 
         assert not deployment.is_healthy("invalid-model")

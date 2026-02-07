@@ -17,7 +17,7 @@ from azure_switchboard import (
     Model,
     Switchboard,
 )
-from azure_switchboard.deployment import _RuntimeDeployment
+from azure_switchboard.deployment import DeploymentState
 
 
 async def collect_chunks(
@@ -92,7 +92,7 @@ def model():
 
 @pytest.fixture
 def deployment():
-    return _RuntimeDeployment(azure_config("test1"))
+    return DeploymentState(azure_config("test1"))
 
 
 @pytest.fixture

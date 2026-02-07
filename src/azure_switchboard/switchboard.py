@@ -19,8 +19,9 @@ from azure_switchboard.model import UtilStats
 
 from .deployment import (
     Deployment,
-    _RuntimeDeployment,
+    DeploymentState,
 )
+from .exceptions import SwitchboardError
 
 logger = logging.getLogger(__name__)
 
@@ -47,11 +48,7 @@ request_counter = meter.create_counter(
 )
 
 
-class SwitchboardError(Exception):
-    pass
-
-
-def two_random_choices(model: str, options: list[_RuntimeDeployment]) -> _RuntimeDeployment:
+def two_random_choices(model: str, options: list[DeploymentState]) -> DeploymentState:
     """Power of two random choices algorithm.
 
     Randomly select 2 deployments and return the one
@@ -73,7 +70,7 @@ class Switchboard:
         self,
         deployments: Sequence[Deployment],
         selector: Callable[
-            [str, list[_RuntimeDeployment]], _RuntimeDeployment
+            [str, list[DeploymentState]], DeploymentState
         ] = two_random_choices,
         failover_policy: AsyncRetrying = DEFAULT_FAILOVER_POLICY,
         ratelimit_window: float = 60.0,
@@ -82,17 +79,18 @@ class Switchboard:
         if not deployments:
             raise SwitchboardError("No deployments provided")
 
-        self.deployments: dict[str, _RuntimeDeployment] = {}
+        self.deployments: dict[str, DeploymentState] = {}
         for deployment in deployments:
             if deployment.name in self.deployments:
                 raise SwitchboardError(f"Duplicate deployment name: {deployment.name}")
-            self.deployments[deployment.name] = _RuntimeDeployment(deployment)
+            self.deployments[deployment.name] = DeploymentState(deployment)
 
         self.selector = selector
         self.failover_policy = failover_policy
 
         # LRUDict to expire old sessions
         self.sessions = _LRUDict(max_size=max_sessions)
+        self.ratelimit_reset_task: asyncio.Task | None = None
 
         # reset usage every N seconds
         self.ratelimit_window = ratelimit_window
@@ -111,12 +109,11 @@ class Switchboard:
 
             while True:
                 await asyncio.sleep(self.ratelimit_window)
-                logger.debug("Resetting usage counters")
                 self.reset_usage()
 
         self.ratelimit_reset_task = asyncio.create_task(periodic_reset())
 
-    async def stop(self):
+    async def stop(self) -> None:
         if self.ratelimit_reset_task:
             try:
                 self.ratelimit_reset_task.cancel()
@@ -135,7 +132,7 @@ class Switchboard:
 
     def select_deployment(
         self, *, model: str, session_id: str | None = None
-    ) -> _RuntimeDeployment:
+    ) -> DeploymentState:
         """
         Select a deployment using the power of two random choices algorithm.
         If session_id is provided, try to use that specific deployment first.
@@ -219,7 +216,7 @@ class _LRUDict(OrderedDict):
 
         super().__init__(*args, **kwargs)
 
-    def __setitem__(self, key: str, value: _RuntimeDeployment) -> None:
+    def __setitem__(self, key: str, value: DeploymentState) -> None:
         super().__setitem__(key, value)
         super().move_to_end(key)
 
@@ -227,7 +224,7 @@ class _LRUDict(OrderedDict):
             oldkey = next(iter(self))
             super().__delitem__(oldkey)
 
-    def __getitem__(self, key: str) -> _RuntimeDeployment:
+    def __getitem__(self, key: str) -> DeploymentState:
         val = super().__getitem__(key)
         super().move_to_end(key)
 

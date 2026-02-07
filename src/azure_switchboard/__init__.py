@@ -1,14 +1,11 @@
-from .deployment import (
-    Deployment,
-    DeploymentError,
-)
+from .deployment import Deployment
+from .exceptions import SwitchboardError
 from .model import Model
-from .switchboard import Switchboard, SwitchboardError
+from .switchboard import Switchboard
 
 __all__ = [
     "Deployment",
-    "DeploymentError",
     "Model",
-    "Switchboard",
     "SwitchboardError",
+    "Switchboard",
 ]
