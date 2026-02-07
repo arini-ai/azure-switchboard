@@ -1,6 +1,6 @@
 # Azure Switchboard
 
-Batteries-included, coordination-free client loadbalancing for Azure OpenAI.
+Batteries-included, coordination-free client loadbalancing for Azure OpenAI and OpenAI.
 
 ```bash
 uv add azure-switchboard
@@ -12,21 +12,19 @@ uv add azure-switchboard
 
 ## Overview
 
-`azure-switchboard` is a Python 3 asyncio library that provides an intelligent, API-compatible client loadbalancer for Azure OpenAI. You instantiate a Switchboard client with a set of deployments, and the client distributes your chat completion requests across the available deployments using the [power of two random choices](https://www.eecs.harvard.edu/~michaelm/postscripts/handbook2001.pdf) method. In this sense, it functions as a lightweight service mesh between your application and Azure OpenAI. The basic idea is inspired by [ServiceRouter](https://www.usenix.org/system/files/osdi23-saokar.pdf).
+`azure-switchboard` is a Python 3 asyncio library that provides an API-compatible client loadbalancer for Chat Completions. You instantiate a `Switchboard` with one or more `Deployment`s, and requests are distributed across healthy deployments using the [power of two random choices](https://www.eecs.harvard.edu/~michaelm/postscripts/handbook2001.pdf) method. Deployments can point at Azure OpenAI (`base_url=.../openai/v1/`) or OpenAI (`base_url=None`).
 
 ## Features
 
-- **API Compatibility**: `Switchboard.create` is a transparently-typed drop-in proxy for `OpenAI.chat.completions.create`.
+- **API Compatibility**: `Switchboard.create` is a transparently-typed proxy for `OpenAI.chat.completions.create`.
 - **Coordination-Free**: The default Two Random Choices algorithm does not require coordination between client instances to achieve excellent load distribution characteristics.
-- **Utilization-Aware**: TPM/RPM ratelimit utilization is tracked per model per deployment for use during selection.
+- **Utilization-Aware**: TPM/RPM utilization is tracked per model per deployment for use during selection.
 - **Batteries Included**:
-  - **Session Affinity**: Provide a `session_id` to route requests in the same session to the same deployment, optimizing for prompt caching
-  - **Automatic Failover**: Client automatically retries on request failure. The retry policy can be customized by passing a tenacity `AsyncRetrying` instance to `failover_policy`.
+  - **Session Affinity**: Provide a `session_id` to route requests in the same session to the same deployment.
+  - **Automatic Failover**: Retries are controlled by a tenacity `AsyncRetrying` policy (`failover_policy`).
   - **Pluggable Selection**: Custom selection algorithms can be provided by passing a callable to the `selector` parameter on the Switchboard constructor.
-  - **OpenTelemetry Integration**: Comprehensive metrics and instrumentation for monitoring deployment health and utilization.
-
-- **Lightweight**: sub-400 LOC implementation with minimal dependencies: `openai`, `tenacity`, `wrapt`, and `opentelemetry-api`. <1ms overhead per request.
-- **100% Test Coverage**: Comprehensive test suite with pytest.
+  - **OpenTelemetry Integration**: Built-in metrics for request routing and healthy deployment counts.
+- **Lightweight**: Small codebase with minimal dependencies: `openai`, `tenacity`, `wrapt`, and `opentelemetry-api`.
 
 ## Runnable Example
 
@@ -50,6 +48,7 @@ from azure_switchboard import Deployment, Model, Switchboard
 
 azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
 azure_openai_api_key = os.getenv("AZURE_OPENAI_API_KEY")
+openai_api_key = os.getenv("OPENAI_API_KEY")
 
 deployments = []
 if azure_openai_endpoint and azure_openai_api_key:
@@ -64,6 +63,20 @@ if azure_openai_endpoint and azure_openai_api_key:
                 models=[Model(name="gpt-4o-mini")],
             )
         )
+
+if openai_api_key:
+    deployments.append(
+        Deployment(
+            name="openai",
+            api_key=openai_api_key,
+            models=[Model(name="gpt-4o-mini")],
+        )
+    )
+
+if not deployments:
+    raise RuntimeError(
+        "Set AZURE_OPENAI_ENDPOINT/AZURE_OPENAI_API_KEY or OPENAI_API_KEY to run this example."
+    )
 
 
 async def main():
@@ -205,32 +218,32 @@ Distribution overhead scales ~linearly with the number of deployments.
 
 ### switchboard.Model Parameters
 
-| Parameter          | Description                                           | Default       |
-| ------------------ | ----------------------------------------------------- | ------------- |
-| `name`             | Configured model name, e.g. "gpt-4o" or "gpt-4o-mini" | Required      |
-| `tpm`              | Configured TPM rate limit                             | 0 (unlimited) |
-| `rpm`              | Configured RPM rate limit                             | 0 (unlimited) |
-| `default_cooldown` | Default cooldown period in seconds                    | 10.0          |
+| Parameter          | Description                                                            | Default       |
+| ------------------ | ---------------------------------------------------------------------- | ------------- |
+| `name`             | Model name as sent to Chat Completions                                 | Required      |
+| `tpm`              | Tokens-per-minute budget used for utilization tracking and routing     | 0 (unlimited) |
+| `rpm`              | Requests-per-minute budget used for utilization tracking and routing   | 0 (unlimited) |
+| `default_cooldown` | Cooldown duration (seconds) after a deployment/model failure mark-down | 10.0          |
 
 ### switchboard.Deployment Parameters
 
-| Parameter  | Description                                                                 | Default  |
-| ---------- | --------------------------------------------------------------------------- | -------- |
-| `name`     | Unique identifier for the deployment                                        | Required |
-| `base_url` | Base URL for the API (e.g., `https://myazure.openai.azure.com/openai/v1/`)  | None     |
-| `api_key`  | API key for the deployment                                                  | None     |
-| `timeout`  | Default timeout in seconds                                                  | 600.0    |
-| `models`   | List of Models configured for this deployment                               | Default  |
+| Parameter  | Description                                                                                          | Default                      |
+| ---------- | ---------------------------------------------------------------------------------------------------- | ---------------------------- |
+| `name`     | Unique identifier for the deployment                                                                 | Required                     |
+| `base_url` | API base URL. Azure example: `https://<resource>.openai.azure.com/openai/v1/`. OpenAI: leave `None`. | None                         |
+| `api_key`  | API key for the deployment                                                                           | None                         |
+| `timeout`  | Default request timeout (seconds)                                                                    | 600.0                        |
+| `models`   | Models available on this deployment                                                                  | Built-in model name defaults |
 
 ### switchboard.Switchboard Parameters
 
-| Parameter          | Description                         | Default                                     |
-| ------------------ | ----------------------------------- | ------------------------------------------- |
-| `deployments`      | List of Deployment config objects   | Required                                    |
-| `selector`         | Selection algorithm                 | `two_random_choices`                        |
-| `failover_policy`  | Policy for handling failed requests | `AsyncRetrying(stop=stop_after_attempt(2))` |
-| `ratelimit_window` | Ratelimit window in seconds         | 60.0                                        |
-| `max_sessions`     | Maximum number of sessions          | 1024                                        |
+| Parameter          | Description                                                                  | Default                                                                                                        |
+| ------------------ | ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `deployments`      | List of deployment configs                                                   | Required                                                                                                       |
+| `selector`         | Deployment selection function `(model, eligible_deployments) -> deployment`  | `two_random_choices`                                                                                           |
+| `failover_policy`  | Tenacity `AsyncRetrying` policy used around each `create` call               | `AsyncRetrying(stop=stop_after_attempt(2), retry=retry_if_not_exception_type(SwitchboardError), reraise=True)` |
+| `ratelimit_window` | How often usage counters reset (seconds). Set `0` to disable periodic reset. | 60.0                                                                                                           |
+| `max_sessions`     | LRU capacity for session affinity map                                        | 1024                                                                                                           |
 
 ## Development
 
@@ -263,56 +276,17 @@ uv build
 
 ### OpenTelemetry Integration
 
-The library provides instrumentation for monitoring deployment health and performance metrics:
+`azure-switchboard` uses OpenTelemetry metrics via the meter `azure_switchboard.switchboard`.
+
+Metrics emitted on the request path include:
+
+- `healthy_deployments_count` (gauge)
+- `requests` (counter, with deployment + model attributes)
+
+To run with local OTEL instrumentation:
 
 ```bash
-(azure-switchboard) .venv > just otel-run
-uv run --env-file .env opentelemetry-instrument python tools/bench.py -r 5 -d 3
-Distributing 5 requests across 3 deployments
-Max inflight requests: 1000
-
-Distribution overhead: 10.53ms
-Average response latency: 2164.03ms
-Total latency: 3869.06ms
-Requests per second: 475.03
-Overhead per request: 2.11ms
-{
-    "resource_metrics": [
-        {
-            "resource": {
-                "attributes": {
-                    "telemetry.sdk.language": "python",
-                    "telemetry.sdk.name": "opentelemetry",
-                    "telemetry.sdk.version": "1.31.0",
-                    "service.name": "switchboard",
-                    "telemetry.auto.version": "0.52b0"
-                },
-                "schema_url": ""
-            },
-            "scope_metrics": [
-                {
-                    "scope": {
-                        "name": "azure_switchboard.deployment",
-                        "version": "",
-                        "schema_url": "",
-                        "attributes": null
-                    },
-                    "metrics": [
-                        {
-                            "name": "model_utilization",
-                            "description": "Current utilization of a model deployment (0-1)",
-                            "unit": "percent",
-                            "data": {
-                                "data_points": [
-                                    {
-                                        "attributes": {
-                                            "model": "gpt-4o-mini"
-                                        },
-                                        "start_time_unix_nano": null,
-                                        "time_unix_nano": 1742461487509982000,
-                                        "value": 0.008,
-                                        "exemplars": []
-...
+just otel-run
 ```
 
 ## Contributing

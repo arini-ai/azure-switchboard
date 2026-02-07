@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # To run this, use:
-#   uv run readme_example.py
+#   uv run --env-file .env tools/readme_example.py
 #
 # /// script
 # requires-python = ">=3.10"
@@ -17,6 +17,7 @@ from azure_switchboard import Deployment, Model, Switchboard
 
 azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
 azure_openai_api_key = os.getenv("AZURE_OPENAI_API_KEY")
+openai_api_key = os.getenv("OPENAI_API_KEY")
 
 deployments = []
 if azure_openai_endpoint and azure_openai_api_key:
@@ -31,6 +32,20 @@ if azure_openai_endpoint and azure_openai_api_key:
                 models=[Model(name="gpt-4o-mini")],
             )
         )
+
+if openai_api_key:
+    deployments.append(
+        Deployment(
+            name="openai",
+            api_key=openai_api_key,
+            models=[Model(name="gpt-4o-mini")],
+        )
+    )
+
+if not deployments:
+    raise RuntimeError(
+        "Set AZURE_OPENAI_ENDPOINT/AZURE_OPENAI_API_KEY or OPENAI_API_KEY to run this example."
+    )
 
 
 async def main():
