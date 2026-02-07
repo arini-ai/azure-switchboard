@@ -1,10 +1,10 @@
+from dataclasses import dataclass
 import random
 import time
 
-from pydantic import BaseModel
 
-
-class UtilStats(BaseModel):
+@dataclass(frozen=True)
+class UtilStats:
     util: float
     tpm: str
     rpm: str
@@ -88,4 +88,9 @@ class Model:
         self.tpm_usage += n
 
     def __repr__(self) -> str:
-        return f"Model<{self.name}>({self.stats()})"
+        stats = self.stats()
+        return (
+            f"Model<{self.name}>("
+            f"util={stats.util} tpm='{stats.tpm}' rpm='{stats.rpm}'"
+            ")"
+        )

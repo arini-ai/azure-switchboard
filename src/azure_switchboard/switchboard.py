@@ -141,10 +141,13 @@ class Switchboard:
         if session_id and session_id in self.sessions:
             client = self.sessions[session_id]
             if client.is_healthy(model):
-                logger.debug(f"Reusing {client} for session {session_id}")
+                logger.debug(f"Reusing deployment {client.config.name} for session {session_id}")
                 return client
 
-            logger.warning(f"{client} is unhealthy, falling back to selection")
+            logger.warning(
+                f"{model} is unhealthy on {client.config.name}, falling back to selection",
+                extra={"util": vars(client.models[model].stats())},
+            )
 
         # Get eligible deployments for the requested model
         eligible_deployments = [
