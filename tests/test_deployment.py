@@ -147,7 +147,7 @@ class TestDeployment:
         ) as mock:
             stream = await deployment.create(stream=True, **COMPLETION_PARAMS)
             with pytest.raises(
-                SwitchboardError, match="Rate limit exceeded in wrapped stream"
+                RuntimeError, match="Rate limit exceeded in wrapped stream"
             ):
                 await collect_chunks(stream)
             assert mock.call_count == 1
@@ -307,8 +307,8 @@ class TestDeployment:
         assert mock_client.routes["azure"].call_count == 3
         assert not deployment.is_healthy("gpt-4o-mini")
 
-    async def test_rate_limit_is_non_retriable(self, deployment: DeploymentState):
-        """Rate limit errors should be surfaced as SwitchboardError."""
+    async def test_rate_limit_marks_deployment_down(self, deployment: DeploymentState):
+        """Rate limit errors should mark the deployment down and raise RuntimeError to enable failover."""
 
         deployment.client.max_retries = 0
         rate_limit_error = RateLimitError(
@@ -328,7 +328,7 @@ class TestDeployment:
             side_effect=rate_limit_error,
         ) as mock:
             with pytest.raises(
-                SwitchboardError,
+                RuntimeError,
                 match="Rate limit exceeded in deployment chat completion",
             ):
                 await deployment.create(**COMPLETION_PARAMS)

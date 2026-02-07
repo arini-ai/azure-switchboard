@@ -40,11 +40,11 @@ class Deployment(BaseModel, arbitrary_types_allowed=True):
             Model(name="gpt-5.1"),
             Model(name="gpt-5.1-mini"),
             Model(name="gpt-5.1-nano"),
-            Model(name="gpt-5.1-chat"), # OpenAI calls this gpt-5.1-chat-latest
+            Model(name="gpt-5.1-chat"),  # OpenAI calls this gpt-5.1-chat-latest
             Model(name="gpt-5.2"),
             Model(name="gpt-5.2-mini"),
             Model(name="gpt-5.2-nano"),
-            Model(name="gpt-5.2-chat"), # OpenAI calls this gpt-5.2-chat-latest
+            Model(name="gpt-5.2-chat"),  # OpenAI calls this gpt-5.2-chat-latest
         ]
     )
     client: AsyncOpenAI | None = None
@@ -156,7 +156,9 @@ class DeploymentState:
         except RateLimitError as e:
             logger.warning(f"{self.config.name}/{model} hit rate limits")
             self.models[model].mark_down()
-            raise SwitchboardError("Rate limit exceeded in deployment chat completion") from e
+            raise RuntimeError(
+                "Rate limit exceeded in deployment chat completion"
+            ) from e
         except Exception as e:
             logger.exception(
                 f"marking down {self.config.name}/{model} for chat completion error"
@@ -219,5 +221,5 @@ class _AsyncStreamWrapper(wrapt.ObjectProxy):
             )
             self._self_model.mark_down()
             if isinstance(e, RateLimitError):
-                raise SwitchboardError("Rate limit exceeded in wrapped stream") from e
+                raise RuntimeError("Rate limit exceeded in wrapped stream") from e
             raise RuntimeError("Error in wrapped stream") from e
