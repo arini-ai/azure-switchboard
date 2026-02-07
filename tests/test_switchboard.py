@@ -4,7 +4,7 @@ from unittest.mock import patch
 import pytest
 import respx
 
-from azure_switchboard import OpenAIDeployment, Switchboard, SwitchboardError
+from azure_switchboard import Switchboard, SwitchboardError
 
 from .conftest import (
     COMPLETION_PARAMS,
@@ -12,7 +12,6 @@ from .conftest import (
     azure_config,
     chat_completion_mock,
     collect_chunks,
-    openai_config,
 )
 
 
@@ -28,7 +27,7 @@ class TestSwitchboard:
         assert "Switchboard" in repr(switchboard)
 
         response = await switchboard.create(**COMPLETION_PARAMS)
-        assert mock_client["gpt-4o-mini"].call_count == 1
+        assert mock_client["azure"].call_count == 1
         assert response == COMPLETION_RESPONSE
 
         assert any(
@@ -41,7 +40,7 @@ class TestSwitchboard:
     async def test_streaming(self, switchboard: Switchboard):
         """Test streaming through switchboard."""
 
-        with patch("azure_switchboard.deployment.Deployment.create") as mock:
+        with patch("azure_switchboard.deployment.DeploymentState.create") as mock:
             mock.side_effect = chat_completion_mock()
             stream = await switchboard.create(stream=True, **COMPLETION_PARAMS)
             _, content = await collect_chunks(stream)
@@ -63,22 +62,22 @@ class TestSwitchboard:
         # Initial request should work
         response = await switchboard.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
-        assert mock_client["gpt-4o-mini"].call_count == 1
-        host_0 = mock_client["gpt-4o-mini"].calls.last.request.url.host
+        assert mock_client["azure"].call_count == 1
+        host_0 = mock_client["azure"].calls.last.request.url.host
 
         # Mark first deployment as unhealthy
         deployments[0].models["gpt-4o-mini"].mark_down()
         response = await switchboard.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
-        assert mock_client["gpt-4o-mini"].call_count == 2
-        host_1 = mock_client["gpt-4o-mini"].calls.last.request.url.host
+        assert mock_client["azure"].call_count == 2
+        host_1 = mock_client["azure"].calls.last.request.url.host
 
         # Mark second deployment as unhealthy
         deployments[1].models["gpt-4o-mini"].mark_down()
         response = await switchboard.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
-        assert mock_client["gpt-4o-mini"].call_count == 3
-        host_2 = mock_client["gpt-4o-mini"].calls.last.request.url.host
+        assert mock_client["azure"].call_count == 3
+        host_2 = mock_client["azure"].calls.last.request.url.host
 
         # Mark last deployment as unhealthy
         deployments[2].models["gpt-4o-mini"].mark_down()
@@ -86,14 +85,14 @@ class TestSwitchboard:
             SwitchboardError, match="No eligible deployments available for gpt-4o-mini"
         ):
             await switchboard.create(**COMPLETION_PARAMS)
-        assert mock_client["gpt-4o-mini"].call_count == 3
+        assert mock_client["azure"].call_count == 3
 
         # Restore first deployment
         deployments[0].models["gpt-4o-mini"].mark_up()
         response = await switchboard.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
-        assert mock_client["gpt-4o-mini"].call_count == 4
-        host_3 = mock_client["gpt-4o-mini"].calls.last.request.url.host
+        assert mock_client["azure"].call_count == 4
+        host_3 = mock_client["azure"].calls.last.request.url.host
 
         assert len(set([host_0, host_1, host_2, host_3])) > 1
 
@@ -125,7 +124,7 @@ class TestSwitchboard:
         # Initial request establishes session affinity
         response1 = await switchboard.create(session_id=session_id, **COMPLETION_PARAMS)
         assert response1 == COMPLETION_RESPONSE
-        assert mock_client["gpt-4o-mini"].call_count == 1
+        assert mock_client["azure"].call_count == 1
         # Get assigned deployment
         assigned_deployment = switchboard.sessions[session_id]
         original_deployment = assigned_deployment
@@ -151,62 +150,36 @@ class TestSwitchboard:
         assert switchboard.sessions[session_id] == fallback_deployment
 
     @pytest.mark.mock_models("gpt-4o-mini", "openai")
-    async def test_fallback_to_openai(self, mock_client: respx.MockRouter):
-        """Test that the switchboard can fallback to OpenAI."""
+    async def test_multiple_deployment_types(self, mock_client: respx.MockRouter):
+        """Test that both Azure and OpenAI deployments work together."""
+        from .conftest import openai_config
 
-        switchboard = Switchboard(deployments=[azure_config("test1"), openai_config()])
+        switchboard = Switchboard(
+            deployments=[azure_config("test1"), openai_config("openai")]
+        )
 
-        assert switchboard.fallback is not None
-        assert isinstance(switchboard.fallback.config, OpenAIDeployment)
+        assert len(switchboard.deployments) == 2
+        assert "test1" in switchboard.deployments
+        assert "openai" in switchboard.deployments
 
-        # basic test to verify the fallback works
-        response = await switchboard.fallback.create(**COMPLETION_PARAMS)
+        # make azure deployment unhealthy, should route to openai
+        switchboard.deployments["test1"].models["gpt-4o-mini"].mark_down()
+        response = await switchboard.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
         assert mock_client["openai"].call_count == 1
 
-        # default: use the healthy azure deployment
+        # bring azure back, should route to either
+        switchboard.deployments["test1"].models["gpt-4o-mini"].mark_up()
         response = await switchboard.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
-        assert mock_client["gpt-4o-mini"].call_count == 1
 
-        # make deployment unhealthy so it falls back to openai
+        # make both unhealthy, verify it throws
         switchboard.deployments["test1"].models["gpt-4o-mini"].mark_down()
-        await switchboard.create(**COMPLETION_PARAMS)
-        assert mock_client["openai"].call_count == 2
-
-        # make openai fallback unhealthy, verify it throws
-        mock_client["openai"].side_effect = Exception("test")
+        switchboard.deployments["openai"].models["gpt-4o-mini"].mark_down()
         with pytest.raises(
             SwitchboardError, match="No eligible deployments available for gpt-4o-mini"
         ):
             await switchboard.create(**COMPLETION_PARAMS)
-        # 3 total additional calls were made, because openai retries twice internally
-        assert mock_client["openai"].call_count == 5
-
-        # bring the deployment back, verify we use it
-        switchboard.deployments["test1"].models["gpt-4o-mini"].mark_up()
-        await switchboard.create(**COMPLETION_PARAMS)
-        assert mock_client["gpt-4o-mini"].call_count == 2
-
-        # make everything unhealthy, verify it throws
-        switchboard.deployments["test1"].models["gpt-4o-mini"].mark_down()
-        with pytest.raises(
-            SwitchboardError, match="No eligible deployments available for gpt-4o-mini"
-        ):
-            await switchboard.create(**COMPLETION_PARAMS)
-        # With the new implementation, no additional calls are made when all deployments are unhealthy
-        assert mock_client["openai"].call_count == 5
-
-        # reset fallback, verify it works
-        mock_client["openai"].side_effect = None
-        switchboard.fallback.models["gpt-4o-mini"].mark_up()
-        await switchboard.create(**COMPLETION_PARAMS)
-        assert mock_client["openai"].call_count == 6
-
-        # reset the deployment and verify it gets used again
-        switchboard.deployments["test1"].models["gpt-4o-mini"].mark_up()
-        await switchboard.create(**COMPLETION_PARAMS)
-        assert mock_client["gpt-4o-mini"].call_count == 3
 
     def _within_bounds(self, val, min, max, tolerance=0.05):
         """Check if a value is within bounds, accounting for tolerance."""
@@ -361,69 +334,68 @@ class TestSwitchboard:
             await switchboard.create(model="invalid-model", messages=[])
 
     @pytest.mark.mock_models("openai")
-    async def test_only_openai_deployment(self, mock_client: respx.MockRouter):
-        """Test the edge case where only OpenAI deployment is configured."""
-        # Create switchboard with only OpenAI deployment
-        switchboard = Switchboard(deployments=[openai_config()])
+    async def test_single_deployment(self, mock_client: respx.MockRouter):
+        """Test the edge case where only a single deployment is configured."""
+        from .conftest import openai_config
 
-        assert switchboard.fallback is not None
-        assert isinstance(switchboard.fallback.config, OpenAIDeployment)
-        assert len(switchboard.deployments) == 0
+        switchboard = Switchboard(deployments=[openai_config("openai")])
+        assert len(switchboard.deployments) == 1
 
-        # Verify that OpenAI deployment is selected
+        # Verify that the deployment is selected
         deployment = switchboard.select_deployment(model="gpt-4o-mini")
-        assert deployment == switchboard.fallback
+        assert deployment == switchboard.deployments["openai"]
 
-        # Verify with session_id to cover line 171
+        # Verify with session_id
         deployment_with_session = switchboard.select_deployment(
             model="gpt-4o-mini", session_id="test"
         )
-        assert deployment_with_session == switchboard.fallback
-        assert switchboard.sessions["test"] == switchboard.fallback
+        assert deployment_with_session == switchboard.deployments["openai"]
+        assert switchboard.sessions["test"] == switchboard.deployments["openai"]
 
         # Verify that requests work correctly
         response = await switchboard.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
         assert mock_client["openai"].call_count == 1
 
-    async def test_no_fallback_no_deployments(self):
-        """Test error when no deployments available and no fallback configured."""
-        # Create a switchboard with an Azure deployment but no fallback
+    async def test_all_deployments_unhealthy(self):
+        """Test error when all deployments are unhealthy."""
         switchboard = Switchboard(deployments=[azure_config("test1")])
 
         # Mark the deployment as unhealthy
         switchboard.deployments["test1"].models["gpt-4o-mini"].mark_down()
 
-        # This should raise an error since there's no fallback
+        # This should raise an error
         with pytest.raises(
             SwitchboardError,
             match="No eligible deployments available for gpt-4o-mini",
         ):
             await switchboard.create(**COMPLETION_PARAMS)
 
+    async def test_duplicate_deployment_names(self):
+        """Test that duplicate deployment names raise an error."""
+        with pytest.raises(SwitchboardError, match="Duplicate deployment name: test1"):
+            Switchboard(
+                deployments=[azure_config("test1"), azure_config("test1")]
+            )
+
     async def test_handle_cancelled_error(self):
-        """Test that Switchboard.create gracefully handles asyncio.CancelledError."""
-
-        switchboard = Switchboard(deployments=[openai_config()])
-
-        assert switchboard.fallback is not None
-        assert isinstance(switchboard.fallback.config, OpenAIDeployment)
-        assert len(switchboard.deployments) == 0
+        """Test that Switchboard.create properly propagates asyncio.CancelledError."""
+        switchboard = Switchboard(deployments=[azure_config("test1")])
 
         # Patch the underlying deployment.create to raise CancelledError
         with patch.object(
-            switchboard.fallback, "create", side_effect=asyncio.CancelledError
+            switchboard.deployments["test1"], "create", side_effect=asyncio.CancelledError
         ):
-            # Should not raise, should be silently handled
-            result = await switchboard.create(**COMPLETION_PARAMS)
-            assert result is None
+            # CancelledError should propagate to allow proper task cancellation
+            with pytest.raises(asyncio.CancelledError):
+                await switchboard.create(**COMPLETION_PARAMS)
 
-        # Also verify that the fallback is still selected as expected
+        # Verify that the deployment is still selected as expected after cancellation
         deployment = switchboard.select_deployment(model="gpt-4o-mini")
-        assert deployment == switchboard.fallback
+        assert deployment == switchboard.deployments["test1"]
 
         deployment_with_session = switchboard.select_deployment(
             model="gpt-4o-mini", session_id="test"
         )
-        assert deployment_with_session == switchboard.fallback
-        assert switchboard.sessions["test"] == switchboard.fallback
+        assert deployment_with_session == switchboard.deployments["test1"]
+        assert switchboard.sessions["test"] == switchboard.deployments["test1"]

@@ -21,10 +21,8 @@ uv add azure-switchboard
 - **Utilization-Aware**: TPM/RPM ratelimit utilization is tracked per model per deployment for use during selection.
 - **Batteries Included**:
   - **Session Affinity**: Provide a `session_id` to route requests in the same session to the same deployment, optimizing for prompt caching
-  - **Automatic Failover**: Client automatically retries on request failure, with optional fallback to OpenAI by providing an `OpenAIDeployment` in `deployments`. The retry policy can also be customized by passing a tenacity
-    `AsyncRetrying` instance to `failover_policy`.
-  - **Pluggable Selection**: Custom selection algorithms can be
-    provided by passing a callable to the `selector` parameter on the Switchboard constructor.
+  - **Automatic Failover**: Client automatically retries on request failure. The retry policy can be customized by passing a tenacity `AsyncRetrying` instance to `failover_policy`.
+  - **Pluggable Selection**: Custom selection algorithms can be provided by passing a callable to the `selector` parameter on the Switchboard constructor.
   - **OpenTelemetry Integration**: Comprehensive metrics and instrumentation for monitoring deployment health and utilization.
 
 - **Lightweight**: sub-400 LOC implementation with minimal dependencies: `openai`, `tenacity`, `wrapt`, and `opentelemetry-api`. <1ms overhead per request.
@@ -48,11 +46,10 @@ uv add azure-switchboard
 import asyncio
 import os
 
-from azure_switchboard import AzureDeployment, Model, OpenAIDeployment, Switchboard
+from azure_switchboard import Deployment, Model, Switchboard
 
 azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
 azure_openai_api_key = os.getenv("AZURE_OPENAI_API_KEY")
-openai_api_key = os.getenv("OPENAI_API_KEY", None)
 
 deployments = []
 if azure_openai_endpoint and azure_openai_api_key:
@@ -60,18 +57,13 @@ if azure_openai_endpoint and azure_openai_api_key:
     # is fine for the purposes of this demo
     for name in ("east", "west", "south"):
         deployments.append(
-            AzureDeployment(
+            Deployment(
                 name=name,
-                endpoint=azure_openai_endpoint,
+                base_url=f"{azure_openai_endpoint}/openai/v1/",
                 api_key=azure_openai_api_key,
                 models=[Model(name="gpt-4o-mini")],
             )
         )
-
-if openai_api_key:
-    # we can use openai as a fallback deployment
-    # it will pick up the api key from the environment
-    deployments.append(OpenAIDeployment())
 
 
 async def main():
@@ -136,7 +128,7 @@ async def session_affinity(switchboard: Switchboard):
     print("response 2:", r2.choices[0].message.content)
 
     # Simulate a failure by marking down the deployment
-    d1.models["gpt-4o-mini"].cooldown()
+    d1.models["gpt-4o-mini"].mark_down()
 
     # A new deployment will be selected for this session_id
     r3 = await switchboard.create(
@@ -220,16 +212,15 @@ Distribution overhead scales ~linearly with the number of deployments.
 | `rpm`              | Configured RPM rate limit                             | 0 (unlimited) |
 | `default_cooldown` | Default cooldown period in seconds                    | 10.0          |
 
-### switchboard.AzureDeployment Parameters
+### switchboard.Deployment Parameters
 
-| Parameter     | Description                                   | Default      |
-| ------------- | --------------------------------------------- | ------------ |
-| `name`        | Unique identifier for the deployment          | Required     |
-| `endpoint`    | Azure OpenAI endpoint URL                     | Required     |
-| `api_key`     | Azure OpenAI API key                          | Required     |
-| `api_version` | Azure OpenAI API version                      | "2024-10-21" |
-| `timeout`     | Default timeout in seconds                    | 600.0        |
-| `models`      | List of Models configured for this deployment | Required     |
+| Parameter  | Description                                                                 | Default  |
+| ---------- | --------------------------------------------------------------------------- | -------- |
+| `name`     | Unique identifier for the deployment                                        | Required |
+| `base_url` | Base URL for the API (e.g., `https://myazure.openai.azure.com/openai/v1/`)  | None     |
+| `api_key`  | API key for the deployment                                                  | None     |
+| `timeout`  | Default timeout in seconds                                                  | 600.0    |
+| `models`   | List of Models configured for this deployment                               | Default  |
 
 ### switchboard.Switchboard Parameters
 

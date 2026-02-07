@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import asyncio
+from collections.abc import AsyncIterator
 import logging
-from typing import AsyncIterator, Literal, cast, overload
+from typing import Literal, cast, overload
 
 import wrapt
-from openai import AsyncAzureOpenAI, AsyncOpenAI, AsyncStream
+from openai import AsyncOpenAI, AsyncStream, RateLimitError
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from openai.types.completion_usage import CompletionUsage
 from opentelemetry import trace
@@ -13,37 +13,18 @@ from pydantic import BaseModel, Field
 
 from azure_switchboard.model import UtilStats
 
+from .exceptions import SwitchboardError
 from .model import Model
 
 logger = logging.getLogger(__name__)
 
 
-class AzureDeployment(BaseModel, arbitrary_types_allowed=True):
-    """Metadata about an Azure deployment"""
+class Deployment(BaseModel, arbitrary_types_allowed=True):
+    """Configuration for an Azure OpenAI or OpenAI deployment."""
 
     name: str
-    endpoint: str
-    api_key: str
-    api_version: str = "2024-10-21"
-    timeout: float = 600.0
-    models: list[Model]
-    client: AsyncAzureOpenAI | None = None
-
-    def get_client(self) -> AsyncAzureOpenAI:
-        return AsyncAzureOpenAI(
-            azure_endpoint=self.endpoint,
-            api_key=self.api_key,
-            api_version=self.api_version,
-            timeout=self.timeout,
-        )
-
-
-class OpenAIDeployment(BaseModel, arbitrary_types_allowed=True):
-    """Metadata about an OpenAI deployment"""
-
-    name: str = "openai"
-    api_key: str | None = None
     base_url: str | None = None
+    api_key: str | None = None
     timeout: float = 600.0
     models: list[Model] = Field(
         default_factory=lambda: [
@@ -52,6 +33,18 @@ class OpenAIDeployment(BaseModel, arbitrary_types_allowed=True):
             Model(name="gpt-4.1"),
             Model(name="gpt-4.1-mini"),
             Model(name="gpt-4.1-nano"),
+            Model(name="gpt-5"),
+            Model(name="gpt-5-mini"),
+            Model(name="gpt-5-nano"),
+            Model(name="gpt-5-chat"),
+            Model(name="gpt-5.1"),
+            Model(name="gpt-5.1-mini"),
+            Model(name="gpt-5.1-nano"),
+            Model(name="gpt-5.1-chat"), # OpenAI calls this gpt-5.1-chat-latest
+            Model(name="gpt-5.2"),
+            Model(name="gpt-5.2-mini"),
+            Model(name="gpt-5.2-nano"),
+            Model(name="gpt-5.2-chat"), # OpenAI calls this gpt-5.2-chat-latest
         ]
     )
     client: AsyncOpenAI | None = None
@@ -64,16 +57,12 @@ class OpenAIDeployment(BaseModel, arbitrary_types_allowed=True):
         )
 
 
-class DeploymentError(Exception):
-    pass
-
-
-class Deployment:
+class DeploymentState:
     """Runtime state of a deployment"""
 
     def __init__(
         self,
-        config: AzureDeployment | OpenAIDeployment,
+        config: Deployment,
     ) -> None:
         self.config = config
         self.client = config.get_client()
@@ -120,7 +109,7 @@ class Deployment:
         """
 
         if model not in self.models:
-            raise DeploymentError(f"{model} not configured for deployment")
+            raise SwitchboardError(f"{model} not configured for deployment")
 
         # add input token estimate before we send the request so utilization is
         # kept up to date for other requests that might be executing concurrently.
@@ -164,12 +153,16 @@ class Deployment:
                     self._set_span_attributes(response.usage)
 
                 return response
+        except RateLimitError as e:
+            logger.warning(f"{self.config.name}/{model} hit rate limits")
+            self.models[model].mark_down()
+            raise SwitchboardError("Rate limit exceeded in deployment chat completion") from e
         except Exception as e:
             logger.exception(
                 f"marking down {self.config.name}/{model} for chat completion error"
             )
             self.models[model].mark_down()
-            raise DeploymentError("Error in deployment chat completion") from e
+            raise RuntimeError("Error in deployment chat completion") from e
 
     def _estimate_token_usage(self, kwargs: dict) -> int:
         # loose estimate of token cost. were only considering
@@ -198,14 +191,14 @@ class _AsyncStreamWrapper(wrapt.ObjectProxy):
     def __init__(
         self,
         stream: AsyncStream[ChatCompletionChunk],
-        deployment: Deployment,
+        deployment: DeploymentState,
         model: Model,
         offset: int = 0,
     ):
         super().__init__(stream)
-        self._self_deployment = deployment
-        self._self_model = model
-        self._self_offset = offset
+        self._self_deployment: DeploymentState = deployment
+        self._self_model: Model = model
+        self._self_offset: int = offset
 
     async def __aiter__(self) -> AsyncIterator[ChatCompletionChunk]:
         try:
@@ -220,12 +213,11 @@ class _AsyncStreamWrapper(wrapt.ObjectProxy):
                     self._self_deployment._set_span_attributes(chunk.usage)
 
                 yield chunk
-        except asyncio.CancelledError:  # pragma: no cover
-            logger.exception("Cancelled mid-stream")
-            return
         except Exception as e:
             logger.exception(
                 f"marking down {self._self_deployment.config.name}/{self._self_model.name} for error"
             )
             self._self_model.mark_down()
-            raise DeploymentError("Error in wrapped stream") from e
+            if isinstance(e, RateLimitError):
+                raise SwitchboardError("Rate limit exceeded in wrapped stream") from e
+            raise RuntimeError("Error in wrapped stream") from e

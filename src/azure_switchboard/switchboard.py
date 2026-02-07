@@ -18,10 +18,12 @@ from tenacity import (
 from azure_switchboard.model import UtilStats
 
 from .deployment import (
-    AzureDeployment,
     Deployment,
-    OpenAIDeployment,
+    DeploymentState,
 )
+from .exceptions import SwitchboardError
+
+logger = logging.getLogger(__name__)
 
 meter = metrics.get_meter("azure_switchboard.switchboard")
 deployment_util = meter.create_gauge(
@@ -29,11 +31,6 @@ deployment_util = meter.create_gauge(
     description="Utilization of a model on a deployment",
     unit="%",
 )
-
-logger = logging.getLogger(__name__)
-
-# Create a meter for recording metrics
-meter = metrics.get_meter("azure_switchboard.switchboard")
 healthy_deployments_gauge = meter.create_gauge(
     name="healthy_deployments_count",
     description="Number of healthy deployments available for a model",
@@ -51,11 +48,7 @@ request_counter = meter.create_counter(
 )
 
 
-class SwitchboardError(Exception):
-    pass
-
-
-def two_random_choices(model: str, options: list[Deployment]) -> Deployment:
+def two_random_choices(model: str, options: list[DeploymentState]) -> DeploymentState:
     """Power of two random choices algorithm.
 
     Randomly select 2 deployments and return the one
@@ -75,30 +68,29 @@ DEFAULT_FAILOVER_POLICY = AsyncRetrying(
 class Switchboard:
     def __init__(
         self,
-        deployments: Sequence[AzureDeployment | OpenAIDeployment],
-        selector: Callable[[str, list[Deployment]], Deployment] = two_random_choices,
+        deployments: Sequence[Deployment],
+        selector: Callable[
+            [str, list[DeploymentState]], DeploymentState
+        ] = two_random_choices,
         failover_policy: AsyncRetrying = DEFAULT_FAILOVER_POLICY,
         ratelimit_window: float = 60.0,
         max_sessions: int = 1024,
     ) -> None:
-        self.deployments: dict[str, Deployment] = {}
-        self.fallback: Deployment | None = None
-
         if not deployments:
             raise SwitchboardError("No deployments provided")
 
+        self.deployments: dict[str, DeploymentState] = {}
         for deployment in deployments:
-            if isinstance(deployment, OpenAIDeployment):
-                self.fallback = Deployment(deployment)
-            else:
-                self.deployments[deployment.name] = Deployment(deployment)
+            if deployment.name in self.deployments:
+                raise SwitchboardError(f"Duplicate deployment name: {deployment.name}")
+            self.deployments[deployment.name] = DeploymentState(deployment)
 
         self.selector = selector
-
         self.failover_policy = failover_policy
 
         # LRUDict to expire old sessions
         self.sessions = _LRUDict(max_size=max_sessions)
+        self.ratelimit_reset_task: asyncio.Task | None = None
 
         # reset usage every N seconds
         self.ratelimit_window = ratelimit_window
@@ -117,12 +109,11 @@ class Switchboard:
 
             while True:
                 await asyncio.sleep(self.ratelimit_window)
-                logger.debug("Resetting usage counters")
                 self.reset_usage()
 
         self.ratelimit_reset_task = asyncio.create_task(periodic_reset())
 
-    async def stop(self):
+    async def stop(self) -> None:
         if self.ratelimit_reset_task:
             try:
                 self.ratelimit_reset_task.cancel()
@@ -141,11 +132,10 @@ class Switchboard:
 
     def select_deployment(
         self, *, model: str, session_id: str | None = None
-    ) -> Deployment:
+    ) -> DeploymentState:
         """
         Select a deployment using the power of two random choices algorithm.
         If session_id is provided, try to use that specific deployment first.
-        Falls back to OpenAI deployment if no Azure deployments are available.
         """
         # Handle session-based routing first
         if session_id and session_id in self.sessions:
@@ -157,30 +147,21 @@ class Switchboard:
             logger.warning(f"{client} is unhealthy, falling back to selection")
 
         # Get eligible deployments for the requested model
-        eligible_deployments = list(
-            filter(lambda d: d.is_healthy(model), self.deployments.values())
-        )
-
-        # TODO: otel metric collection here
+        eligible_deployments = [
+            d for d in self.deployments.values() if d.is_healthy(model)
+        ]
 
         if not eligible_deployments:
-            # Check if fallback is available and healthy
-            if self.fallback and self.fallback.is_healthy(model):
-                logger.debug(
-                    f"No Azure deployments available, using fallback: {self.fallback}"
-                )
-                if session_id:
-                    self.sessions[session_id] = self.fallback
-                return self.fallback
             raise SwitchboardError(f"No eligible deployments available for {model}")
 
         # Record healthy deployments count metric
         healthy_deployments_gauge.set(len(eligible_deployments), {"model": model})
 
         if len(eligible_deployments) == 1:
-            return eligible_deployments[0]
+            selection = eligible_deployments[0]
+        else:
+            selection = self.selector(model, eligible_deployments)
 
-        selection = self.selector(model, eligible_deployments)
         logger.debug(f"Selected {selection}")
 
         if session_id:
@@ -209,29 +190,19 @@ class Switchboard:
         """
         Send a chat completion request to the selected deployment, with automatic failover.
         """
-        try:
-            async for attempt in self.failover_policy:
-                with attempt:
-                    deployment = self.select_deployment(
-                        model=model, session_id=session_id
-                    )
-                    logger.debug(f"Sending completion request to {deployment}")
-                    response = await deployment.create(
-                        model=model, stream=stream, **kwargs
-                    )
-                    # Record successful request
-                    provider = "openai" if deployment == self.fallback else "azure"
-                    request_counter.add(
-                        1,
-                        {
-                            "model": model,
-                            "provider": provider,
-                            "deployment": deployment.config.name,
-                        },
-                    )
-                    return response
-        except asyncio.CancelledError:
-            pass
+        async for attempt in self.failover_policy:
+            with attempt:
+                deployment = self.select_deployment(
+                    model=model, session_id=session_id
+                )
+                logger.debug(f"Sending completion request to {deployment}")
+                response = await deployment.create(
+                    model=model, stream=stream, **kwargs
+                )
+                request_counter.add(
+                    1, {"model": model, "deployment": deployment.config.name}
+                )
+                return response
 
     def __repr__(self) -> str:
         return f"Switchboard({self.deployments})"
@@ -245,7 +216,7 @@ class _LRUDict(OrderedDict):
 
         super().__init__(*args, **kwargs)
 
-    def __setitem__(self, key: str, value: Deployment) -> None:
+    def __setitem__(self, key: str, value: DeploymentState) -> None:
         super().__setitem__(key, value)
         super().move_to_end(key)
 
@@ -253,7 +224,7 @@ class _LRUDict(OrderedDict):
             oldkey = next(iter(self))
             super().__delitem__(oldkey)
 
-    def __getitem__(self, key: str) -> Deployment:
+    def __getitem__(self, key: str) -> DeploymentState:
         val = super().__getitem__(key)
         super().move_to_end(key)
 

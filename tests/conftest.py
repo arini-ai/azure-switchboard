@@ -13,12 +13,11 @@ from openai.types.completion_usage import (
 )
 
 from azure_switchboard import (
-    AzureDeployment,
     Deployment,
     Model,
-    OpenAIDeployment,
     Switchboard,
 )
+from azure_switchboard.deployment import DeploymentState
 
 
 async def collect_chunks(
@@ -34,17 +33,19 @@ async def collect_chunks(
     return received_chunks, content
 
 
-def openai_config() -> OpenAIDeployment:
-    return OpenAIDeployment(
+def openai_config(name: str = "openai") -> Deployment:
+    """Create an OpenAI deployment config for testing."""
+    return Deployment(
+        name=name,
         api_key="test",
         models=[Model(name="gpt-4o-mini"), Model(name="gpt-4o")],
     )
 
 
-def azure_config(name: str) -> AzureDeployment:
-    return AzureDeployment(
+def azure_config(name: str) -> Deployment:
+    return Deployment(
         name=name,
-        endpoint=f"https://{name}.openai.azure.com/",
+        base_url=f"https://{name}.openai.azure.com/openai/v1/",
         api_key=name,
         models=[
             Model(name="gpt-4o-mini", tpm=10000, rpm=60),
@@ -70,18 +71,16 @@ def chat_completion_mock():
 
 @pytest.fixture(autouse=True)
 def mock_client(request: pytest.FixtureRequest):
-    with respx.mock() as respx_mock:
-        if provided_models := request.node.get_closest_marker("mock_models"):
-            # Add routes for each model
-            for model in provided_models.args:
-                if model == "openai":
-                    path = "/v1/chat/completions"
-                else:
-                    path = f"/openai/deployments/{model}/chat/completions"
-
-                respx_mock.route(name=model, method="POST", path=path).respond(
-                    json=COMPLETION_RESPONSE_JSON
-                )
+    with respx.mock(assert_all_called=False) as respx_mock:
+        if request.node.get_closest_marker("mock_models"):
+            # Azure deployments use /openai/v1/chat/completions
+            respx_mock.route(
+                name="azure", method="POST", path="/openai/v1/chat/completions"
+            ).respond(json=COMPLETION_RESPONSE_JSON)
+            # OpenAI deployments use /v1/chat/completions
+            respx_mock.route(
+                name="openai", method="POST", path="/v1/chat/completions"
+            ).respond(json=COMPLETION_RESPONSE_JSON)
 
         yield respx_mock
 
@@ -93,7 +92,7 @@ def model():
 
 @pytest.fixture
 def deployment():
-    return Deployment(azure_config("test1"))
+    return DeploymentState(azure_config("test1"))
 
 
 @pytest.fixture
