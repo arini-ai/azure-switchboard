@@ -11,19 +11,9 @@ _LOG_NAMESPACE = "azure_switchboard"
 _logger.disable(_LOG_NAMESPACE)
 
 
-def enable_logging() -> None:
-    _logger.enable(_LOG_NAMESPACE)
-
-
-def disable_logging() -> None:
-    _logger.disable(_LOG_NAMESPACE)
-
-
 __all__ = [
     "Deployment",
     "Model",
-    "enable_logging",
-    "disable_logging",
     "SwitchboardError",
     "Switchboard",
 ]

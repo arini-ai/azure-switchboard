@@ -7,7 +7,7 @@ from httpx import Request, Response, TimeoutException
 from loguru import logger as _logger
 from openai import RateLimitError
 
-from azure_switchboard import SwitchboardError, disable_logging, enable_logging
+from azure_switchboard import SwitchboardError
 from azure_switchboard.deployment import DeploymentState
 
 from .conftest import (
@@ -113,7 +113,7 @@ class TestDeployment:
 
             records: list[dict] = []
             sink_id = _logger.add(lambda m: records.append(m.record))
-            enable_logging()
+            _logger.enable("azure_switchboard")
             try:
                 with patch.object(
                     stream._self_model,  # type: ignore[reportAttributeAccessIssue]
@@ -135,7 +135,7 @@ class TestDeployment:
                 assert deployment.model("gpt-4o-mini").is_healthy()
             finally:
                 _logger.remove(sink_id)
-                disable_logging()
+                _logger.disable("azure_switchboard")
 
         # Test midstream rate limit handling
         rate_limit_error = RateLimitError(

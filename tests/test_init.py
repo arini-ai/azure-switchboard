@@ -5,25 +5,9 @@ from azure_switchboard import Deployment, Model, Switchboard
 
 
 class TestInit:
-    def test_enable_logging(self):
-        enabled: list[str] = []
-        original_enable = azure_switchboard._logger.enable
-        try:
-            azure_switchboard._logger.enable = lambda name: enabled.append(name)
-            azure_switchboard.enable_logging()
-        finally:
-            azure_switchboard._logger.enable = original_enable
-        assert enabled == [azure_switchboard._LOG_NAMESPACE]
-
-    def test_disable_logging(self):
-        disabled: list[str] = []
-        original_disable = azure_switchboard._logger.disable
-        try:
-            azure_switchboard._logger.disable = lambda name: disabled.append(name)
-            azure_switchboard.disable_logging()
-        finally:
-            azure_switchboard._logger.disable = original_disable
-        assert disabled == [azure_switchboard._LOG_NAMESPACE]
+    def test_public_exports_do_not_include_logging_helpers(self):
+        assert "enable_logging" not in azure_switchboard.__all__
+        assert "disable_logging" not in azure_switchboard.__all__
 
     def test_logging_activation_controls_switchboard_logs(self):
         records: list[dict] = []
@@ -46,12 +30,12 @@ class TestInit:
             ratelimit_window=0,
         )
         try:
-            azure_switchboard.disable_logging()
+            _logger.disable("azure_switchboard")
             switchboard.sessions["test"] = switchboard.deployments["mini-only"]
             _ = switchboard.select_deployment(session_id="test", model="gpt-4o")
             assert not records
 
-            azure_switchboard.enable_logging()
+            _logger.enable("azure_switchboard")
             switchboard.sessions["test"] = switchboard.deployments["mini-only"]
             _ = switchboard.select_deployment(session_id="test", model="gpt-4o")
             assert any(
@@ -60,4 +44,4 @@ class TestInit:
             )
         finally:
             _logger.remove(sink_id)
-            azure_switchboard.disable_logging()
+            _logger.disable("azure_switchboard")
