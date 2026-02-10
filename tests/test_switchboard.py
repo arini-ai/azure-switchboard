@@ -4,7 +4,7 @@ from unittest.mock import patch
 import pytest
 import respx
 
-from azure_switchboard import Switchboard, SwitchboardError
+from azure_switchboard import Deployment, Model, Switchboard, SwitchboardError
 
 from .conftest import (
     COMPLETION_PARAMS,
@@ -112,6 +112,33 @@ class TestSwitchboard:
         # Test session maintains failover assignment
         client_4 = switchboard.select_deployment(session_id="test", model="gpt-4o-mini")
         assert client_4.config.name == client_3.config.name
+
+    async def test_session_cached_deployment_missing_model_does_not_keyerror(self):
+        """Session fallback should handle model-missing deployments without KeyError."""
+        switchboard = Switchboard(
+            deployments=[
+                Deployment(
+                    name="mini-only",
+                    base_url="https://mini-only.openai.azure.com/openai/v1/",
+                    api_key="mini-only",
+                    models=[Model(name="gpt-4o-mini", tpm=1000, rpm=6)],
+                ),
+                Deployment(
+                    name="full-only",
+                    base_url="https://full-only.openai.azure.com/openai/v1/",
+                    api_key="full-only",
+                    models=[Model(name="gpt-4o", tpm=1000, rpm=6)],
+                ),
+            ],
+            ratelimit_window=0,
+        )
+
+        # Session points to a deployment that does not have gpt-4o.
+        switchboard.sessions["test"] = switchboard.deployments["mini-only"]
+
+        selection = switchboard.select_deployment(session_id="test", model="gpt-4o")
+        assert selection.name == "full-only"
+        assert switchboard.sessions["test"].name == "full-only"
 
     @pytest.mark.mock_models("gpt-4o-mini")
     async def test_session_stickiness_failover(
@@ -374,9 +401,7 @@ class TestSwitchboard:
     async def test_duplicate_deployment_names(self):
         """Test that duplicate deployment names raise an error."""
         with pytest.raises(SwitchboardError, match="Duplicate deployment name: test1"):
-            Switchboard(
-                deployments=[azure_config("test1"), azure_config("test1")]
-            )
+            Switchboard(deployments=[azure_config("test1"), azure_config("test1")])
 
     async def test_handle_cancelled_error(self):
         """Test that Switchboard.create properly propagates asyncio.CancelledError."""
@@ -384,7 +409,9 @@ class TestSwitchboard:
 
         # Patch the underlying deployment.create to raise CancelledError
         with patch.object(
-            switchboard.deployments["test1"], "create", side_effect=asyncio.CancelledError
+            switchboard.deployments["test1"],
+            "create",
+            side_effect=asyncio.CancelledError,
         ):
             # CancelledError should propagate to allow proper task cancellation
             with pytest.raises(asyncio.CancelledError):

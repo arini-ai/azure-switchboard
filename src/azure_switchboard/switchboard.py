@@ -141,9 +141,9 @@ class Switchboard:
             if deployment.is_healthy(model):
                 return deployment
 
-            logger.warning(
-                f"{model} is unhealthy on {deployment.name}, falling back to selection",
-                util=vars(deployment.models[model].stats()),
+            m = deployment.models.get(model)
+            logger.bind(util=vars(m.stats()) if m else None).warning(
+                f"{model} is unhealthy on {deployment.name}, falling back to selection"
             )
 
         # Get eligible deployments for the requested model

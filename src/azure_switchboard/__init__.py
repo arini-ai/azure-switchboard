@@ -10,19 +10,9 @@ from .switchboard import Switchboard
 _logger.disable("azure_switchboard")
 
 
-def enable_logging() -> None:
-    _logger.enable("azure_switchboard")
-
-
-def disable_logging() -> None:
-    _logger.disable("azure_switchboard")
-
-
 __all__ = [
     "Deployment",
     "Model",
-    "enable_logging",
-    "disable_logging",
     "SwitchboardError",
     "Switchboard",
 ]
