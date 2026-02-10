@@ -7,8 +7,7 @@ from .switchboard import Switchboard
 
 # As a library, do not configure sinks or emit logs by default.
 # Applications can opt in explicitly.
-_LOG_NAMESPACE = "azure_switchboard"
-_logger.disable(_LOG_NAMESPACE)
+_logger.disable("azure_switchboard")
 
 
 __all__ = [
