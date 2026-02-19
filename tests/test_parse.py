@@ -151,7 +151,7 @@ class TestSwitchboardParse:
         """Test that an invalid model raises SwitchboardError."""
         with pytest.raises(
             SwitchboardError,
-            match="No eligible deployments available for invalid-model",
+            match="No deployments available for invalid-model",
         ):
             await switchboard.parse(
                 model="invalid-model",

@@ -155,7 +155,20 @@ class Switchboard:
         ]
 
         if not eligible_deployments:
-            raise SwitchboardError(f"No eligible deployments available for {model}")
+            # No healthy deployments — fall back to any deployment that supports
+            # this model (even if cooling down) rather than failing immediately.
+            # This prevents cascade failures when a single deployment has a
+            # transient error: without fallback, the 10s cooldown would reject
+            # every request, turning one failure into dozens.
+            fallback_deployments = [
+                d for d in self.deployments.values() if model in d.models
+            ]
+            if not fallback_deployments:
+                raise SwitchboardError(f"No deployments available for {model}")
+            logger.warning(
+                f"No healthy deployments for {model}, using best-effort fallback"
+            )
+            eligible_deployments = fallback_deployments
 
         # Record healthy deployments count metric
         healthy_deployments_gauge.set(len(eligible_deployments), {"model": model})

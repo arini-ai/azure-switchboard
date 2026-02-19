@@ -79,22 +79,21 @@ class TestSwitchboard:
         assert mock_client["azure"].call_count == 3
         host_2 = mock_client["azure"].calls.last.request.url.host
 
-        # Mark last deployment as unhealthy
+        # Mark last deployment as unhealthy — all three are now down.
+        # Switchboard falls back to an unhealthy deployment rather than failing.
         deployments[2].models["gpt-4o-mini"].mark_down()
-        with pytest.raises(
-            SwitchboardError, match="No eligible deployments available for gpt-4o-mini"
-        ):
-            await switchboard.create(**COMPLETION_PARAMS)
-        assert mock_client["azure"].call_count == 3
+        response = await switchboard.create(**COMPLETION_PARAMS)
+        assert response == COMPLETION_RESPONSE
+        assert mock_client["azure"].call_count == 4
 
         # Restore first deployment
         deployments[0].models["gpt-4o-mini"].mark_up()
         response = await switchboard.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
-        assert mock_client["azure"].call_count == 4
-        host_3 = mock_client["azure"].calls.last.request.url.host
+        assert mock_client["azure"].call_count == 5
+        host_4 = mock_client["azure"].calls.last.request.url.host
 
-        assert len(set([host_0, host_1, host_2, host_3])) > 1
+        assert len(set([host_0, host_1, host_2, host_4])) > 1
 
     async def test_session_stickiness(self, switchboard: Switchboard) -> None:
         """Test session stickiness and failover."""
@@ -200,13 +199,11 @@ class TestSwitchboard:
         response = await switchboard.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
 
-        # make both unhealthy, verify it throws
+        # make both unhealthy — switchboard falls back to an unhealthy deployment
         switchboard.deployments["test1"].models["gpt-4o-mini"].mark_down()
         switchboard.deployments["openai"].models["gpt-4o-mini"].mark_down()
-        with pytest.raises(
-            SwitchboardError, match="No eligible deployments available for gpt-4o-mini"
-        ):
-            await switchboard.create(**COMPLETION_PARAMS)
+        response = await switchboard.create(**COMPLETION_PARAMS)
+        assert response == COMPLETION_RESPONSE
 
     def _within_bounds(self, val, min, max, tolerance=0.05):
         """Check if a value is within bounds, accounting for tolerance."""
@@ -356,7 +353,7 @@ class TestSwitchboard:
 
         with pytest.raises(
             SwitchboardError,
-            match="No eligible deployments available for invalid-model",
+            match="No deployments available for invalid-model",
         ):
             await switchboard.create(model="invalid-model", messages=[])
 
@@ -384,19 +381,20 @@ class TestSwitchboard:
         assert response == COMPLETION_RESPONSE
         assert mock_client["openai"].call_count == 1
 
-    async def test_all_deployments_unhealthy(self):
-        """Test error when all deployments are unhealthy."""
+    @pytest.mark.mock_models("gpt-4o-mini")
+    async def test_all_deployments_unhealthy_falls_back(
+        self, mock_client: respx.MockRouter
+    ):
+        """When all deployments are unhealthy, switchboard falls back rather than failing."""
         switchboard = Switchboard(deployments=[azure_config("test1")])
 
         # Mark the deployment as unhealthy
         switchboard.deployments["test1"].models["gpt-4o-mini"].mark_down()
 
-        # This should raise an error
-        with pytest.raises(
-            SwitchboardError,
-            match="No eligible deployments available for gpt-4o-mini",
-        ):
-            await switchboard.create(**COMPLETION_PARAMS)
+        # Should fall back to the unhealthy deployment and succeed
+        response = await switchboard.create(**COMPLETION_PARAMS)
+        assert response == COMPLETION_RESPONSE
+        assert mock_client["azure"].call_count == 1
 
     async def test_duplicate_deployment_names(self):
         """Test that duplicate deployment names raise an error."""
