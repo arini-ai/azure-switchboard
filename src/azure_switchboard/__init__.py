@@ -1,4 +1,5 @@
 from loguru import logger as _logger
+from openai.types.chat import ParsedChatCompletion
 
 from .deployment import Deployment
 from .exceptions import SwitchboardError
@@ -13,6 +14,7 @@ _logger.disable("azure_switchboard")
 __all__ = [
     "Deployment",
     "Model",
+    "ParsedChatCompletion",
     "SwitchboardError",
     "Switchboard",
 ]

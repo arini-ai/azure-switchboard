@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from typing import Literal, cast, overload
+from typing import Literal, TypeVar, cast, overload
 
 import wrapt
 from loguru import logger
 from openai import AsyncOpenAI, AsyncStream, RateLimitError
-from openai.types.chat import ChatCompletion, ChatCompletionChunk
+from openai.types.chat import ChatCompletion, ChatCompletionChunk, ParsedChatCompletion
 from openai.types.completion_usage import CompletionUsage
 from opentelemetry import trace
 from pydantic import BaseModel, Field
@@ -15,6 +15,8 @@ from azure_switchboard.model import UtilStats
 
 from .exceptions import SwitchboardError
 from .model import Model
+
+_T = TypeVar("_T", bound=BaseModel)
 
 
 class Deployment(BaseModel, arbitrary_types_allowed=True):
@@ -165,6 +167,48 @@ class DeploymentState:
             logger.exception("Marking down model for chat completion error")
             self.models[model].mark_down()
             raise RuntimeError("Error in deployment chat completion") from e
+
+    async def parse(
+        self,
+        *,
+        model: str,
+        response_format: type[_T],
+        **kwargs,
+    ) -> ParsedChatCompletion[_T]:
+        """
+        Send a structured output parse request to this client.
+        Tracks usage metrics for load balancing.
+        """
+
+        if model not in self.models:
+            raise SwitchboardError(f"{model} not configured for deployment")
+
+        _preflight_estimate = self._estimate_token_usage(kwargs)
+        self.models[model].spend_tokens(_preflight_estimate)
+        self.models[model].spend_request()
+
+        kwargs["timeout"] = kwargs.get("timeout", self.config.timeout)
+        try:
+            logger.trace("Creating parsed completion")
+            response = await self.client.beta.chat.completions.parse(
+                model=model, response_format=response_format, **kwargs
+            )
+
+            if response.usage:
+                self.models[model].spend_tokens(
+                    response.usage.total_tokens - _preflight_estimate
+                )
+                self._set_span_attributes(response.usage)
+
+            return response
+        except RateLimitError as e:
+            logger.warning("Hit rate limits")
+            self.models[model].mark_down()
+            raise SwitchboardError("Rate limit exceeded in deployment parse") from e
+        except Exception as e:
+            logger.exception("Marking down model for parse error")
+            self.models[model].mark_down()
+            raise RuntimeError("Error in deployment parse") from e
 
     def _estimate_token_usage(self, kwargs: dict) -> int:
         # loose estimate of token cost. were only considering
