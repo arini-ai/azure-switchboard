@@ -21,14 +21,14 @@ lint:
     - black
     - isort
   enabled:
-    - actionlint@1.7.10
-    - checkov@3.2.500
+    - actionlint@1.7.11
+    - checkov@3.2.504
     - git-diff-check
     - markdownlint@0.47.0
     - prettier@3.8.1
-    - ruff@0.15.0
+    - ruff@0.15.1
     - taplo@0.10.0
-    - trufflehog@3.93.1
+    - trufflehog@3.93.3
     - yamllint@1.38.0
 actions:
   disabled:
