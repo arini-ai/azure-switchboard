@@ -4,13 +4,15 @@ from unittest.mock import AsyncMock
 import pytest
 import respx
 from openai import AsyncStream
-from openai.types.chat import ChatCompletion, ChatCompletionChunk
+from openai.types.chat import ChatCompletion, ChatCompletionChunk, ParsedChatCompletion
 from openai.types.chat.chat_completion_chunk import Choice, ChoiceDelta
+from openai.types.chat.parsed_chat_completion import ParsedChoice, ParsedChatCompletionMessage
 from openai.types.completion_usage import (
     CompletionTokensDetails,
     CompletionUsage,
     PromptTokensDetails,
 )
+from pydantic import BaseModel as PydanticBaseModel
 
 from azure_switchboard import (
     Deployment,
@@ -211,3 +213,42 @@ COMPLETION_RESPONSE_JSON = {
 }
 
 COMPLETION_RESPONSE = ChatCompletion.model_validate(COMPLETION_RESPONSE_JSON)
+
+
+class WeatherResult(PydanticBaseModel):
+    """Test Pydantic model for structured outputs."""
+    city: str
+    temperature: float
+    unit: str
+
+PARSED_COMPLETION_PARAMS = {
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "What is the weather in Paris?"}],
+    "response_format": WeatherResult,
+}
+
+PARSED_RESPONSE = ParsedChatCompletion[WeatherResult](
+    id="chatcmpl-parsed-test",
+    choices=[
+        ParsedChoice[WeatherResult](
+            finish_reason="stop",
+            index=0,
+            message=ParsedChatCompletionMessage[WeatherResult](
+                content='{"city": "Paris", "temperature": 18.5, "unit": "celsius"}',
+                role="assistant",
+                parsed=WeatherResult(city="Paris", temperature=18.5, unit="celsius"),
+                refusal=None,
+            ),
+        )
+    ],
+    created=1741124380,
+    model="gpt-4o-mini",
+    object="chat.completion",
+    usage=CompletionUsage(
+        completion_tokens=15,
+        prompt_tokens=12,
+        total_tokens=27,
+        completion_tokens_details=CompletionTokensDetails(reasoning_tokens=0),
+        prompt_tokens_details=PromptTokensDetails(cached_tokens=0),
+    ),
+)
