@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import random
 from collections import OrderedDict
-from typing import Callable, Literal, Sequence, overload
+from typing import Callable, Literal, Sequence, TypeVar, overload
 
 from loguru import logger
 from openai import AsyncStream
-from openai.types.chat import ChatCompletion, ChatCompletionChunk
+from openai.types.chat import ChatCompletion, ChatCompletionChunk, ParsedChatCompletion
 from opentelemetry import metrics
+from pydantic import BaseModel
 from tenacity import (
     AsyncRetrying,
     retry_if_not_exception_type,
@@ -22,6 +23,8 @@ from .deployment import (
     DeploymentState,
 )
 from .exceptions import SwitchboardError
+
+_T = TypeVar("_T", bound=BaseModel)
 
 meter = metrics.get_meter("azure_switchboard.switchboard")
 deployment_util = meter.create_gauge(
@@ -200,6 +203,35 @@ class Switchboard:
                         logger.trace("Sending completion request")
                         response = await deployment.create(
                             model=model, stream=stream, **kwargs
+                        )
+                    request_counter.add(
+                        1, {"model": model, "deployment": deployment.name}
+                    )
+                    return response
+
+    async def parse(
+        self,
+        *,
+        model: str,
+        response_format: type[_T],
+        session_id: str | None = None,
+        **kwargs,
+    ) -> ParsedChatCompletion[_T]:
+        """
+        Send a structured output parse request to the selected deployment, with automatic failover.
+        """
+        with logger.contextualize(model=model, session_id=session_id):
+            async for attempt in self.failover_policy:
+                with attempt:
+                    deployment = self.select_deployment(
+                        model=model, session_id=session_id
+                    )
+                    with logger.contextualize(deployment=deployment.name):
+                        logger.trace("Sending parse request")
+                        response = await deployment.parse(
+                            model=model,
+                            response_format=response_format,
+                            **kwargs,
                         )
                     request_counter.add(
                         1, {"model": model, "deployment": deployment.name}
