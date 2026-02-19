@@ -6,7 +6,10 @@ import respx
 from openai import AsyncStream
 from openai.types.chat import ChatCompletion, ChatCompletionChunk, ParsedChatCompletion
 from openai.types.chat.chat_completion_chunk import Choice, ChoiceDelta
-from openai.types.chat.parsed_chat_completion import ParsedChoice, ParsedChatCompletionMessage
+from openai.types.chat.parsed_chat_completion import (
+    ParsedChoice,
+    ParsedChatCompletionMessage,
+)
 from openai.types.completion_usage import (
     CompletionTokensDetails,
     CompletionUsage,
@@ -217,9 +220,11 @@ COMPLETION_RESPONSE = ChatCompletion.model_validate(COMPLETION_RESPONSE_JSON)
 
 class WeatherResult(PydanticBaseModel):
     """Test Pydantic model for structured outputs."""
+
     city: str
     temperature: float
     unit: str
+
 
 PARSED_COMPLETION_PARAMS = {
     "model": "gpt-4o-mini",
