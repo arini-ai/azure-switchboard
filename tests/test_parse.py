@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import Request, Response
-from openai import RateLimitError
+from openai import APIConnectionError, RateLimitError
 
 from azure_switchboard import Switchboard, SwitchboardError
 from azure_switchboard.deployment import DeploymentState
@@ -82,14 +82,36 @@ class TestDeploymentParse:
 
             assert not deployment.model("gpt-4o-mini").is_healthy()
 
-    async def test_parse_exception_marks_down(self, deployment: DeploymentState):
-        """Test that generic exceptions mark model down and raise RuntimeError."""
+    async def test_parse_generic_exception_does_not_mark_down(
+        self, deployment: DeploymentState
+    ):
+        """Test that generic exceptions do NOT mark model down — only network/rate-limit errors do."""
         with patch.object(
             deployment.client.beta.chat.completions,
             "parse",
             new=AsyncMock(side_effect=Exception("upstream error")),
         ):
-            with pytest.raises(RuntimeError, match="Error in deployment parse"):
+            with pytest.raises(Exception, match="upstream error"):
+                await deployment.parse(**PARSED_COMPLETION_PARAMS)
+
+            assert deployment.model("gpt-4o-mini").is_healthy()
+
+    async def test_parse_connection_error_marks_down(self, deployment: DeploymentState):
+        """Test that APIConnectionError marks model down and raises RuntimeError."""
+        connection_error = APIConnectionError(
+            request=Request(
+                "POST",
+                "https://test.openai.azure.com/openai/v1/chat/completions",
+            )
+        )
+        with patch.object(
+            deployment.client.beta.chat.completions,
+            "parse",
+            new=AsyncMock(side_effect=connection_error),
+        ):
+            with pytest.raises(
+                RuntimeError, match="Connection error in deployment parse"
+            ):
                 await deployment.parse(**PARSED_COMPLETION_PARAMS)
 
             assert not deployment.model("gpt-4o-mini").is_healthy()

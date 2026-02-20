@@ -5,7 +5,7 @@ from typing import Literal, TypeVar, cast, overload
 
 import wrapt
 from loguru import logger
-from openai import AsyncOpenAI, AsyncStream, RateLimitError
+from openai import APIConnectionError, AsyncOpenAI, AsyncStream, RateLimitError
 from openai.types.chat import ChatCompletion, ChatCompletionChunk, ParsedChatCompletion
 from openai.types.completion_usage import CompletionUsage
 from opentelemetry import trace
@@ -163,10 +163,10 @@ class DeploymentState:
             raise SwitchboardError(
                 "Rate limit exceeded in deployment chat completion"
             ) from e
-        except Exception as e:
-            logger.exception("Marking down model for chat completion error")
+        except APIConnectionError as e:
+            logger.exception("Marking down model for connection error")
             self.models[model].mark_down()
-            raise RuntimeError("Error in deployment chat completion") from e
+            raise RuntimeError("Connection error in deployment chat completion") from e
 
     async def parse(
         self,
@@ -205,10 +205,10 @@ class DeploymentState:
             logger.warning("Hit rate limits")
             self.models[model].mark_down()
             raise SwitchboardError("Rate limit exceeded in deployment parse") from e
-        except Exception as e:
-            logger.exception("Marking down model for parse error")
+        except APIConnectionError as e:
+            logger.exception("Marking down model for connection error")
             self.models[model].mark_down()
-            raise RuntimeError("Error in deployment parse") from e
+            raise RuntimeError("Connection error in deployment parse") from e
 
     def _estimate_token_usage(self, kwargs: dict) -> int:
         # loose estimate of token cost. were only considering
@@ -267,9 +267,11 @@ class _AsyncStreamWrapper(wrapt.ObjectProxy):
                     self._self_deployment._set_span_attributes(chunk.usage)
 
                 yield chunk
-        except Exception as e:
-            self._self_logger.exception("Marking down model for wrapped stream error")
+        except RateLimitError as e:
+            self._self_logger.warning("Hit rate limits in wrapped stream")
             self._self_model.mark_down()
-            if isinstance(e, RateLimitError):
-                raise SwitchboardError("Rate limit exceeded in wrapped stream") from e
-            raise RuntimeError("Error in wrapped stream") from e
+            raise SwitchboardError("Rate limit exceeded in wrapped stream") from e
+        except APIConnectionError as e:
+            self._self_logger.exception("Marking down model for wrapped stream connection error")
+            self._self_model.mark_down()
+            raise RuntimeError("Connection error in wrapped stream") from e
