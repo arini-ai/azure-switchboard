@@ -4,8 +4,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import respx
 from httpx import Request, Response, TimeoutException
-from loguru import logger as _logger
-from openai import RateLimitError
+from openai import APIConnectionError, RateLimitError
 
 from azure_switchboard import SwitchboardError
 from azure_switchboard.deployment import DeploymentState
@@ -87,11 +86,16 @@ class TestDeployment:
             assert "20/" in usage.tpm
             assert "1/" in usage.rpm
 
-        # verify exception handling
+        # verify connection error handling marks down
+        connection_error = APIConnectionError(
+            request=Request(
+                "POST", "https://test.openai.azure.com/openai/v1/chat/completions"
+            )
+        )
         with patch.object(
             deployment.client.chat.completions,
             "create",
-            side_effect=Exception("test"),
+            side_effect=connection_error,
         ) as mock:
             with pytest.raises(RuntimeError):
                 stream = await deployment.create(stream=True, **COMPLETION_PARAMS)
@@ -103,7 +107,10 @@ class TestDeployment:
             assert "23/" in usage.tpm
             assert "2/" in usage.rpm
 
-        # Test midstream exception handling
+        # Reset from previous connection error test
+        deployment.model("gpt-4o-mini").mark_up()
+
+        # Test midstream exception handling — generic exceptions do NOT mark down
         with patch.object(
             deployment.client.chat.completions,
             "create",
@@ -111,31 +118,41 @@ class TestDeployment:
         ) as mock:
             stream = await deployment.create(stream=True, **COMPLETION_PARAMS)
 
-            records: list[dict] = []
-            sink_id = _logger.add(lambda m: records.append(m.record))
-            _logger.enable("azure_switchboard")
-            try:
-                with patch.object(
-                    stream._self_model,  # type: ignore[reportAttributeAccessIssue]
-                    "spend_tokens",
-                    side_effect=Exception("asyncstream error"),
-                ):
-                    with pytest.raises(RuntimeError, match="Error in wrapped stream"):
-                        await collect_chunks(stream)
-                    assert mock.call_count == 1
-                    assert not deployment.model("gpt-4o-mini").is_healthy()
-                    assert any(
-                        r["message"] == "Marking down model for wrapped stream error"
-                        and r["extra"].get("deployment") == deployment.name
-                        and r["extra"].get("model") == "gpt-4o-mini"
-                        for r in records
-                    )
-
-                deployment.model("gpt-4o-mini").mark_up()
+            with patch.object(
+                stream._self_model,  # type: ignore[reportAttributeAccessIssue]
+                "spend_tokens",
+                side_effect=Exception("asyncstream error"),
+            ):
+                with pytest.raises(Exception, match="asyncstream error"):
+                    await collect_chunks(stream)
+                assert mock.call_count == 1
                 assert deployment.model("gpt-4o-mini").is_healthy()
-            finally:
-                _logger.remove(sink_id)
-                _logger.disable("azure_switchboard")
+
+        # Test midstream connection error marks down
+        connection_error = APIConnectionError(
+            request=Request(
+                "POST", "https://test.openai.azure.com/openai/v1/chat/completions"
+            )
+        )
+
+        async def connection_error_stream():
+            yield COMPLETION_STREAM_CHUNKS[0]
+            raise connection_error
+
+        with patch.object(
+            deployment.client.chat.completions,
+            "create",
+            new=AsyncMock(return_value=connection_error_stream()),
+        ) as mock:
+            stream = await deployment.create(stream=True, **COMPLETION_PARAMS)
+            with pytest.raises(
+                RuntimeError, match="Connection error in wrapped stream"
+            ):
+                await collect_chunks(stream)
+            assert mock.call_count == 1
+            assert not deployment.model("gpt-4o-mini").is_healthy()
+
+        deployment.model("gpt-4o-mini").mark_up()
 
         # Test midstream rate limit handling
         rate_limit_error = RateLimitError(
