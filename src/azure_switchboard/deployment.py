@@ -33,7 +33,6 @@ class DeploymentConfig:
     api_key: str | None = None
     timeout: float = 600.0
     models: list[Model] = field(default_factory=list)
-    client: AsyncOpenAI | None = None
 
     def get_client(self) -> AsyncOpenAI:
         return AsyncOpenAI(
