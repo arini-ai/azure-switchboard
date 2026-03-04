@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from typing import Literal, TypeVar, cast, overload
 
 import wrapt
 from loguru import logger
 from openai import APIConnectionError, AsyncOpenAI, AsyncStream, RateLimitError
-from openai.types.chat import ChatCompletion, ChatCompletionChunk, ParsedChatCompletion
+from openai.types.chat import (
+    ChatCompletion,
+    ChatCompletionChunk,
+    ParsedChatCompletion,
+)
 from openai.types.completion_usage import CompletionUsage
 from opentelemetry import trace
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from azure_switchboard.model import UtilStats
 
@@ -19,34 +24,15 @@ from .model import Model
 _T = TypeVar("_T", bound=BaseModel)
 
 
-class Deployment(BaseModel, arbitrary_types_allowed=True):
+@dataclass
+class DeploymentConfig:
     """Configuration for an Azure OpenAI or OpenAI deployment."""
 
     name: str
     base_url: str | None = None
     api_key: str | None = None
     timeout: float = 600.0
-    models: list[Model] = Field(
-        default_factory=lambda: [
-            Model(name="gpt-4o"),
-            Model(name="gpt-4o-mini"),
-            Model(name="gpt-4.1"),
-            Model(name="gpt-4.1-mini"),
-            Model(name="gpt-4.1-nano"),
-            Model(name="gpt-5"),
-            Model(name="gpt-5-mini"),
-            Model(name="gpt-5-nano"),
-            Model(name="gpt-5-chat"),
-            Model(name="gpt-5.1"),
-            Model(name="gpt-5.1-mini"),
-            Model(name="gpt-5.1-nano"),
-            Model(name="gpt-5.1-chat"),  # OpenAI calls this gpt-5.1-chat-latest
-            Model(name="gpt-5.2"),
-            Model(name="gpt-5.2-mini"),
-            Model(name="gpt-5.2-nano"),
-            Model(name="gpt-5.2-chat"),  # OpenAI calls this gpt-5.2-chat-latest
-        ]
-    )
+    models: list[Model] = field(default_factory=list)
     client: AsyncOpenAI | None = None
 
     def get_client(self) -> AsyncOpenAI:
@@ -57,12 +43,12 @@ class Deployment(BaseModel, arbitrary_types_allowed=True):
         )
 
 
-class DeploymentState:
+class Deployment:
     """Runtime state of a deployment"""
 
     def __init__(
         self,
-        config: Deployment,
+        config: DeploymentConfig,
     ) -> None:
         self.config = config
         self.client = config.get_client()
@@ -121,7 +107,6 @@ class DeploymentState:
         self.models[model].spend_tokens(_preflight_estimate)
         self.models[model].spend_request()
 
-        kwargs["timeout"] = kwargs.get("timeout", self.config.timeout)
         try:
             if stream:
                 logger.trace("Creating streaming completion")
@@ -142,31 +127,28 @@ class DeploymentState:
                     offset=_preflight_estimate,
                 )
 
-            else:
-                logger.trace("Creating chat completion")
-                response = await self.client.chat.completions.create(
-                    model=model, **kwargs
+            logger.trace("Creating chat completion")
+            response = cast(
+                ChatCompletion,
+                await self.client.chat.completions.create(
+                    model=model,
+                    **kwargs,
+                ),
+            )
+
+            if response.usage:
+                # dont double-count our preflight estimate
+                self.models[model].spend_tokens(
+                    response.usage.total_tokens - _preflight_estimate
                 )
-                response = cast(ChatCompletion, response)
+                self._set_span_attributes(response.usage)
 
-                if response.usage:
-                    self.models[model].spend_tokens(
-                        # dont double-count our preflight estimate
-                        response.usage.total_tokens - _preflight_estimate
-                    )
-                    self._set_span_attributes(response.usage)
+            return response
 
-                return response
-        except RateLimitError as e:
-            logger.warning("Hit rate limits")
+        except (RateLimitError, APIConnectionError):
+            logger.exception("Marking down model for completion error")
             self.models[model].mark_down()
-            raise SwitchboardError(
-                "Rate limit exceeded in deployment chat completion"
-            ) from e
-        except APIConnectionError as e:
-            logger.exception("Marking down model for connection error")
-            self.models[model].mark_down()
-            raise RuntimeError("Connection error in deployment chat completion") from e
+            raise
 
     async def parse(
         self,
@@ -187,7 +169,6 @@ class DeploymentState:
         self.models[model].spend_tokens(_preflight_estimate)
         self.models[model].spend_request()
 
-        kwargs["timeout"] = kwargs.get("timeout", self.config.timeout)
         try:
             logger.trace("Creating parsed completion")
             response = await self.client.beta.chat.completions.parse(
@@ -201,14 +182,10 @@ class DeploymentState:
                 self._set_span_attributes(response.usage)
 
             return response
-        except RateLimitError as e:
-            logger.warning("Hit rate limits")
+        except (RateLimitError, APIConnectionError):
+            logger.exception("Marking down model for parse error")
             self.models[model].mark_down()
-            raise SwitchboardError("Rate limit exceeded in deployment parse") from e
-        except APIConnectionError as e:
-            logger.exception("Marking down model for connection error")
-            self.models[model].mark_down()
-            raise RuntimeError("Connection error in deployment parse") from e
+            raise
 
     def _estimate_token_usage(self, kwargs: dict) -> int:
         # loose estimate of token cost. were only considering
@@ -237,12 +214,12 @@ class _AsyncStreamWrapper(wrapt.ObjectProxy):
     def __init__(
         self,
         stream: AsyncStream[ChatCompletionChunk],
-        deployment: DeploymentState,
+        deployment: Deployment,
         model: Model,
         offset: int = 0,
     ):
         super().__init__(stream)
-        self._self_deployment: DeploymentState = deployment
+        self._self_deployment: Deployment = deployment
         self._self_model: Model = model
         self._self_offset: int = offset
         # Stream chunks are consumed after Switchboard.create() returns, so the
@@ -267,11 +244,7 @@ class _AsyncStreamWrapper(wrapt.ObjectProxy):
                     self._self_deployment._set_span_attributes(chunk.usage)
 
                 yield chunk
-        except RateLimitError as e:
-            self._self_logger.warning("Hit rate limits in wrapped stream")
+        except (RateLimitError, APIConnectionError):
+            self._self_logger.exception("Marking down model for streaming error")
             self._self_model.mark_down()
-            raise SwitchboardError("Rate limit exceeded in wrapped stream") from e
-        except APIConnectionError as e:
-            self._self_logger.exception("Marking down model for wrapped stream connection error")
-            self._self_model.mark_down()
-            raise RuntimeError("Connection error in wrapped stream") from e
+            raise
