@@ -18,11 +18,11 @@ from openai.types.completion_usage import (
 from pydantic import BaseModel as PydanticBaseModel
 
 from azure_switchboard import (
-    Deployment,
+    DeploymentConfig,
     Model,
     Switchboard,
 )
-from azure_switchboard.deployment import DeploymentState
+from azure_switchboard.deployment import Deployment
 
 
 async def collect_chunks(
@@ -38,17 +38,17 @@ async def collect_chunks(
     return received_chunks, content
 
 
-def openai_config(name: str = "openai") -> Deployment:
+def openai_config(name: str = "openai") -> DeploymentConfig:
     """Create an OpenAI deployment config for testing."""
-    return Deployment(
+    return DeploymentConfig(
         name=name,
         api_key="test",
         models=[Model(name="gpt-4o-mini"), Model(name="gpt-4o")],
     )
 
 
-def azure_config(name: str) -> Deployment:
-    return Deployment(
+def azure_config(name: str) -> DeploymentConfig:
+    return DeploymentConfig(
         name=name,
         base_url=f"https://{name}.openai.azure.com/openai/v1/",
         api_key=name,
@@ -97,7 +97,7 @@ def model():
 
 @pytest.fixture
 def deployment():
-    return DeploymentState(azure_config("test1"))
+    return Deployment(azure_config("test1"))
 
 
 @pytest.fixture

@@ -4,7 +4,7 @@ from unittest.mock import patch
 import pytest
 import respx
 
-from azure_switchboard import Deployment, Model, Switchboard, SwitchboardError
+from azure_switchboard import DeploymentConfig, Model, Switchboard, SwitchboardError
 
 from .conftest import (
     COMPLETION_PARAMS,
@@ -40,7 +40,7 @@ class TestSwitchboard:
     async def test_streaming(self, switchboard: Switchboard):
         """Test streaming through switchboard."""
 
-        with patch("azure_switchboard.deployment.DeploymentState.create") as mock:
+        with patch("azure_switchboard.deployment.Deployment.create") as mock:
             mock.side_effect = chat_completion_mock()
             stream = await switchboard.create(stream=True, **COMPLETION_PARAMS)
             _, content = await collect_chunks(stream)
@@ -116,13 +116,13 @@ class TestSwitchboard:
         """Session fallback should handle model-missing deployments without KeyError."""
         switchboard = Switchboard(
             deployments=[
-                Deployment(
+                DeploymentConfig(
                     name="mini-only",
                     base_url="https://mini-only.openai.azure.com/openai/v1/",
                     api_key="mini-only",
                     models=[Model(name="gpt-4o-mini", tpm=1000, rpm=6)],
                 ),
-                Deployment(
+                DeploymentConfig(
                     name="full-only",
                     base_url="https://full-only.openai.azure.com/openai/v1/",
                     api_key="full-only",

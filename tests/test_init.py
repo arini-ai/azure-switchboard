@@ -1,7 +1,7 @@
 import azure_switchboard
 from loguru import logger as _logger
 
-from azure_switchboard import Deployment, Model, Switchboard
+from azure_switchboard import DeploymentConfig, Model, Switchboard
 
 
 class TestInit:
@@ -14,13 +14,13 @@ class TestInit:
         sink_id = _logger.add(lambda m: records.append(m.record))
         switchboard = Switchboard(
             deployments=[
-                Deployment(
+                DeploymentConfig(
                     name="mini-only",
                     base_url="https://mini-only.openai.azure.com/openai/v1/",
                     api_key="mini-only",
                     models=[Model(name="gpt-4o-mini", tpm=1000, rpm=6)],
                 ),
-                Deployment(
+                DeploymentConfig(
                     name="full-only",
                     base_url="https://full-only.openai.azure.com/openai/v1/",
                     api_key="full-only",

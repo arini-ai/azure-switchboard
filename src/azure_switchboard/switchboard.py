@@ -19,8 +19,8 @@ from tenacity import (
 from azure_switchboard.model import UtilStats
 
 from .deployment import (
+    DeploymentConfig,
     Deployment,
-    DeploymentState,
 )
 from .exceptions import SwitchboardError
 
@@ -49,7 +49,7 @@ request_counter = meter.create_counter(
 )
 
 
-def two_random_choices(model: str, options: list[DeploymentState]) -> DeploymentState:
+def two_random_choices(model: str, options: list[Deployment]) -> Deployment:
     """Power of two random choices algorithm.
 
     Randomly select 2 deployments and return the one
@@ -69,9 +69,9 @@ DEFAULT_FAILOVER_POLICY = AsyncRetrying(
 class Switchboard:
     def __init__(
         self,
-        deployments: Sequence[Deployment],
+        deployments: Sequence[DeploymentConfig],
         selector: Callable[
-            [str, list[DeploymentState]], DeploymentState
+            [str, list[Deployment]], Deployment
         ] = two_random_choices,
         failover_policy: AsyncRetrying = DEFAULT_FAILOVER_POLICY,
         ratelimit_window: float = 60.0,
@@ -80,11 +80,11 @@ class Switchboard:
         if not deployments:
             raise SwitchboardError("No deployments provided")
 
-        self.deployments: dict[str, DeploymentState] = {}
+        self.deployments: dict[str, Deployment] = {}
         for deployment in deployments:
             if deployment.name in self.deployments:
                 raise SwitchboardError(f"Duplicate deployment name: {deployment.name}")
-            self.deployments[deployment.name] = DeploymentState(deployment)
+            self.deployments[deployment.name] = Deployment(deployment)
 
         self.selector = selector
         self.failover_policy = failover_policy
@@ -133,7 +133,7 @@ class Switchboard:
 
     def select_deployment(
         self, *, model: str, session_id: str | None = None
-    ) -> DeploymentState:
+    ) -> Deployment:
         """
         Select a deployment using the power of two random choices algorithm.
         If session_id is provided, try to use that specific deployment first.
@@ -263,7 +263,7 @@ class _LRUDict(OrderedDict):
 
         super().__init__(*args, **kwargs)
 
-    def __setitem__(self, key: str, value: DeploymentState) -> None:
+    def __setitem__(self, key: str, value: Deployment) -> None:
         super().__setitem__(key, value)
         super().move_to_end(key)
 
@@ -271,7 +271,7 @@ class _LRUDict(OrderedDict):
             oldkey = next(iter(self))
             super().__delitem__(oldkey)
 
-    def __getitem__(self, key: str) -> DeploymentState:
+    def __getitem__(self, key: str) -> Deployment:
         val = super().__getitem__(key)
         super().move_to_end(key)
 
