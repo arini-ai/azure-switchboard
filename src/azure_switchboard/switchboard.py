@@ -207,7 +207,7 @@ class Switchboard:
         Send a chat completion request to the selected deployment, with automatic failover.
         """
         with logger.contextualize(model=model, session_id=session_id):
-            async for attempt in self.failover_policy:
+            async for attempt in self.failover_policy.copy():
                 with attempt:
                     deployment = self.select_deployment(
                         model=model, session_id=session_id
@@ -234,7 +234,7 @@ class Switchboard:
         Send a structured output parse request to the selected deployment, with automatic failover.
         """
         with logger.contextualize(model=model, session_id=session_id):
-            async for attempt in self.failover_policy:
+            async for attempt in self.failover_policy.copy():
                 with attempt:
                     deployment = self.select_deployment(
                         model=model, session_id=session_id
