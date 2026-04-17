@@ -240,7 +240,7 @@ Distribution overhead scales ~linearly with the number of deployments.
 `azure-switchboard` distinguishes between two categories of API errors:
 
 - **`RateLimitError` / `APIConnectionError`**: These are correlated with the specific deployment — the deployment is saturated or unreachable. The affected model is marked down with the configured `default_cooldown` (default 10s) so the load balancer avoids it.
-- **`APITimeoutError`**: Timeouts during an upstream-wide slowdown are *not* correlated with any particular deployment. Marking a deployment down in this case wastes capacity without providing a fix — every deployment would cycle through cooldown in rotation. Timeouts are re-raised without triggering a cooldown.
+- **`APITimeoutError`**: Timeouts during an upstream-wide slowdown are _not_ correlated with any particular deployment. Marking a deployment down in this case wastes capacity without providing a fix — every deployment would cycle through cooldown in rotation. Timeouts are re-raised without triggering a cooldown.
 
 If your workload has a longer latency budget (e.g. batch structured-output jobs), set `timeout` on the relevant `DeploymentConfig` rather than relying on the default.
 
