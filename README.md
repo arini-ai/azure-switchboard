@@ -232,8 +232,17 @@ Distribution overhead scales ~linearly with the number of deployments.
 | `name`     | Unique identifier for the deployment                                                                 | Required                     |
 | `base_url` | API base URL. Azure example: `https://<resource>.openai.azure.com/openai/v1/`. OpenAI: leave `None`. | None                         |
 | `api_key`  | API key for the deployment                                                                           | None                         |
-| `timeout`  | Default request timeout (seconds)                                                                    | 600.0                        |
+| `timeout`  | Per-request timeout in seconds. Override per deployment for batch jobs that need longer budgets.     | 30.0                         |
 | `models`   | Models available on this deployment                                                                  | Built-in model name defaults |
+
+### Timeout vs. Rate-Limit Cooldown
+
+`azure-switchboard` distinguishes between two categories of API errors:
+
+- **`RateLimitError` / `APIConnectionError`**: These are correlated with the specific deployment — the deployment is saturated or unreachable. The affected model is marked down with the configured `default_cooldown` (default 10s) so the load balancer avoids it.
+- **`APITimeoutError`**: Timeouts during an upstream-wide slowdown are *not* correlated with any particular deployment. Marking a deployment down in this case wastes capacity without providing a fix — every deployment would cycle through cooldown in rotation. Timeouts are re-raised without triggering a cooldown.
+
+If your workload has a longer latency budget (e.g. batch structured-output jobs), set `timeout` on the relevant `DeploymentConfig` rather than relying on the default.
 
 ### switchboard.Switchboard Parameters
 
