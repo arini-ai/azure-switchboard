@@ -6,7 +6,7 @@ from typing import Literal, TypeVar, cast, overload
 
 import wrapt
 from loguru import logger
-from openai import APIConnectionError, AsyncOpenAI, AsyncStream, RateLimitError
+from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, AsyncStream, RateLimitError
 from openai.types.chat import (
     ChatCompletion,
     ChatCompletionChunk,
@@ -31,7 +31,8 @@ class DeploymentConfig:
     name: str
     base_url: str | None = None
     api_key: str | None = None
-    timeout: float = 600.0
+    # 30s suits interactive workloads; override for long-running batch jobs
+    timeout: float = 30.0
     models: list[Model] = field(default_factory=list)
 
     def get_client(self) -> AsyncOpenAI:
@@ -144,8 +145,17 @@ class Deployment:
 
             return response
 
-        except (RateLimitError, APIConnectionError):
-            logger.exception("Marking down model for completion error")
+        except RateLimitError:
+            logger.exception("Marking down model for rate limit")
+            self.models[model].mark_down()
+            raise
+        except APITimeoutError:
+            # Timeouts during upstream-wide slowdowns are uncorrelated with
+            # which deployment was chosen — marking it down wastes capacity.
+            logger.warning("Upstream timeout on completion; not marking down")
+            raise
+        except APIConnectionError:
+            logger.exception("Marking down model for connection error")
             self.models[model].mark_down()
             raise
 
@@ -181,8 +191,15 @@ class Deployment:
                 self._set_span_attributes(response.usage)
 
             return response
-        except (RateLimitError, APIConnectionError):
-            logger.exception("Marking down model for parse error")
+        except RateLimitError:
+            logger.exception("Marking down model for rate limit on parse")
+            self.models[model].mark_down()
+            raise
+        except APITimeoutError:
+            logger.warning("Upstream timeout on parse; not marking down")
+            raise
+        except APIConnectionError:
+            logger.exception("Marking down model for connection error on parse")
             self.models[model].mark_down()
             raise
 
@@ -243,7 +260,14 @@ class _AsyncStreamWrapper(wrapt.ObjectProxy):
                     self._self_deployment._set_span_attributes(chunk.usage)
 
                 yield chunk
-        except (RateLimitError, APIConnectionError):
-            self._self_logger.exception("Marking down model for streaming error")
+        except RateLimitError:
+            self._self_logger.exception("Marking down model for rate limit on stream")
+            self._self_model.mark_down()
+            raise
+        except APITimeoutError:
+            self._self_logger.warning("Upstream timeout on stream; not marking down")
+            raise
+        except APIConnectionError:
+            self._self_logger.exception("Marking down model for connection error on stream")
             self._self_model.mark_down()
             raise

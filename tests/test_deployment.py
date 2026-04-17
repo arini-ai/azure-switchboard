@@ -4,10 +4,10 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import respx
 from httpx import Request, Response, TimeoutException
-from openai import APIConnectionError, RateLimitError
+from openai import APIConnectionError, APITimeoutError, RateLimitError
 
 from azure_switchboard import SwitchboardError
-from azure_switchboard.deployment import Deployment
+from azure_switchboard.deployment import Deployment, DeploymentConfig
 
 from .conftest import (
     COMPLETION_PARAMS,
@@ -320,7 +320,7 @@ class TestDeployment:
         assert response == COMPLETION_RESPONSE
         assert mock_client.routes["azure"].call_count == 3
 
-        # Test failure after max retries
+        # Test failure after max retries — timeouts do NOT mark the deployment down
         mock_client.routes["azure"].reset()
         mock_client.routes["azure"].side_effect = [
             TimeoutException("Timeout 1"),
@@ -328,10 +328,76 @@ class TestDeployment:
             TimeoutException("Timeout 3"),
         ]
 
-        with pytest.raises(APIConnectionError):
+        with pytest.raises(APITimeoutError):
             await deployment.create(**COMPLETION_PARAMS)
         assert mock_client.routes["azure"].call_count == 3
-        assert not deployment.is_healthy("gpt-4o-mini")
+        assert deployment.is_healthy("gpt-4o-mini")
+
+    async def test_timeout_does_not_mark_down(self, deployment: Deployment):
+        """APITimeoutError should not mark the deployment down."""
+
+        deployment.client.max_retries = 0
+        timeout_error = APITimeoutError(
+            request=Request(
+                "POST", "https://test.openai.azure.com/openai/v1/chat/completions"
+            )
+        )
+
+        with patch.object(
+            deployment.client.chat.completions,
+            "create",
+            side_effect=timeout_error,
+        ):
+            with pytest.raises(APITimeoutError):
+                await deployment.create(**COMPLETION_PARAMS)
+            assert deployment.model("gpt-4o-mini").is_healthy()
+
+        # Repeated timeouts should not pin utilization to 1
+        for _ in range(5):
+            with patch.object(
+                deployment.client.chat.completions,
+                "create",
+                side_effect=timeout_error,
+            ):
+                with pytest.raises(APITimeoutError):
+                    await deployment.create(**COMPLETION_PARAMS)
+
+        assert deployment.model("gpt-4o-mini").is_healthy()
+        assert deployment.model("gpt-4o-mini").util < 1
+
+    async def test_timeout_does_not_mark_down_stream(self, deployment: Deployment):
+        """Mid-stream APITimeoutError should not mark the deployment down."""
+
+        deployment.client.max_retries = 0
+        timeout_error = APITimeoutError(
+            request=Request(
+                "POST", "https://test.openai.azure.com/openai/v1/chat/completions"
+            )
+        )
+
+        async def timeout_stream():
+            yield COMPLETION_STREAM_CHUNKS[0]
+            raise timeout_error
+
+        with patch.object(
+            deployment.client.chat.completions,
+            "create",
+            new=AsyncMock(return_value=timeout_stream()),
+        ):
+            stream = await deployment.create(stream=True, **COMPLETION_PARAMS)
+            with pytest.raises(APITimeoutError):
+                await collect_chunks(stream)
+            assert deployment.model("gpt-4o-mini").is_healthy()
+
+    def test_default_timeout(self):
+        """Default per-request timeout should be 30s."""
+        config = DeploymentConfig(name="test", api_key="key")
+        assert config.timeout == 30.0
+
+    def test_custom_timeout(self):
+        """Callers that need longer timeouts can override per DeploymentConfig."""
+        config = DeploymentConfig(name="batch", api_key="key", timeout=300.0)
+        assert config.timeout == 300.0
 
     async def test_rate_limit_marks_down(self, deployment: Deployment):
         """Rate limit errors should mark the model down and re-raise."""

@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import Request, Response
-from openai import APIConnectionError, RateLimitError
+from openai import APIConnectionError, APITimeoutError, RateLimitError
 
 from azure_switchboard import Switchboard, SwitchboardError
 from azure_switchboard.deployment import Deployment
@@ -110,6 +110,24 @@ class TestDeploymentParse:
                 await deployment.parse(**PARSED_COMPLETION_PARAMS)
 
             assert not deployment.model("gpt-4o-mini").is_healthy()
+
+    async def test_parse_timeout_does_not_mark_down(self, deployment: Deployment):
+        """Test that APITimeoutError does not mark model down on parse."""
+        timeout_error = APITimeoutError(
+            request=Request(
+                "POST",
+                "https://test.openai.azure.com/openai/v1/chat/completions",
+            )
+        )
+        with patch.object(
+            deployment.client.beta.chat.completions,
+            "parse",
+            new=AsyncMock(side_effect=timeout_error),
+        ):
+            with pytest.raises(APITimeoutError):
+                await deployment.parse(**PARSED_COMPLETION_PARAMS)
+
+            assert deployment.model("gpt-4o-mini").is_healthy()
 
 
 class TestSwitchboardParse:
