@@ -16,8 +16,8 @@ uv add azure-switchboard
 
 Two deployment kinds can be mixed in a single `Switchboard`:
 
-- `OpenAIConfig` — Azure OpenAI (`base_url=.../openai/v1/`) or OpenAI (`base_url=None`), reached via `create()` / `parse()`.
-- `AnthropicConfig` — Claude on Azure AI Foundry, reached via `messages()` / `parse_messages()`.
+- `OpenAIConfig` — Azure OpenAI (`base_url=.../openai/v1/`) or OpenAI (`base_url=None`), reached via `sb.chat.completions`.
+- `AnthropicConfig` — Claude on Azure AI Foundry, reached via `sb.messages`.
 
 Utilization tracking, session affinity, failover, and selection are shared across both.
 
@@ -40,11 +40,11 @@ sb = Switchboard([
 ])
 
 async with sb:
-    completion = await sb.create(
+    completion = await sb.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Hello!"}],
     )
-    message = await sb.messages(
+    message = await sb.messages.create(
         model="claude-sonnet-5",
         max_tokens=1024,
         messages=[{"role": "user", "content": "Hello!"}],
@@ -53,7 +53,15 @@ async with sb:
 
 ## Features
 
-- **API Compatibility**: `Switchboard.create` is a transparently-typed proxy for `OpenAI.chat.completions.create`, and `Switchboard.messages` for `Anthropic.messages.create`.
+- **API Compatibility**: each surface mirrors its SDK's own call path, so you port by swapping the client and changing nothing else. Return types are exact — no unions to narrow.
+
+  | SDK call                         | Switchboard call             | Returns                   |
+  | -------------------------------- | ---------------------------- | ------------------------- |
+  | `openai.chat.completions.create` | `sb.chat.completions.create` | `ChatCompletion`          |
+  | `openai.chat.completions.parse`  | `sb.chat.completions.parse`  | `ParsedChatCompletion[T]` |
+  | `anthropic.messages.create`      | `sb.messages.create`         | `Message`                 |
+  | `anthropic.messages.parse`       | `sb.messages.parse`          | `ParsedMessage[T]`        |
+
 - **Multi-Provider**: OpenAI and Anthropic deployments coexist in one pool. Routing is keyed on model name, so a name registered against both providers is rejected at construction rather than resolving ambiguously.
 - **Coordination-Free**: The default Two Random Choices algorithm does not require coordination between client instances to achieve excellent load distribution characteristics.
 - **Utilization-Aware**: TPM/RPM utilization is tracked per model per deployment for use during selection.
@@ -128,7 +136,7 @@ async def main():
 
 async def basic_functionality(switchboard: Switchboard):
     # Make a completion request (non-streaming)
-    response = await switchboard.create(
+    response = await switchboard.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Hello, world!"}],
     )
@@ -136,7 +144,7 @@ async def basic_functionality(switchboard: Switchboard):
     print("completion:", response.choices[0].message.content)
 
     # Make a streaming completion request
-    stream = await switchboard.create(
+    stream = await switchboard.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Hello, world!"}],
         stream=True,
@@ -155,7 +163,7 @@ async def session_affinity(switchboard: Switchboard):
 
     # First message will select a random healthy
     # deployment and associate it with the session_id
-    r = await switchboard.create(
+    r = await switchboard.chat.completions.create(
         session_id=session_id,
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Who won the World Series in 2020?"}],
@@ -166,7 +174,7 @@ async def session_affinity(switchboard: Switchboard):
     print("response 1:", r.choices[0].message.content)
 
     # Follow-up requests with the same session_id will route to the same deployment
-    r2 = await switchboard.create(
+    r2 = await switchboard.chat.completions.create(
         session_id=session_id,
         model="gpt-4o-mini",
         messages=[
@@ -182,7 +190,7 @@ async def session_affinity(switchboard: Switchboard):
     d1.models["gpt-4o-mini"].mark_down()
 
     # A new deployment will be selected for this session_id
-    r3 = await switchboard.create(
+    r3 = await switchboard.chat.completions.create(
         session_id=session_id,
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Who won the World Series in 2021?"}],

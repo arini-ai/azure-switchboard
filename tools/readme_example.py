@@ -59,7 +59,7 @@ async def main():
 
 async def basic_functionality(switchboard: Switchboard):
     # Make a completion request (non-streaming)
-    response = await switchboard.create(
+    response = await switchboard.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Hello, world!"}],
     )
@@ -67,7 +67,7 @@ async def basic_functionality(switchboard: Switchboard):
     print("completion:", response.choices[0].message.content)
 
     # Make a streaming completion request
-    stream = await switchboard.create(
+    stream = await switchboard.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Hello, world!"}],
         stream=True,
@@ -86,7 +86,7 @@ async def session_affinity(switchboard: Switchboard):
 
     # First message will select a random healthy
     # deployment and associate it with the session_id
-    r = await switchboard.create(
+    r = await switchboard.chat.completions.create(
         session_id=session_id,
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Who won the World Series in 2020?"}],
@@ -97,7 +97,7 @@ async def session_affinity(switchboard: Switchboard):
     print("response 1:", r.choices[0].message.content)
 
     # Follow-up requests with the same session_id will route to the same deployment
-    r2 = await switchboard.create(
+    r2 = await switchboard.chat.completions.create(
         session_id=session_id,
         model="gpt-4o-mini",
         messages=[
@@ -113,7 +113,7 @@ async def session_affinity(switchboard: Switchboard):
     d1.models["gpt-4o-mini"].mark_down()
 
     # A new deployment will be selected for this session_id
-    r3 = await switchboard.create(
+    r3 = await switchboard.chat.completions.create(
         session_id=session_id,
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Who won the World Series in 2021?"}],

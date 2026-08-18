@@ -129,6 +129,11 @@ class Switchboard:
         # reset usage every N seconds
         self.ratelimit_window = ratelimit_window
 
+        # Each provider's surface mirrors its SDK's own call path, so callers
+        # port from either by swapping the client and changing nothing else.
+        self.chat = _Chat(self)
+        self.messages = _Messages(self)
+
     async def __aenter__(self) -> Switchboard:
         self.start()
         return self
@@ -244,6 +249,16 @@ class Switchboard:
                     )
                     return response
 
+    def __repr__(self) -> str:
+        return f"Switchboard({self.deployments})"
+
+
+class _Completions:
+    """Mirrors `openai.AsyncOpenAI.chat.completions`."""
+
+    def __init__(self, switchboard: Switchboard) -> None:
+        self._switchboard = switchboard
+
     @overload
     async def create(
         self, *, session_id: str | None = None, stream: Literal[True], **kwargs
@@ -261,11 +276,11 @@ class Switchboard:
         session_id: str | None = None,
         stream: bool = False,
         **kwargs,
-    ) -> ChatCompletion | AsyncStream[ChatCompletionChunk]:  # pyright: ignore[reportReturnType]
+    ) -> ChatCompletion | AsyncStream[ChatCompletionChunk]:
         """
         Send a chat completion request to the selected deployment, with automatic failover.
         """
-        return await self._dispatch(
+        return await self._switchboard._dispatch(
             model=model,
             session_id=session_id,
             call=lambda d: d.create(model=model, stream=stream, **kwargs),
@@ -280,9 +295,10 @@ class Switchboard:
         **kwargs,
     ) -> ParsedChatCompletion[_T]:
         """
-        Send a structured output parse request to the selected deployment, with automatic failover.
+        Send a structured output parse request to the selected deployment, with
+        automatic failover.
         """
-        return await self._dispatch(
+        return await self._switchboard._dispatch(
             model=model,
             session_id=session_id,
             call=lambda d: d.parse(
@@ -290,15 +306,34 @@ class Switchboard:
             ),
         )
 
+
+class _Chat:
+    """Mirrors `openai.AsyncOpenAI.chat`."""
+
+    def __init__(self, switchboard: Switchboard) -> None:
+        self.completions = _Completions(switchboard)
+
+
+class _Messages:
+    """The Anthropic Messages surface, mirroring `anthropic.AsyncAnthropic.messages`.
+
+    OpenAI's `chat.completions.create`/`parse` map onto `Switchboard.create`
+    and `Switchboard.parse`; this is the equivalent for Anthropic, so callers
+    port from either SDK by changing the client and nothing else.
+    """
+
+    def __init__(self, switchboard: Switchboard) -> None:
+        self._switchboard = switchboard
+
     @overload
-    async def messages(
+    async def create(
         self, *, session_id: str | None = None, stream: Literal[True], **kwargs
     ) -> AsyncAnthropicStream[RawMessageStreamEvent]: ...
 
     @overload
-    async def messages(self, *, session_id: str | None = None, **kwargs) -> Message: ...
+    async def create(self, *, session_id: str | None = None, **kwargs) -> Message: ...
 
-    async def messages(
+    async def create(
         self,
         *,
         model: str,
@@ -312,13 +347,13 @@ class Switchboard:
         `max_tokens` is required by the Messages API and is passed through
         unchanged; switchboard does not supply a default.
         """
-        return await self._dispatch(
+        return await self._switchboard._dispatch(
             model=model,
             session_id=session_id,
             call=lambda d: d.messages(model=model, stream=stream, **kwargs),
         )
 
-    async def parse_messages(
+    async def parse(
         self,
         *,
         model: str,
@@ -330,14 +365,11 @@ class Switchboard:
         Send a Messages API structured output request to the selected
         deployment, with automatic failover.
         """
-        return await self._dispatch(
+        return await self._switchboard._dispatch(
             model=model,
             session_id=session_id,
             call=lambda d: d.parse(model=model, output_format=output_format, **kwargs),
         )
-
-    def __repr__(self) -> str:
-        return f"Switchboard({self.deployments})"
 
 
 # borrowed from https://gist.github.com/davesteele/44793cd0348f59f8fadd49d7799bd306

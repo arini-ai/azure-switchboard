@@ -141,7 +141,9 @@ class TestSwitchboardParse:
             "azure_switchboard.openai_api.OpenAIDeployment.parse",
             new=AsyncMock(return_value=PARSED_RESPONSE),
         ) as mock:
-            response = await switchboard.parse(**PARSED_COMPLETION_PARAMS)
+            response = await switchboard.chat.completions.parse(
+                **PARSED_COMPLETION_PARAMS
+            )
 
             mock.assert_called_once()
             assert response == PARSED_RESPONSE
@@ -153,12 +155,12 @@ class TestSwitchboardParse:
             "azure_switchboard.openai_api.OpenAIDeployment.parse",
             new=AsyncMock(return_value=PARSED_RESPONSE),
         ):
-            await switchboard.parse(
+            await switchboard.chat.completions.parse(
                 session_id="test-session", **PARSED_COMPLETION_PARAMS
             )
             deployment_1 = switchboard.sessions["test-session"]
 
-            await switchboard.parse(
+            await switchboard.chat.completions.parse(
                 session_id="test-session", **PARSED_COMPLETION_PARAMS
             )
             deployment_2 = switchboard.sessions["test-session"]
@@ -180,7 +182,9 @@ class TestSwitchboardParse:
             "azure_switchboard.openai_api.OpenAIDeployment.parse",
             new=AsyncMock(side_effect=failing_then_success),
         ):
-            response = await switchboard.parse(**PARSED_COMPLETION_PARAMS)
+            response = await switchboard.chat.completions.parse(
+                **PARSED_COMPLETION_PARAMS
+            )
             assert response == PARSED_RESPONSE
             assert call_count == 2
 
@@ -190,7 +194,7 @@ class TestSwitchboardParse:
             SwitchboardError,
             match="No deployments available for invalid-model",
         ):
-            await switchboard.parse(
+            await switchboard.chat.completions.parse(
                 model="invalid-model",
                 messages=[],
                 response_format=WeatherResult,

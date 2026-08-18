@@ -15,6 +15,6 @@ class TestAdvanced:
         switchboard.selector = lambda _, options: random.choice(options)
 
         for _ in range(100):
-            await switchboard.create(**COMPLETION_PARAMS)
+            await switchboard.chat.completions.create(**COMPLETION_PARAMS)
 
         # print(switchboard.get_usage())

@@ -45,7 +45,7 @@ async def bench(args: argparse.Namespace) -> None:
         async def _request(i: int):
             async with inflight_requests:
                 start = time.perf_counter()
-                await switchboard.create(
+                await switchboard.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
                         {

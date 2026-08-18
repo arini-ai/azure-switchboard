@@ -83,12 +83,12 @@ class TestDispatch:
             "azure_switchboard.openai_api.OpenAIDeployment.create",
             side_effect=chat_completion_mock(),
         ) as chat_mock:
-            await mixed.create(**COMPLETION_PARAMS)
+            await mixed.chat.completions.create(**COMPLETION_PARAMS)
         with patch(
             "azure_switchboard.anthropic_api.AnthropicDeployment.messages",
             side_effect=message_mock(),
         ) as msg_mock:
-            await mixed.messages(**MESSAGE_PARAMS)
+            await mixed.messages.create(**MESSAGE_PARAMS)
 
         chat_mock.assert_called_once()
         msg_mock.assert_called_once()
@@ -103,7 +103,7 @@ class TestDispatch:
             "azure_switchboard.anthropic_api.AnthropicDeployment.parse",
             side_effect=message_mock(),
         ) as mock:
-            await mixed.parse_messages(
+            await mixed.messages.parse(
                 model="claude-sonnet-5",
                 output_format=Weather,
                 max_tokens=1024,
@@ -132,7 +132,7 @@ class TestDispatch:
         with patch(
             "azure_switchboard.anthropic_api.AnthropicDeployment.messages", new=flaky
         ):
-            assert await mixed.messages(**MESSAGE_PARAMS) == "ok"
+            assert await mixed.messages.create(**MESSAGE_PARAMS) == "ok"
 
         assert len(calls) == 2
         assert calls[0] != calls[1]
@@ -140,7 +140,9 @@ class TestDispatch:
     async def test_unknown_model_raises_without_retrying(self, mixed: Switchboard):
         """SwitchboardError is excluded from the retry predicate."""
         with pytest.raises(SwitchboardError, match="No deployments available"):
-            await mixed.messages(model="claude-opus-5", max_tokens=1, messages=[])
+            await mixed.messages.create(
+                model="claude-opus-5", max_tokens=1, messages=[]
+            )
 
 
 class TestConstruction:

@@ -26,7 +26,7 @@ class TestSwitchboard:
 
         assert "Switchboard" in repr(switchboard)
 
-        response = await switchboard.create(**COMPLETION_PARAMS)
+        response = await switchboard.chat.completions.create(**COMPLETION_PARAMS)
         assert mock_client["azure"].call_count == 1
         assert response == COMPLETION_RESPONSE
 
@@ -42,7 +42,9 @@ class TestSwitchboard:
 
         with patch("azure_switchboard.openai_api.OpenAIDeployment.create") as mock:
             mock.side_effect = chat_completion_mock()
-            stream = await switchboard.create(stream=True, **COMPLETION_PARAMS)
+            stream = await switchboard.chat.completions.create(
+                stream=True, **COMPLETION_PARAMS
+            )
             _, content = await collect_chunks(stream)
 
             assert mock.call_count == 1
@@ -60,21 +62,21 @@ class TestSwitchboard:
         assert len(deployments) == 3, "Need exactly 3 deployments for this test"
 
         # Initial request should work
-        response = await switchboard.create(**COMPLETION_PARAMS)
+        response = await switchboard.chat.completions.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
         assert mock_client["azure"].call_count == 1
         host_0 = mock_client["azure"].calls.last.request.url.host
 
         # Mark first deployment as unhealthy
         deployments[0].models["gpt-4o-mini"].mark_down()
-        response = await switchboard.create(**COMPLETION_PARAMS)
+        response = await switchboard.chat.completions.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
         assert mock_client["azure"].call_count == 2
         host_1 = mock_client["azure"].calls.last.request.url.host
 
         # Mark second deployment as unhealthy
         deployments[1].models["gpt-4o-mini"].mark_down()
-        response = await switchboard.create(**COMPLETION_PARAMS)
+        response = await switchboard.chat.completions.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
         assert mock_client["azure"].call_count == 3
         host_2 = mock_client["azure"].calls.last.request.url.host
@@ -82,13 +84,13 @@ class TestSwitchboard:
         # Mark last deployment as unhealthy — all three are now down.
         # Switchboard falls back to an unhealthy deployment rather than failing.
         deployments[2].models["gpt-4o-mini"].mark_down()
-        response = await switchboard.create(**COMPLETION_PARAMS)
+        response = await switchboard.chat.completions.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
         assert mock_client["azure"].call_count == 4
 
         # Restore first deployment
         deployments[0].models["gpt-4o-mini"].mark_up()
-        response = await switchboard.create(**COMPLETION_PARAMS)
+        response = await switchboard.chat.completions.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
         assert mock_client["azure"].call_count == 5
         host_4 = mock_client["azure"].calls.last.request.url.host
@@ -148,7 +150,9 @@ class TestSwitchboard:
         session_id = "test"
 
         # Initial request establishes session affinity
-        response1 = await switchboard.create(session_id=session_id, **COMPLETION_PARAMS)
+        response1 = await switchboard.chat.completions.create(
+            session_id=session_id, **COMPLETION_PARAMS
+        )
         assert response1 == COMPLETION_RESPONSE
         assert mock_client["azure"].call_count == 1
         # Get assigned deployment
@@ -156,7 +160,9 @@ class TestSwitchboard:
         original_deployment = assigned_deployment
 
         # Verify session stickiness
-        response2 = await switchboard.create(session_id=session_id, **COMPLETION_PARAMS)
+        response2 = await switchboard.chat.completions.create(
+            session_id=session_id, **COMPLETION_PARAMS
+        )
         assert response2 == COMPLETION_RESPONSE
         assert switchboard.sessions[session_id] == original_deployment
 
@@ -165,13 +171,17 @@ class TestSwitchboard:
         model.mark_down()
 
         # Verify failover
-        response3 = await switchboard.create(session_id=session_id, **COMPLETION_PARAMS)
+        response3 = await switchboard.chat.completions.create(
+            session_id=session_id, **COMPLETION_PARAMS
+        )
         assert response3 == COMPLETION_RESPONSE
         assert switchboard.sessions[session_id] != original_deployment
 
         # Verify session maintains new assignment
         fallback_deployment = switchboard.sessions[session_id]
-        response4 = await switchboard.create(session_id=session_id, **COMPLETION_PARAMS)
+        response4 = await switchboard.chat.completions.create(
+            session_id=session_id, **COMPLETION_PARAMS
+        )
         assert response4 == COMPLETION_RESPONSE
         assert switchboard.sessions[session_id] == fallback_deployment
 
@@ -190,19 +200,19 @@ class TestSwitchboard:
 
         # make azure deployment unhealthy, should route to openai
         switchboard.deployments["test1"].models["gpt-4o-mini"].mark_down()
-        response = await switchboard.create(**COMPLETION_PARAMS)
+        response = await switchboard.chat.completions.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
         assert mock_client["openai"].call_count == 1
 
         # bring azure back, should route to either
         switchboard.deployments["test1"].models["gpt-4o-mini"].mark_up()
-        response = await switchboard.create(**COMPLETION_PARAMS)
+        response = await switchboard.chat.completions.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
 
         # make both unhealthy — switchboard falls back to an unhealthy deployment
         switchboard.deployments["test1"].models["gpt-4o-mini"].mark_down()
         switchboard.deployments["openai"].models["gpt-4o-mini"].mark_down()
-        response = await switchboard.create(**COMPLETION_PARAMS)
+        response = await switchboard.chat.completions.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
 
     def _within_bounds(self, val, min, max, tolerance=0.05):
@@ -217,7 +227,10 @@ class TestSwitchboard:
 
         # Make 100 requests
         await asyncio.gather(
-            *[switchboard.create(**COMPLETION_PARAMS) for _ in range(100)]
+            *[
+                switchboard.chat.completions.create(**COMPLETION_PARAMS)
+                for _ in range(100)
+            ]
         )
 
         # Verify all deployments were used
@@ -237,7 +250,7 @@ class TestSwitchboard:
 
         # Make 100 requests
         for _ in range(100):
-            await switchboard.create(**COMPLETION_PARAMS)
+            await switchboard.chat.completions.create(**COMPLETION_PARAMS)
 
         # Verify distribution
         assert self._within_bounds(
@@ -264,7 +277,7 @@ class TestSwitchboard:
 
         # Make 100 requests to preload the deployments, should be evenly distributed
         for _ in range(100):
-            await switchboard.create(**COMPLETION_PARAMS)
+            await switchboard.chat.completions.create(**COMPLETION_PARAMS)
 
         # reset utilization of one deployment
         client = switchboard.select_deployment(model="gpt-4o-mini")
@@ -272,7 +285,7 @@ class TestSwitchboard:
 
         # make another 100 requests
         for _ in range(100):
-            await switchboard.create(**COMPLETION_PARAMS)
+            await switchboard.chat.completions.create(**COMPLETION_PARAMS)
 
         # verify the load distribution is still roughly even
         # (ie, we preferred to send requests to the underutilized deployment)
@@ -295,7 +308,9 @@ class TestSwitchboard:
         for _ in range(20):
             for session_id in session_ids:
                 requests.append(
-                    switchboard.create(session_id=session_id, **COMPLETION_PARAMS)
+                    switchboard.chat.completions.create(
+                        session_id=session_id, **COMPLETION_PARAMS
+                    )
                 )
 
         await asyncio.gather(*requests)
@@ -326,7 +341,10 @@ class TestSwitchboard:
 
             # make some requests to add usage
             await asyncio.gather(
-                *[switchboard.create(**COMPLETION_PARAMS) for _ in range(10)]
+                *[
+                    switchboard.chat.completions.create(**COMPLETION_PARAMS)
+                    for _ in range(10)
+                ]
             )
 
             for d in switchboard.deployments.values():
@@ -355,7 +373,9 @@ class TestSwitchboard:
             SwitchboardError,
             match="No deployments available for invalid-model",
         ):
-            await switchboard.create(model="invalid-model", messages=[])
+            await switchboard.chat.completions.create(
+                model="invalid-model", messages=[]
+            )
 
     @pytest.mark.mock_models("openai")
     async def test_single_deployment(self, mock_client: respx.MockRouter):
@@ -377,7 +397,7 @@ class TestSwitchboard:
         assert switchboard.sessions["test"] == switchboard.deployments["openai"]
 
         # Verify that requests work correctly
-        response = await switchboard.create(**COMPLETION_PARAMS)
+        response = await switchboard.chat.completions.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
         assert mock_client["openai"].call_count == 1
 
@@ -392,7 +412,7 @@ class TestSwitchboard:
         switchboard.deployments["test1"].models["gpt-4o-mini"].mark_down()
 
         # Should fall back to the unhealthy deployment and succeed
-        response = await switchboard.create(**COMPLETION_PARAMS)
+        response = await switchboard.chat.completions.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
         assert mock_client["azure"].call_count == 1
 
@@ -413,7 +433,7 @@ class TestSwitchboard:
         ):
             # CancelledError should propagate to allow proper task cancellation
             with pytest.raises(asyncio.CancelledError):
-                await switchboard.create(**COMPLETION_PARAMS)
+                await switchboard.chat.completions.create(**COMPLETION_PARAMS)
 
         # Verify that the deployment is still selected as expected after cancellation
         deployment = switchboard.select_deployment(model="gpt-4o-mini")
