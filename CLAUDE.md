@@ -40,10 +40,12 @@
 
 ### Runtime
 
-- openai>=1.62.0
+- openai>=2.0.0
+- loguru>=0.7.3
 - opentelemetry-api>=1.30.0
 - tenacity>=9.0.0
 - wrapt>=1.17.2
+- anthropic>=0.122.0
 
 ### Development
 
@@ -59,16 +61,20 @@
 
 - `src/azure_switchboard/`: Core implementation
   - `switchboard.py`: Main client implementation with load balancing logic
-  - `deployment.py`: Deployment configuration and API client management
+  - `deployment.py`: `DeploymentBase`, the provider-agnostic utilization surface
+  - `openai_api.py`: OpenAI / Chat Completions deployments (`OpenAIConfig`)
+  - `anthropic_api.py`: Anthropic / Messages API deployments (`AnthropicConfig`)
+  - `model.py`: Per-model utilization and cooldown state
 - `tests/`: Comprehensive test suite
 - `tools/`: Demo and benchmark utilities
 
 ## Key Features
 
-- API-compatible drop-in replacement for OpenAI's ChatCompletion API
+- API-compatible drop-in for both SDKs, each at its own call path: `sb.chat.completions.*` and `sb.messages.*`
+- OpenAI and Anthropic deployments coexist in one pool, routed by model name (cross-provider name collisions rejected at construction)
 - Coordination-free load balancing with "power of two random choices" algorithm
 - TPM/RPM rate limit tracking per model/deployment
 - Session affinity for efficient prompt caching
 - Automatic failover with customizable retry policies
 - OpenTelemetry integration for monitoring
-- Lightweight implementation (<400 LOC) with minimal dependencies
+- Lightweight implementation (~1k LOC) with minimal dependencies

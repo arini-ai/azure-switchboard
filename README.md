@@ -12,11 +12,57 @@ uv add azure-switchboard
 
 ## Overview
 
-`azure-switchboard` is a Python 3 asyncio library that provides an API-compatible client loadbalancer for Chat Completions. You instantiate a `Switchboard` with one or more `Deployment`s, and requests are distributed across healthy deployments using the [power of two random choices](https://www.eecs.harvard.edu/~michaelm/postscripts/handbook2001.pdf) method. Deployments can point at Azure OpenAI (`base_url=.../openai/v1/`) or OpenAI (`base_url=None`).
+`azure-switchboard` is a Python 3 asyncio library that provides an API-compatible client loadbalancer for Chat Completions and the Anthropic Messages API. You instantiate a `Switchboard` with one or more deployment configs, and requests are distributed across healthy deployments using the [power of two random choices](https://www.eecs.harvard.edu/~michaelm/postscripts/handbook2001.pdf) method.
+
+Two deployment kinds can be mixed in a single `Switchboard`:
+
+- `OpenAIConfig` — Azure OpenAI (`base_url=.../openai/v1/`) or OpenAI (`base_url=None`), reached via `sb.chat.completions`.
+- `AnthropicConfig` — Claude on Azure AI Foundry, reached via `sb.messages`.
+
+Utilization tracking, session affinity, failover, and selection are shared across both.
+
+```python
+from azure_switchboard import AnthropicConfig, Model, OpenAIConfig, Switchboard
+
+sb = Switchboard([
+    OpenAIConfig(
+        name="east",
+        base_url="https://east.openai.azure.com/openai/v1/",
+        api_key=...,
+        models=[Model(name="gpt-4o-mini", tpm=30000, rpm=300)],
+    ),
+    AnthropicConfig(
+        name="foundry1",
+        resource="my-foundry-resource",
+        api_key=...,
+        models=[Model(name="claude-sonnet-5", tpm=30000, rpm=300)],
+    ),
+])
+
+async with sb:
+    completion = await sb.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "Hello!"}],
+    )
+    message = await sb.messages.create(
+        model="claude-sonnet-5",
+        max_tokens=1024,
+        messages=[{"role": "user", "content": "Hello!"}],
+    )
+```
 
 ## Features
 
-- **API Compatibility**: `Switchboard.create` is a transparently-typed proxy for `OpenAI.chat.completions.create`.
+- **API Compatibility**: each surface mirrors its SDK's own call path, so you port by swapping the client and changing nothing else. Return types are exact — no unions to narrow.
+
+  | SDK call                         | Switchboard call             | Returns                   |
+  | -------------------------------- | ---------------------------- | ------------------------- |
+  | `openai.chat.completions.create` | `sb.chat.completions.create` | `ChatCompletion`          |
+  | `openai.chat.completions.parse`  | `sb.chat.completions.parse`  | `ParsedChatCompletion[T]` |
+  | `anthropic.messages.create`      | `sb.messages.create`         | `Message`                 |
+  | `anthropic.messages.parse`       | `sb.messages.parse`          | `ParsedMessage[T]`        |
+
+- **Multi-Provider**: OpenAI and Anthropic deployments coexist in one pool. Routing is keyed on model name, so a name registered against both providers is rejected at construction rather than resolving ambiguously.
 - **Coordination-Free**: The default Two Random Choices algorithm does not require coordination between client instances to achieve excellent load distribution characteristics.
 - **Utilization-Aware**: TPM/RPM utilization is tracked per model per deployment for use during selection.
 - **Batteries Included**:
@@ -24,7 +70,7 @@ uv add azure-switchboard
   - **Automatic Failover**: Retries are controlled by a tenacity `AsyncRetrying` policy (`failover_policy`).
   - **Pluggable Selection**: Custom selection algorithms can be provided by passing a callable to the `selector` parameter on the Switchboard constructor.
   - **OpenTelemetry Integration**: Built-in metrics for request routing and healthy deployment counts.
-- **Lightweight**: Small codebase with minimal dependencies: `openai`, `tenacity`, `wrapt`, and `opentelemetry-api`.
+- **Lightweight**: Small codebase with minimal dependencies: `openai`, `anthropic`, `loguru`, `tenacity`, `wrapt`, and `opentelemetry-api`.
 
 ## Runnable Example
 
@@ -44,7 +90,7 @@ uv add azure-switchboard
 import asyncio
 import os
 
-from azure_switchboard import Deployment, Model, Switchboard
+from azure_switchboard import Model, OpenAIConfig, Switchboard
 
 azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
 azure_openai_api_key = os.getenv("AZURE_OPENAI_API_KEY")
@@ -56,7 +102,7 @@ if azure_openai_endpoint and azure_openai_api_key:
     # is fine for the purposes of this demo
     for name in ("east", "west", "south"):
         deployments.append(
-            Deployment(
+            OpenAIConfig(
                 name=name,
                 base_url=f"{azure_openai_endpoint}/openai/v1/",
                 api_key=azure_openai_api_key,
@@ -66,7 +112,7 @@ if azure_openai_endpoint and azure_openai_api_key:
 
 if openai_api_key:
     deployments.append(
-        Deployment(
+        OpenAIConfig(
             name="openai",
             api_key=openai_api_key,
             models=[Model(name="gpt-4o-mini")],
@@ -90,7 +136,7 @@ async def main():
 
 async def basic_functionality(switchboard: Switchboard):
     # Make a completion request (non-streaming)
-    response = await switchboard.create(
+    response = await switchboard.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Hello, world!"}],
     )
@@ -98,7 +144,7 @@ async def basic_functionality(switchboard: Switchboard):
     print("completion:", response.choices[0].message.content)
 
     # Make a streaming completion request
-    stream = await switchboard.create(
+    stream = await switchboard.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Hello, world!"}],
         stream=True,
@@ -117,7 +163,7 @@ async def session_affinity(switchboard: Switchboard):
 
     # First message will select a random healthy
     # deployment and associate it with the session_id
-    r = await switchboard.create(
+    r = await switchboard.chat.completions.create(
         session_id=session_id,
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Who won the World Series in 2020?"}],
@@ -128,7 +174,7 @@ async def session_affinity(switchboard: Switchboard):
     print("response 1:", r.choices[0].message.content)
 
     # Follow-up requests with the same session_id will route to the same deployment
-    r2 = await switchboard.create(
+    r2 = await switchboard.chat.completions.create(
         session_id=session_id,
         model="gpt-4o-mini",
         messages=[
@@ -144,7 +190,7 @@ async def session_affinity(switchboard: Switchboard):
     d1.models["gpt-4o-mini"].mark_down()
 
     # A new deployment will be selected for this session_id
-    r3 = await switchboard.create(
+    r3 = await switchboard.chat.completions.create(
         session_id=session_id,
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Who won the World Series in 2021?"}],
@@ -225,7 +271,7 @@ Distribution overhead scales ~linearly with the number of deployments.
 | `rpm`              | Requests-per-minute budget used for utilization tracking and routing   | 0 (unlimited) |
 | `default_cooldown` | Cooldown duration (seconds) after a deployment/model failure mark-down | 10.0          |
 
-### switchboard.Deployment Parameters
+### switchboard.OpenAIConfig Parameters
 
 | Parameter  | Description                                                                                          | Default                      |
 | ---------- | ---------------------------------------------------------------------------------------------------- | ---------------------------- |
@@ -235,14 +281,31 @@ Distribution overhead scales ~linearly with the number of deployments.
 | `timeout`  | Per-request timeout in seconds. Override per deployment for batch jobs that need longer budgets.     | 30.0                         |
 | `models`   | Models available on this deployment                                                                  | Built-in model name defaults |
 
+### switchboard.AnthropicConfig Parameters
+
+| Parameter  | Description                                                                                        | Default  |
+| ---------- | -------------------------------------------------------------------------------------------------- | -------- |
+| `name`     | Unique identifier for the deployment                                                               | Required |
+| `resource` | Azure AI Foundry resource name, resolving to `https://<resource>.services.ai.azure.com/anthropic/` | None     |
+| `base_url` | Explicit endpoint, used instead of `resource`. One of the two is required.                         | None     |
+| `api_key`  | API key for the deployment                                                                         | None     |
+| `timeout`  | Per-request timeout in seconds                                                                     | 30.0     |
+| `models`   | Models available on this deployment                                                                | `[]`     |
+
+`max_tokens` is required by the Messages API and is passed through unchanged — switchboard does not supply a default.
+
+Token accounting differs slightly by provider. The Messages API has no `total_tokens`, so utilization is charged as `input_tokens + output_tokens`. When streaming, input tokens arrive on `message_start` and a running output total on each `message_delta`; the stream wrapper spends the difference so utilization stays fresh mid-stream.
+
 ### Timeout vs. Rate-Limit Cooldown
 
 `azure-switchboard` distinguishes between two categories of API errors:
 
+Both providers are handled identically, against their respective SDK exception classes.
+
 - **`RateLimitError` / `APIConnectionError`**: These are correlated with the specific deployment — the deployment is saturated or unreachable. The affected model is marked down with the configured `default_cooldown` (default 10s) so the load balancer avoids it.
 - **`APITimeoutError`**: Timeouts during an upstream-wide slowdown are _not_ correlated with any particular deployment. Marking a deployment down in this case wastes capacity without providing a fix — every deployment would cycle through cooldown in rotation. Timeouts are re-raised without triggering a cooldown.
 
-If your workload has a longer latency budget (e.g. batch structured-output jobs), set `timeout` on the relevant `DeploymentConfig` rather than relying on the default.
+If your workload has a longer latency budget (e.g. batch structured-output jobs), set `timeout` on the relevant `OpenAIConfig` rather than relying on the default.
 
 ### switchboard.Switchboard Parameters
 

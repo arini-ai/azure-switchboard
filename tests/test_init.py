@@ -1,7 +1,7 @@
 import azure_switchboard
 from loguru import logger as _logger
 
-from azure_switchboard import DeploymentConfig, Model, Switchboard
+from azure_switchboard import OpenAIConfig, Model, Switchboard
 
 
 class TestInit:
@@ -14,13 +14,13 @@ class TestInit:
         sink_id = _logger.add(lambda m: records.append(m.record))
         switchboard = Switchboard(
             deployments=[
-                DeploymentConfig(
+                OpenAIConfig(
                     name="mini-only",
                     base_url="https://mini-only.openai.azure.com/openai/v1/",
                     api_key="mini-only",
                     models=[Model(name="gpt-4o-mini", tpm=1000, rpm=6)],
                 ),
-                DeploymentConfig(
+                OpenAIConfig(
                     name="full-only",
                     base_url="https://full-only.openai.azure.com/openai/v1/",
                     api_key="full-only",
@@ -45,3 +45,17 @@ class TestInit:
         finally:
             _logger.remove(sink_id)
             _logger.disable("azure_switchboard")
+
+    def test_public_export_surface(self):
+        assert set(azure_switchboard.__all__) == {
+            "AnthropicConfig",
+            "Model",
+            "OpenAIConfig",
+            "ParsedChatCompletion",
+            "SwitchboardError",
+            "Switchboard",
+        }
+
+    def test_deployment_config_was_renamed(self):
+        """Renamed to OpenAIConfig; no back-compat alias is exported."""
+        assert not hasattr(azure_switchboard, "DeploymentConfig")

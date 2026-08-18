@@ -1,8 +1,9 @@
 from loguru import logger as _logger
 from openai.types.chat import ParsedChatCompletion
 
-from .deployment import DeploymentConfig
+from .openai_api import OpenAIConfig
 from .exceptions import SwitchboardError
+from .anthropic_api import AnthropicConfig
 from .model import Model
 from .switchboard import Switchboard
 
@@ -12,8 +13,9 @@ _logger.disable("azure_switchboard")
 
 
 __all__ = [
-    "DeploymentConfig",
+    "AnthropicConfig",
     "Model",
+    "OpenAIConfig",
     "ParsedChatCompletion",
     "SwitchboardError",
     "Switchboard",
