@@ -3,8 +3,8 @@ from unittest.mock import patch
 
 import pytest
 import respx
-from anthropic import APIConnectionError
-from httpx import Request
+from anthropic import APIConnectionError, RateLimitError
+from httpx import Request, Response
 from pydantic import BaseModel
 
 from azure_switchboard import Foundry, OpenAIDeployment, Switchboard, SwitchboardError
@@ -831,3 +831,182 @@ class TestSessionLRU:
         sb.sessions["new"] = sb.foundries["test1"]
 
         assert "keep" in sb.sessions
+
+
+class _FakeManager:
+    """Stands in for the SDK's stream manager, which is entered by open_stream."""
+
+    def __init__(self, error: Exception | None = None, stream=None):
+        self._error = error
+        self._stream = stream
+
+    async def __aenter__(self):
+        if self._error:
+            raise self._error
+        return self._stream
+
+
+class _FakeStream:
+    """Minimal AsyncMessageStream stand-in: closes, and snapshots nothing."""
+
+    def __init__(self):
+        self.closed = False
+
+    @property
+    def current_message_snapshot(self):
+        raise AssertionError("nothing consumed")
+
+    async def close(self):
+        self.closed = True
+
+
+class TestStreamSurface:
+    """The stream() path runs the same dispatch as create/parse, so opening
+    fails over and the exit path still scopes cooldowns."""
+
+    async def test_failure_to_open_fails_over(self, anthropic_switchboard: Switchboard):
+        opened: list[str] = []
+
+        async def flaky(self, **kwargs):
+            opened.append(self.resource.name)
+            if len(opened) == 1:
+                error = APIConnectionError(request=Request("POST", "https://x/"))
+                # the real open_stream scopes the cooldown before re-raising,
+                # which is what takes this resource out of the retry
+                self._handle_error(error, "stream")
+                raise error
+            return _FakeStream()
+
+        with patch(
+            "azure_switchboard.anthropic_deployment.AnthropicDeployment.open_stream",
+            new=flaky,
+        ):
+            async with anthropic_switchboard.messages.stream(
+                model="claude-sonnet-5", max_tokens=8, messages=[]
+            ) as s:
+                assert isinstance(s, _FakeStream)
+
+        assert len(opened) == 2, "a deployment that fails to open should be retried"
+        assert opened[0] != opened[1], "the retry should land on another resource"
+
+    async def test_connection_error_on_open_cools_the_resource(
+        self, anthropic_deployment: AnthropicDeployment
+    ):
+        error = APIConnectionError(request=Request("POST", "https://x/"))
+        with patch.object(
+            anthropic_deployment.client.messages,
+            "stream",
+            return_value=_FakeManager(error=error),
+        ):
+            with pytest.raises(APIConnectionError):
+                await anthropic_deployment.open_stream(max_tokens=8, messages=[])
+
+        assert anthropic_deployment.resource.is_cooling()
+        assert not anthropic_deployment.is_cooling()
+
+    async def test_body_failure_is_scoped_and_the_stream_still_closes(
+        self, anthropic_switchboard: Switchboard
+    ):
+        """A 429 raised inside the `async with` body cools that deployment,
+        and the stream is closed either way."""
+        stream = _FakeStream()
+        error = RateLimitError(
+            "rate limited",
+            response=Response(429, request=Request("POST", "https://x/")),
+            body=None,
+        )
+
+        async def opener(self, **kwargs):
+            return stream
+
+        with patch(
+            "azure_switchboard.anthropic_deployment.AnthropicDeployment.open_stream",
+            new=opener,
+        ):
+            with pytest.raises(RateLimitError):
+                async with anthropic_switchboard.messages.stream(
+                    model="claude-sonnet-5", max_tokens=8, messages=[]
+                ):
+                    raise error
+
+        assert stream.closed, "the stream must be closed even when the body raises"
+        cooled = [
+            d
+            for d in anthropic_switchboard.messages._pool["claude-sonnet-5"]
+            if d.is_cooling()
+        ]
+        assert len(cooled) == 1, "a 429 cools the one deployment that served it"
+
+
+class _FakeCompletionStream:
+    """Minimal AsyncChatCompletionStream stand-in."""
+
+    def __init__(self, usage=None):
+        self.closed = False
+        self._usage = usage
+
+    @property
+    def current_completion_snapshot(self):
+        return COMPLETION_RESPONSE.model_copy(update={"usage": self._usage})
+
+    async def close(self):
+        self.closed = True
+
+
+class TestChatStreamSurface:
+    """The chat twin of TestStreamSurface."""
+
+    async def test_open_and_reconcile(self, switchboard: Switchboard):
+        stream = _FakeCompletionStream(usage=COMPLETION_RESPONSE.usage)
+
+        async def opener(self, **kwargs):
+            return stream
+
+        with patch(
+            "azure_switchboard.openai_deployment.OpenAIDeployment.open_stream",
+            new=opener,
+        ):
+            async with switchboard.chat.completions.stream(
+                model="gpt-4o-mini", messages=[]
+            ) as s:
+                assert s is stream
+
+        assert stream.closed
+        spent = [
+            d
+            for d in switchboard.chat.completions._pool["gpt-4o-mini"]
+            if d.tpm_usage > 0
+        ]
+        assert len(spent) == 1, "the serving deployment should be charged"
+
+    async def test_connection_error_on_open_cools_the_resource(
+        self, deployment: OpenAIDeployment
+    ):
+        from openai import APIConnectionError as OpenAIConnectionError
+
+        error = OpenAIConnectionError(request=Request("POST", "https://x/"))
+        with patch.object(
+            deployment.client.chat.completions,
+            "stream",
+            return_value=_FakeManager(error=error),
+        ):
+            with pytest.raises(OpenAIConnectionError):
+                await deployment.open_stream(messages=[])
+
+        assert deployment.resource.is_cooling()
+        assert not deployment.is_cooling()
+
+
+class TestFallbackCredentials:
+    """A fallback that cannot authenticate is useless exactly when it is
+    needed, so it fails at construction."""
+
+    def test_missing_credential_fails_at_construction(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        with pytest.raises(SwitchboardError, match="fallback is enabled but unusable"):
+            Switchboard(foundries=[openai_foundry("test1")], openai_fallback=True)
+
+    def test_no_check_when_fallback_is_off(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        Switchboard(foundries=[openai_foundry("test1")])

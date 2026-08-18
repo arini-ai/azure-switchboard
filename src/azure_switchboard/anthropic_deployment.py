@@ -120,8 +120,9 @@ class AnthropicDeployment(ModelDeployment):
         """Charge what the stream actually accumulated against the estimate."""
         try:
             usage = stream.current_message_snapshot.usage
-        except Exception:
-            # nothing was consumed, so the preflight estimate stands
+        except AssertionError:
+            # the SDK asserts on the snapshot before the first event lands, so
+            # nothing was consumed and the preflight estimate stands
             return
         self._reconcile_usage(usage, offset)
 

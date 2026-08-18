@@ -13,11 +13,12 @@ from typing import (
 
 from collections.abc import Awaitable, Callable, Sequence
 
+from anthropic import AsyncAnthropic
 from anthropic import AsyncStream as AsyncAnthropicStream
 from anthropic.lib.streaming import AsyncMessageStream
 from anthropic.types import Message, ParsedMessage, RawMessageStreamEvent
 from loguru import logger
-from openai import AsyncStream
+from openai import AsyncOpenAI, AsyncStream
 from openai.lib.streaming.chat import AsyncChatCompletionStream
 from openai.types.chat import ChatCompletion, ChatCompletionChunk, ParsedChatCompletion
 from opentelemetry import metrics
@@ -72,6 +73,23 @@ def two_random_choices(options: list[_M], /) -> _M:
     return min(selected, key=lambda d: d.util)
 
 
+def _check_fallback_credentials(openai: bool, anthropic: bool) -> None:
+    """Build the vendor clients up front.
+
+    A fallback is reached for when every pooled deployment is already down, so
+    an unusable credential would surface as a raw SDK error mid-failover — and
+    one the retry policy would keep retrying, since it is not a
+    SwitchboardError. Fail at construction instead.
+    """
+    try:
+        if openai:
+            AsyncOpenAI()
+        if anthropic:
+            AsyncAnthropic()
+    except Exception as e:
+        raise SwitchboardError(f"fallback is enabled but unusable: {e}") from e
+
+
 DEFAULT_FAILOVER_POLICY = AsyncRetrying(
     stop=stop_after_attempt(2),
     retry=retry_if_not_exception_type(SwitchboardError),
@@ -99,6 +117,7 @@ class Switchboard:
                 raise SwitchboardError(f"Duplicate foundry name: {foundry.name}")
             self.foundries[foundry.name] = foundry
 
+        _check_fallback_credentials(openai_fallback, anthropic_fallback)
         self._openai_fallback_enabled = openai_fallback
         self._anthropic_fallback_enabled = anthropic_fallback
 

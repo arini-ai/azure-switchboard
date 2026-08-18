@@ -71,12 +71,11 @@ class OpenAIDeployment(ModelDeployment):
         try:
             if stream:
                 logger.trace("Creating streaming completion")
+                stream_options = kwargs.pop("stream_options", {"include_usage": True})
                 response_stream = await self.client.chat.completions.create(
                     model=self.name,
                     stream=True,
-                    stream_options=kwargs.pop(
-                        "stream_options", {"include_usage": True}
-                    ),
+                    stream_options=stream_options,
                     **kwargs,
                 )
 
@@ -115,10 +114,12 @@ class OpenAIDeployment(ModelDeployment):
 
         try:
             logger.trace("Opening completion stream")
+            # popped before the call: relying on a keyword being evaluated
+            # before the ** unpacking beside it is needlessly subtle
+            stream_options = kwargs.pop("stream_options", {"include_usage": True})
             return await self.client.chat.completions.stream(
                 model=self.name,
-                # the snapshot carries no usage unless it is asked for
-                stream_options=kwargs.pop("stream_options", {"include_usage": True}),
+                stream_options=stream_options,
                 **kwargs,
             ).__aenter__()
         except Exception as e:
