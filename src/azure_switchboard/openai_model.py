@@ -28,18 +28,22 @@ _T = TypeVar("_T", bound=BaseModel)
 class OpenAIModel(ModelBase):
     """A model deployment speaking the Chat Completions API."""
 
-    api = "openai"
-    path = "openai/v1/"
-
-    @classmethod
-    def new_client(
-        cls, base_url: str | None, api_key: str | None, timeout: float
-    ) -> AsyncOpenAI:
-        return AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
+    @property
+    def url(self) -> str | None:
+        if self.endpoint:
+            return self.endpoint
+        base = self.foundry.base
+        return f"{base}openai/v1/" if base else None
 
     @property
     def client(self) -> AsyncOpenAI:
-        return cast(AsyncOpenAI, self.foundry.client_for(self))
+        foundry, url = self.foundry, self.url
+        return foundry.cached_client(
+            (AsyncOpenAI, url),
+            lambda: AsyncOpenAI(
+                api_key=foundry.api_key, base_url=url, timeout=foundry.timeout
+            ),
+        )
 
     @overload
     async def create(

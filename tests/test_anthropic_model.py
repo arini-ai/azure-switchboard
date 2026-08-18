@@ -6,6 +6,7 @@ from httpx import Request, Response
 from pydantic import BaseModel
 
 from azure_switchboard import AnthropicModel, Foundry
+from azure_switchboard.foundry import FirstParty
 from azure_switchboard.anthropic_model import _content_len
 
 from .conftest import (
@@ -70,8 +71,10 @@ class TestAnthropicEndpoint:
 
     def test_first_party_client_is_the_plain_variant(self, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
-        client = AnthropicModel.new_client(base_url=None, api_key=None, timeout=30.0)
-        assert type(client).__name__ == "AsyncAnthropic"
+        resource = FirstParty("anthropic", models=[AnthropicModel("claude-sonnet-5")])
+        deployment = resource.models["claude-sonnet-5"]
+        assert deployment.url is None
+        assert type(deployment.client).__name__ == "AsyncAnthropic"
 
 
 class TestAnthropicModel:

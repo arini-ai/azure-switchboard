@@ -5,6 +5,7 @@ import pytest
 import respx
 from anthropic import APIConnectionError
 from httpx import Request
+from openai import AsyncOpenAI
 from pydantic import BaseModel
 
 from azure_switchboard import Foundry, OpenAIModel, Switchboard, SwitchboardError
@@ -708,11 +709,11 @@ class TestMixedPoolConstruction:
         assert sb.chat.completions._pool["gpt-4o-mini"][0].foundry is resource
         assert sb.messages._pool["claude-sonnet-5"][0].foundry is resource
         assert (
-            resource.base_url(resource.models["gpt-4o-mini"])
+            resource.models["gpt-4o-mini"].url
             == "https://east.services.ai.azure.com/openai/v1/"
         )
         assert (
-            resource.base_url(resource.models["claude-sonnet-5"])
+            resource.models["claude-sonnet-5"].url
             == "https://east.services.ai.azure.com/anthropic/"
         )
 
@@ -729,7 +730,7 @@ class TestMixedPoolConstruction:
             ],
         )
         assert (
-            resource.base_url(resource.models["gpt-4o"])
+            resource.models["gpt-4o"].url
             == "https://legacy.openai.azure.com/openai/v1/"
         )
 
@@ -749,5 +750,5 @@ class TestMixedPoolConstruction:
         )
         _ = resource.models["gpt-4o-mini"].client
         assert list(resource._clients) == [
-            ("openai", "https://east.services.ai.azure.com/openai/v1/")
+            (AsyncOpenAI, "https://east.services.ai.azure.com/openai/v1/")
         ]

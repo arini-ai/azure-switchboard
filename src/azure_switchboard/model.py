@@ -3,7 +3,7 @@ from __future__ import annotations
 import random
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING
 
 from opentelemetry import trace
 
@@ -27,12 +27,6 @@ class ModelBase:
     upstream. A model is declared standalone and bound to a Foundry when it is
     registered; it is not callable before then.
     """
-
-    # Which API spec this model speaks. Switchboard pools by this, and Foundry
-    # keeps one client per (api, endpoint).
-    api: ClassVar[str] = ""
-    # Appended to the resource endpoint unless the model overrides it.
-    path: ClassVar[str] = ""
 
     def __init__(
         self,
@@ -71,12 +65,13 @@ class ModelBase:
             )
         return self._foundry
 
-    @classmethod
-    def new_client(cls, base_url: str | None, api_key: str | None, timeout: float):
-        """Build the SDK client for this API. Foundry caches one per (api, url).
+    @property
+    def url(self) -> str | None:
+        """Where this deployment is served.
 
-        Subclasses also narrow `client` to the type they build here, so neither
-        the deployment nor its caller ever sees an untyped client.
+        An explicit endpoint wins. Otherwise it is the resource's base with
+        this API's path appended — and None when the resource has no base, so
+        the SDK falls back to its vendor default.
         """
         raise NotImplementedError
 

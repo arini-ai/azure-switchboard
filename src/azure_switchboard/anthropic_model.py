@@ -25,25 +25,32 @@ _T = TypeVar("_T", bound=BaseModel)
 class AnthropicModel(ModelBase):
     """A model deployment speaking the Anthropic Messages API."""
 
-    api = "anthropic"
-    path = "anthropic/"
-
-    @classmethod
-    def new_client(
-        cls, base_url: str | None, api_key: str | None, timeout: float
-    ) -> AsyncAnthropic:
-        # AsyncAnthropicFoundry overrides auth to send Azure's api-key header,
-        # so it is not interchangeable with the first-party client. No base_url
-        # means we are not on Foundry at all.
-        if base_url is None:
-            return AsyncAnthropic(api_key=api_key, timeout=timeout)
-        return AsyncAnthropicFoundry(
-            base_url=base_url, api_key=api_key, timeout=timeout
-        )
+    @property
+    def url(self) -> str | None:
+        if self.endpoint:
+            return self.endpoint
+        base = self.foundry.base
+        return f"{base}anthropic/" if base else None
 
     @property
     def client(self) -> AsyncAnthropic:
-        return cast(AsyncAnthropic, self.foundry.client_for(self))
+        # AsyncAnthropicFoundry overrides auth to send Azure's api-key header,
+        # so it is not interchangeable with the first-party client. No URL
+        # means we are not on Foundry at all.
+        foundry, url = self.foundry, self.url
+        if url is None:
+            return foundry.cached_client(
+                (AsyncAnthropic, None),
+                lambda: AsyncAnthropic(
+                    api_key=foundry.api_key, timeout=foundry.timeout
+                ),
+            )
+        return foundry.cached_client(
+            (AsyncAnthropicFoundry, url),
+            lambda: AsyncAnthropicFoundry(
+                base_url=url, api_key=foundry.api_key, timeout=foundry.timeout
+            ),
+        )
 
     @overload
     async def create(

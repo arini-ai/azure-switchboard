@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Iterable
+from collections.abc import Callable, Hashable, Iterable
+from typing import Any, TypeVar
 
 from .anthropic_model import AnthropicModel
 from .exceptions import SwitchboardError
 from .model import UtilStats
 from .openai_model import OpenAIModel
+
+_C = TypeVar("_C")
 
 # Every deployment speaks one of the APIs switchboard serves. ModelBase carries
 # the quota and cooldown machinery they share and bounds the generic selection
@@ -40,10 +43,10 @@ class Foundry:
         self.default_cooldown = default_cooldown
         self.cooldown_until: float = 0
 
-        # One client per (api, url): normally one per protocol, but a model
-        # that overrides its endpoint gets its own rather than borrowing a
-        # sibling's.
-        self._clients: dict[tuple[str, str | None], Any] = {}
+        # The prefix each deployment appends its API path to.
+        self.base: str | None = f"https://{name}.services.ai.azure.com/"
+
+        self._clients: dict[Hashable, Any] = {}
 
         self.models: dict[str, Deployment] = {}
         for model in models:
@@ -55,18 +58,15 @@ class Foundry:
         model.bind(self)
         self.models[model.name] = model
 
-    def base_url(self, model: Deployment) -> str | None:
-        return (
-            model.endpoint or f"https://{self.name}.services.ai.azure.com/{model.path}"
-        )
+    def cached_client(self, key: Hashable, build: Callable[[], _C]) -> _C:
+        """Share one SDK client across the deployments that can use it.
 
-    def client_for(self, model: Deployment) -> Any:
-        url = self.base_url(model)
-        key = (type(model).api, url)
+        Deployments call this with a key of their own choosing, normally their
+        API and URL, so two models of the same API on this resource share a
+        connection pool while one that overrides its endpoint gets its own.
+        """
         if key not in self._clients:
-            self._clients[key] = type(model).new_client(
-                base_url=url, api_key=self.api_key, timeout=self.timeout
-            )
+            self._clients[key] = build()
         return self._clients[key]
 
     def mark_down(self, seconds: float = 0.0) -> None:
@@ -106,6 +106,5 @@ class FirstParty(Foundry):
         self, api: str, *, timeout: float = 30.0, models: Iterable[Deployment] = ()
     ):
         super().__init__(name=f"first-party-{api}", timeout=timeout, models=models)
-
-    def base_url(self, model: Deployment) -> str | None:
-        return model.endpoint
+        # no resource to derive from; each SDK falls back to its own default
+        self.base = None
