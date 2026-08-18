@@ -12,30 +12,31 @@ uv add azure-switchboard
 
 ## Overview
 
-`azure-switchboard` is a Python 3 asyncio library that provides an API-compatible client loadbalancer for Chat Completions and the Anthropic Messages API. You instantiate a `Switchboard` with one or more deployment configs, and requests are distributed across healthy deployments using the [power of two random choices](https://www.eecs.harvard.edu/~michaelm/postscripts/handbook2001.pdf) method.
+`azure-switchboard` is a Python 3 asyncio library that provides an API-compatible client loadbalancer for Chat Completions and the Anthropic Messages API. You name a model; switchboard picks the deployment underneath, distributing requests across healthy ones using the [power of two random choices](https://www.eecs.harvard.edu/~michaelm/postscripts/handbook2001.pdf) method.
 
-Two deployment kinds can be mixed in a single `Switchboard`:
+The model mirrors Azure's own:
 
-- `OpenAIConfig` — Azure OpenAI (`base_url=.../openai/v1/`) or OpenAI (`base_url=None`), reached via `sb.chat.completions`.
-- `AnthropicConfig` — Claude on Azure AI Foundry, reached via `sb.messages`.
+- A **`Foundry`** is a resource: an endpoint, a credential, and the deployments it hosts.
+- An **`OpenAIModel`** or **`AnthropicModel`** is a deployment: a model instance with its own TPM/RPM allocation, speaking one API.
 
-Utilization tracking, session affinity, failover, and selection are shared across both.
+Because the API is a property of the deployment rather than the resource, one Foundry can serve both — reached at `sb.chat.completions` and `sb.messages` respectively, on one credential and one connection pool per API.
 
 ```python
-from azure_switchboard import AnthropicConfig, Model, OpenAIConfig, Switchboard
+from azure_switchboard import AnthropicModel, Foundry, OpenAIModel, Switchboard
 
-sb = Switchboard([
-    OpenAIConfig(
+sb = Switchboard(foundries=[
+    Foundry(
         name="east",
-        base_url="https://east.openai.azure.com/openai/v1/",
         api_key=...,
-        models=[Model(name="gpt-4o-mini", tpm=30000, rpm=300)],
+        models=[
+            OpenAIModel("gpt-4o-mini", tpm=30000, rpm=300),
+            AnthropicModel("claude-sonnet-5", tpm=30000, rpm=300),
+        ],
     ),
-    AnthropicConfig(
-        name="foundry1",
-        resource="my-foundry-resource",
+    Foundry(
+        name="west",
         api_key=...,
-        models=[Model(name="claude-sonnet-5", tpm=30000, rpm=300)],
+        models=[OpenAIModel("gpt-4o-mini", tpm=30000, rpm=300)],
     ),
 ])
 
@@ -51,6 +52,8 @@ async with sb:
     )
 ```
 
+Endpoints derive from the resource name as `https://{name}.services.ai.azure.com/`, onto which each deployment appends its API path. Pass `endpoint=` on a deployment to override it — for a legacy `<resource>.openai.azure.com` host, or a non-Azure one.
+
 ## Features
 
 - **API Compatibility**: each surface mirrors its SDK's own call path, so you port by swapping the client and changing nothing else. Return types are exact — no unions to narrow.
@@ -62,12 +65,13 @@ async with sb:
   | `anthropic.messages.create`      | `sb.messages.create`         | `Message`                 |
   | `anthropic.messages.parse`       | `sb.messages.parse`          | `ParsedMessage[T]`        |
 
-- **Multi-Provider**: OpenAI and Anthropic deployments coexist in one pool. Routing is keyed on model name, so a name registered against both providers is rejected at construction rather than resolving ambiguously.
+- **Multi-Provider**: OpenAI and Anthropic deployments coexist on one resource and in one Switchboard. Each API gets its own pool, so the calling surface resolves a model name — the same name may exist on both.
 - **Coordination-Free**: The default Two Random Choices algorithm does not require coordination between client instances to achieve excellent load distribution characteristics.
-- **Utilization-Aware**: TPM/RPM utilization is tracked per model per deployment for use during selection.
+- **Utilization-Aware**: TPM/RPM utilization is tracked per deployment for use during selection.
 - **Batteries Included**:
-  - **Session Affinity**: Provide a `session_id` to route requests in the same session to the same deployment.
+  - **Session Affinity**: Provide a `session_id` to route requests in the same session to the same resource, so a session spanning several models keeps one prompt cache warm.
   - **Automatic Failover**: Retries are controlled by a tenacity `AsyncRetrying` policy (`failover_policy`).
+  - **First-Party Fallback**: Set `openai_fallback=True` / `anthropic_fallback=True` to back the pool with the vendors' own APIs once nothing healthy is left.
   - **Pluggable Selection**: Custom selection algorithms can be provided by passing a callable to the `selector` parameter on the Switchboard constructor.
   - **OpenTelemetry Integration**: Built-in metrics for request routing and healthy deployment counts.
 - **Lightweight**: Small codebase with minimal dependencies: `openai`, `anthropic`, `loguru`, `tenacity`, `wrapt`, and `opentelemetry-api`.
@@ -90,43 +94,41 @@ async with sb:
 import asyncio
 import os
 
-from azure_switchboard import Model, OpenAIConfig, Switchboard
+from azure_switchboard import Foundry, OpenAIModel, Switchboard
 
 azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
 azure_openai_api_key = os.getenv("AZURE_OPENAI_API_KEY")
 openai_api_key = os.getenv("OPENAI_API_KEY")
 
-deployments = []
+foundries = []
 if azure_openai_endpoint and azure_openai_api_key:
-    # create 3 deployments. reusing the endpoint
+    # create 3 foundries. reusing the endpoint
     # is fine for the purposes of this demo
     for name in ("east", "west", "south"):
-        deployments.append(
-            OpenAIConfig(
+        foundries.append(
+            Foundry(
                 name=name,
-                base_url=f"{azure_openai_endpoint}/openai/v1/",
                 api_key=azure_openai_api_key,
-                models=[Model(name="gpt-4o-mini")],
+                models=[
+                    OpenAIModel(
+                        name="gpt-4o-mini",
+                        endpoint=f"{azure_openai_endpoint}/openai/v1/",
+                    )
+                ],
             )
         )
 
-if openai_api_key:
-    deployments.append(
-        OpenAIConfig(
-            name="openai",
-            api_key=openai_api_key,
-            models=[Model(name="gpt-4o-mini")],
-        )
-    )
-
-if not deployments:
+if not foundries and not openai_api_key:
     raise RuntimeError(
         "Set AZURE_OPENAI_ENDPOINT/AZURE_OPENAI_API_KEY or OPENAI_API_KEY to run this example."
     )
 
 
 async def main():
-    async with Switchboard(deployments=deployments) as sb:
+    # OPENAI_API_KEY, if set, backs the pool as a last resort
+    async with Switchboard(
+        foundries=foundries, openai_fallback=bool(openai_api_key)
+    ) as sb:
         print("Basic functionality:")
         await basic_functionality(sb)
 
@@ -187,7 +189,7 @@ async def session_affinity(switchboard: Switchboard):
     print("response 2:", r2.choices[0].message.content)
 
     # Simulate a failure by marking down the deployment
-    d1.models["gpt-4o-mini"].mark_down()
+    d1.mark_down()
 
     # A new deployment will be selected for this session_id
     r3 = await switchboard.chat.completions.create(
@@ -262,50 +264,63 @@ Distribution overhead scales ~linearly with the number of deployments.
 
 ## Configuration Reference
 
-### switchboard.Model Parameters
+### switchboard.Foundry Parameters
 
-| Parameter          | Description                                                            | Default       |
-| ------------------ | ---------------------------------------------------------------------- | ------------- |
-| `name`             | Model name as sent to Chat Completions                                 | Required      |
-| `tpm`              | Tokens-per-minute budget used for utilization tracking and routing     | 0 (unlimited) |
-| `rpm`              | Requests-per-minute budget used for utilization tracking and routing   | 0 (unlimited) |
-| `default_cooldown` | Cooldown duration (seconds) after a deployment/model failure mark-down | 10.0          |
+| Parameter          | Description                                                                       | Default  |
+| ------------------ | --------------------------------------------------------------------------------- | -------- |
+| `name`             | Azure resource name, resolving to `https://<name>.services.ai.azure.com/`         | Required |
+| `api_key`          | API key for the resource, shared by every deployment on it                        | None     |
+| `timeout`          | Per-request timeout in seconds. Raise it for batch jobs that need longer budgets. | 30.0     |
+| `models`           | Deployments hosted on this resource                                               | `()`     |
+| `default_cooldown` | Cooldown (seconds) applied to the whole resource when it is unreachable           | 10.0     |
 
-### switchboard.OpenAIConfig Parameters
+### switchboard.OpenAIModel / switchboard.AnthropicModel Parameters
 
-| Parameter  | Description                                                                                          | Default                      |
-| ---------- | ---------------------------------------------------------------------------------------------------- | ---------------------------- |
-| `name`     | Unique identifier for the deployment                                                                 | Required                     |
-| `base_url` | API base URL. Azure example: `https://<resource>.openai.azure.com/openai/v1/`. OpenAI: leave `None`. | None                         |
-| `api_key`  | API key for the deployment                                                                           | None                         |
-| `timeout`  | Per-request timeout in seconds. Override per deployment for batch jobs that need longer budgets.     | 30.0                         |
-| `models`   | Models available on this deployment                                                                  | Built-in model name defaults |
+| Parameter          | Description                                                          | Default       |
+| ------------------ | -------------------------------------------------------------------- | ------------- |
+| `name`             | Model name, sent as `model` and used as the routing key              | Required      |
+| `tpm`              | Tokens-per-minute budget used for utilization tracking and routing   | 0 (unlimited) |
+| `rpm`              | Requests-per-minute budget used for utilization tracking and routing | 0 (unlimited) |
+| `endpoint`         | Full base URL, overriding the one derived from the resource name     | Derived       |
+| `default_cooldown` | Cooldown duration (seconds) after this deployment is marked down     | 10.0          |
 
-### switchboard.AnthropicConfig Parameters
+`OpenAIModel` appends `openai/v1/` to the resource endpoint and is served at `sb.chat.completions`; `AnthropicModel` appends `anthropic/` and is served at `sb.messages`.
 
-| Parameter  | Description                                                                                        | Default  |
-| ---------- | -------------------------------------------------------------------------------------------------- | -------- |
-| `name`     | Unique identifier for the deployment                                                               | Required |
-| `resource` | Azure AI Foundry resource name, resolving to `https://<resource>.services.ai.azure.com/anthropic/` | None     |
-| `base_url` | Explicit endpoint, used instead of `resource`. One of the two is required.                         | None     |
-| `api_key`  | API key for the deployment                                                                         | None     |
-| `timeout`  | Per-request timeout in seconds                                                                     | 30.0     |
-| `models`   | Models available on this deployment                                                                | `[]`     |
+### switchboard.Switchboard Parameters
+
+| Parameter            | Description                                                    | Default              |
+| -------------------- | -------------------------------------------------------------- | -------------------- |
+| `foundries`          | Resources to balance across                                    | Required             |
+| `selector`           | Selection algorithm                                            | `two_random_choices` |
+| `failover_policy`    | tenacity `AsyncRetrying` policy, copied per call               | 2 attempts           |
+| `ratelimit_window`   | Seconds between usage-counter resets                           | 60.0                 |
+| `max_sessions`       | LRU capacity for session affinity pins                         | 1024                 |
+| `openai_fallback`    | Fall back to the OpenAI API, keyed from `OPENAI_API_KEY`       | False                |
+| `anthropic_fallback` | Fall back to the Anthropic API, keyed from `ANTHROPIC_API_KEY` | False                |
 
 `max_tokens` is required by the Messages API and is passed through unchanged — switchboard does not supply a default.
 
+### First-Party Fallback
+
+With `openai_fallback=True` or `anthropic_fallback=True`, the vendor's own API is what selection reaches for once a pool has nothing healthy left — including for models configured on no foundry at all. It is not part of a pool and never competes with a healthy deployment; it participates in the existing failover loop, so an Azure deployment that returns a 429 marks itself down and the retry lands first-party. The fallback can itself be marked down, so a rate-limited vendor API is not hammered either. Credentials come from the SDKs' own environment variables.
+
+Foundries may be omitted entirely if a fallback is configured.
+
 Token accounting differs slightly by provider. The Messages API has no `total_tokens`, so utilization is charged as `input_tokens + output_tokens`. When streaming, input tokens arrive on `message_start` and a running output total on each `message_delta`; the stream wrapper spends the difference so utilization stays fresh mid-stream.
 
-### Timeout vs. Rate-Limit Cooldown
+### Cooldown Scope
 
-`azure-switchboard` distinguishes between two categories of API errors:
+An error's cooldown is scoped to what that error actually implicates. Both providers are handled identically, against their respective SDK exception classes.
 
-Both providers are handled identically, against their respective SDK exception classes.
+| Error                | Scope           | Rationale                                                                                                                                                                 |
+| -------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RateLimitError`     | that deployment | Azure allocates TPM/RPM per deployment. One model exhausting its quota says nothing about another's on the same resource, so cooling the resource would discard capacity. |
+| `APIConnectionError` | whole resource  | The host is unreachable, so every deployment on it is unreachable.                                                                                                        |
+| `APITimeoutError`    | nothing         | Timeouts during an upstream-wide slowdown are _not_ correlated with the chosen deployment. Marking one down wastes capacity without providing a fix.                      |
 
-- **`RateLimitError` / `APIConnectionError`**: These are correlated with the specific deployment — the deployment is saturated or unreachable. The affected model is marked down with the configured `default_cooldown` (default 10s) so the load balancer avoids it.
-- **`APITimeoutError`**: Timeouts during an upstream-wide slowdown are _not_ correlated with any particular deployment. Marking a deployment down in this case wastes capacity without providing a fix — every deployment would cycle through cooldown in rotation. Timeouts are re-raised without triggering a cooldown.
+A cooling resource reports full utilization for every deployment on it, which also releases any session pinned to it back to normal selection.
 
-If your workload has a longer latency budget (e.g. batch structured-output jobs), set `timeout` on the relevant `OpenAIConfig` rather than relying on the default.
+If your workload has a longer latency budget (e.g. batch structured-output jobs), set `timeout` on the relevant `Foundry` rather than relying on the default.
 
 ### switchboard.Switchboard Parameters
 

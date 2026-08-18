@@ -16,6 +16,7 @@
 - Run single test: `uv run pytest tests/test_file.py::test_function_name -v`
 - Lint: `just lint` or `uv run ruff check . --fix`
 - Format: `uv run ruff format .`
+- Typecheck: `just typecheck` or `uv run pyright` (scoped to `src/`; runs in CI)
 - Demo: `just demo` or `uv run --env-file .env tools/api_demo.py`
 - Benchmark: `just bench` or `uv run --env-file .env tools/bench.py -v -r 1000 -d 10 -e 500`
 - OpenTelemetry demo: `just otel`
@@ -61,20 +62,22 @@
 
 - `src/azure_switchboard/`: Core implementation
   - `switchboard.py`: Main client implementation with load balancing logic
-  - `deployment.py`: `DeploymentBase`, the provider-agnostic utilization surface
-  - `openai_api.py`: OpenAI / Chat Completions deployments (`OpenAIConfig`)
-  - `anthropic_api.py`: Anthropic / Messages API deployments (`AnthropicConfig`)
-  - `model.py`: Per-model utilization and cooldown state
+  - `foundry.py`: `Foundry`, an Azure resource: endpoint, credential, clients, deployments
+  - `model.py`: `ModelBase`, the provider-agnostic deployment: quota, utilization, cooldown
+  - `openai_model.py`: `OpenAIModel`, a deployment speaking Chat Completions
+  - `anthropic_model.py`: `AnthropicModel`, a deployment speaking the Messages API
 - `tests/`: Comprehensive test suite
 - `tools/`: Demo and benchmark utilities
 
 ## Key Features
 
 - API-compatible drop-in for both SDKs, each at its own call path: `sb.chat.completions.*` and `sb.messages.*`
-- OpenAI and Anthropic deployments coexist in one pool, routed by model name (cross-provider name collisions rejected at construction)
+- A Foundry resource hosts deployments of either API; deployments are pooled per API, so the calling surface resolves a model name
+- First-party OpenAI/Anthropic fallback once a pool has nothing healthy left (`openai_fallback` / `anthropic_fallback`)
 - Coordination-free load balancing with "power of two random choices" algorithm
-- TPM/RPM rate limit tracking per model/deployment
-- Session affinity for efficient prompt caching
+- TPM/RPM rate limit tracking per deployment
+- Cooldowns scoped by error: 429 cools one deployment, connection errors cool the whole resource, timeouts cool nothing
+- Session affinity to a resource, for efficient prompt caching
 - Automatic failover with customizable retry policies
 - OpenTelemetry integration for monitoring
 - Lightweight implementation (~1k LOC) with minimal dependencies
