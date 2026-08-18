@@ -6,6 +6,7 @@ from collections import OrderedDict
 from functools import cached_property
 from typing import (
     Awaitable,
+    Generic,
     Callable,
     Literal,
     Sequence,
@@ -231,35 +232,50 @@ class Switchboard:
 
         return deployment
 
+    def __repr__(self) -> str:
+        return f"Switchboard({self.deployments})"
+
+
+class _Surface(Generic[_D]):
+    """One provider's call surface: selection, failover, and metrics.
+
+    Subclasses bind `_D` to their deployment class and set `deployment_type`
+    to that same class, so the callables handed to `_dispatch` are concretely
+    typed and the runtime narrowing agrees with the annotation.
+
+    The failover loop lives here rather than in each surface so the per-call
+    `failover_policy.copy()` (#62) has exactly one place to be correct.
+    """
+
+    deployment_type: type[_D]
+
+    def __init__(self, sb: Switchboard) -> None:
+        self.sb = sb
+
     async def _dispatch(
         self,
         *,
         model: str,
         session_id: str | None,
-        deployment_type: type[_D],
         call: Callable[[_D], Awaitable[_R]],
     ) -> _R:  # pyright: ignore[reportReturnType]
         """Select a deployment and issue `call` against it, with failover.
 
-        `deployment_type` narrows the selected deployment to the provider whose
-        surface `call` uses, so the callable is typed rather than Any. A model
-        name belongs to exactly one provider (enforced at construction), so a
-        mismatch here means the caller reached for the wrong surface.
-
-        The failover policy is copied per call so concurrent requests don't
-        share retry state.
+        A model name belongs to exactly one provider (enforced at
+        construction), so a deployment of the wrong type here means the caller
+        reached for the wrong surface.
         """
         with logger.contextualize(model=model, session_id=session_id):
-            async for attempt in self.failover_policy.copy():
+            async for attempt in self.sb.failover_policy.copy():
                 with attempt:
-                    deployment = self.select_deployment(
+                    deployment = self.sb.select_deployment(
                         model=model, session_id=session_id
                     )
-                    if not isinstance(deployment, deployment_type):
+                    if not isinstance(deployment, self.deployment_type):
                         raise SwitchboardError(
                             f"{model} is served by {deployment.name} over the "
                             f"{type(deployment).__name__} API, not "
-                            f"{deployment_type.__name__}"
+                            f"{self.deployment_type.__name__}"
                         )
                     with logger.contextualize(deployment=deployment.name):
                         logger.trace("Sending request")
@@ -269,9 +285,6 @@ class Switchboard:
                     )
                     return response
 
-    def __repr__(self) -> str:
-        return f"Switchboard({self.deployments})"
-
 
 class _Chat:
     """Mirrors `openai.AsyncOpenAI.chat`, whose sole member is `.completions`.
@@ -280,11 +293,10 @@ class _Chat:
     carry behavior.
     """
 
-    class Completions:
+    class Completions(_Surface[OpenAIDeployment]):
         """Mirrors `openai.AsyncOpenAI.chat.completions`."""
 
-        def __init__(self, switchboard: Switchboard) -> None:
-            self._switchboard = switchboard
+        deployment_type = OpenAIDeployment
 
         @overload
         async def create(
@@ -307,10 +319,9 @@ class _Chat:
             """
             Send a chat completion request to the selected deployment, with automatic failover.
             """
-            return await self._switchboard._dispatch(
+            return await self._dispatch(
                 model=model,
                 session_id=session_id,
-                deployment_type=OpenAIDeployment,
                 call=lambda d: d.create(model=model, stream=stream, **kwargs),
             )
 
@@ -326,10 +337,9 @@ class _Chat:
             Send a structured output parse request to the selected deployment, with
             automatic failover.
             """
-            return await self._switchboard._dispatch(
+            return await self._dispatch(
                 model=model,
                 session_id=session_id,
-                deployment_type=OpenAIDeployment,
                 call=lambda d: d.parse(
                     model=model, response_format=response_format, **kwargs
                 ),
@@ -339,16 +349,10 @@ class _Chat:
         self.completions = _Chat.Completions(switchboard)
 
 
-class _Messages:
-    """The Anthropic Messages surface, mirroring `anthropic.AsyncAnthropic.messages`.
+class _Messages(_Surface[AnthropicDeployment]):
+    """Mirrors `anthropic.AsyncAnthropic.messages`."""
 
-    OpenAI's `chat.completions.create`/`parse` map onto `Switchboard.create`
-    and `Switchboard.parse`; this is the equivalent for Anthropic, so callers
-    port from either SDK by changing the client and nothing else.
-    """
-
-    def __init__(self, switchboard: Switchboard) -> None:
-        self._switchboard = switchboard
+    deployment_type = AnthropicDeployment
 
     @overload
     async def create(
@@ -372,10 +376,9 @@ class _Messages:
         `max_tokens` is required by the Messages API and is passed through
         unchanged; switchboard does not supply a default.
         """
-        return await self._switchboard._dispatch(
+        return await self._dispatch(
             model=model,
             session_id=session_id,
-            deployment_type=AnthropicDeployment,
             call=lambda d: d.messages(model=model, stream=stream, **kwargs),
         )
 
@@ -391,10 +394,9 @@ class _Messages:
         Send a Messages API structured output request to the selected
         deployment, with automatic failover.
         """
-        return await self._switchboard._dispatch(
+        return await self._dispatch(
             model=model,
             session_id=session_id,
-            deployment_type=AnthropicDeployment,
             call=lambda d: d.parse(model=model, output_format=output_format, **kwargs),
         )
 
