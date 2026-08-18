@@ -58,12 +58,14 @@ Endpoints derive from the resource name as `https://{name}.services.ai.azure.com
 
 - **API Compatibility**: each surface mirrors its SDK's own call path, so you port by swapping the client and changing nothing else. Return types are exact — no unions to narrow.
 
-  | SDK call                         | Switchboard call             | Returns                   |
-  | -------------------------------- | ---------------------------- | ------------------------- |
-  | `openai.chat.completions.create` | `sb.chat.completions.create` | `ChatCompletion`          |
-  | `openai.chat.completions.parse`  | `sb.chat.completions.parse`  | `ParsedChatCompletion[T]` |
-  | `anthropic.messages.create`      | `sb.messages.create`         | `Message`                 |
-  | `anthropic.messages.parse`       | `sb.messages.parse`          | `ParsedMessage[T]`        |
+  | SDK call                         | Switchboard call             | Returns                     |
+  | -------------------------------- | ---------------------------- | --------------------------- |
+  | `openai.chat.completions.create` | `sb.chat.completions.create` | `ChatCompletion`            |
+  | `openai.chat.completions.parse`  | `sb.chat.completions.parse`  | `ParsedChatCompletion[T]`   |
+  | `openai.chat.completions.stream` | `sb.chat.completions.stream` | `AsyncChatCompletionStream` |
+  | `anthropic.messages.create`      | `sb.messages.create`         | `Message`                   |
+  | `anthropic.messages.parse`       | `sb.messages.parse`          | `ParsedMessage[T]`          |
+  | `anthropic.messages.stream`      | `sb.messages.stream`         | `AsyncMessageStream`        |
 
 - **Multi-Provider**: OpenAI and Anthropic deployments coexist on one resource and in one Switchboard. Each API gets its own pool, so the calling surface resolves a model name — the same name may exist on both.
 - **Coordination-Free**: The default Two Random Choices algorithm does not require coordination between client instances to achieve excellent load distribution characteristics.
@@ -361,6 +363,39 @@ Every candidate passed to a selector is a deployment of the requested model, so 
 There is no public entry point for selecting a deployment without calling one. Selection happens inside `create`/`parse`, and each surface mirrors its SDK, which has no such method. To see which resource a session is pinned to, read `sb.sessions[session_id]`.
 
 `max_tokens` is required by the Messages API and is passed through unchanged — switchboard does not supply a default.
+
+### Streaming
+
+Both SDKs offer two streaming entry points, and switchboard mirrors both.
+
+`create(stream=True)` returns the raw event stream, and usage is tapped per event so
+utilization stays fresh mid-stream:
+
+```python
+stream = await sb.messages.create(model=..., max_tokens=1024, messages=[...], stream=True)
+async for event in stream:
+    ...
+```
+
+`stream()` returns the SDK's accumulating helper, whose terminal `Message` /
+`ChatCompletion` carries assembled content, tool-use blocks and final usage. It is a
+context manager and not a coroutine, exactly as the SDKs' own are:
+
+```python
+async with sb.messages.stream(model=..., max_tokens=1024, messages=[...]) as s:
+    async for event in s:
+        ...
+    final = await s.get_final_message()
+```
+
+A caller here may never iterate — awaiting `get_final_message()` alone is enough — so
+usage is not tapped per event on this path. It is charged once from what the stream
+accumulated, which is correct either way.
+
+Selection, session affinity, fallback and failover apply when the stream is opened,
+so a deployment that fails to open is marked down and another is tried. A failure
+part-way through an open stream cannot be retried, which is the same limit
+`create(stream=True)` has.
 
 ### First-Party Fallback
 

@@ -109,6 +109,49 @@ async def messages(sb: Switchboard) -> None:
     check("create(stream=True)", "pong" in streamed.lower(), streamed.strip()[:40])
 
 
+async def stream_helpers(sb: Switchboard) -> None:
+    """The .stream() surfaces, driven exactly as the SDKs' own are."""
+    print("\nstream() helpers")
+
+    async with sb.messages.stream(
+        model=MESSAGES_MODEL, max_tokens=64, messages=PROMPT
+    ) as s:
+        events = 0
+        async for _ in s:
+            events += 1
+        final = await s.get_final_message()
+    text = "".join(b.text for b in final.content if b.type == "text")
+    check(
+        "messages.stream + get_final_message", "pong" in text.lower(), text.strip()[:40]
+    )
+    check("messages.stream yielded events", events > 0, f"{events} events")
+
+    # the case a per-event tap would miss: never iterate, just await the result
+    async with sb.messages.stream(
+        model=MESSAGES_MODEL, max_tokens=64, messages=PROMPT
+    ) as s:
+        before = sb.foundries[os.environ["AZURE_FOUNDRY"]].models[MESSAGES_MODEL]
+        spent_before = before.tpm_usage
+        final = await s.get_final_message()
+    spent_after = before.tpm_usage
+    text = "".join(b.text for b in final.content if b.type == "text")
+    check(
+        "messages.stream without iterating", "pong" in text.lower(), text.strip()[:40]
+    )
+    check(
+        "usage charged without iterating",
+        spent_after > spent_before,
+        f"{spent_before} -> {spent_after}",
+    )
+
+    async with sb.chat.completions.stream(model=CHAT_MODEL, messages=PROMPT) as s:
+        completion = await s.get_final_completion()
+    text = completion.choices[0].message.content or ""
+    check(
+        "chat.stream + get_final_completion", "pong" in text.lower(), text.strip()[:40]
+    )
+
+
 async def usage_tracking(sb: Switchboard) -> None:
     print("\nutilization")
     resource = os.environ["AZURE_FOUNDRY"]
@@ -209,6 +252,7 @@ async def main() -> int:
         await one_resource_two_clients(sb)
         await chat_completions(sb)
         await messages(sb)
+        await stream_helpers(sb)
         await usage_tracking(sb)
         await first_party_fallback(sb)
 

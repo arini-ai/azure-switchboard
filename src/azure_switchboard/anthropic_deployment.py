@@ -12,6 +12,7 @@ from anthropic import (
     AsyncStream,
     RateLimitError,
 )
+from anthropic.lib.streaming import AsyncMessageStream
 from anthropic.types import Message, ParsedMessage, RawMessageStreamEvent
 from anthropic.types.usage import Usage
 from loguru import logger
@@ -95,6 +96,34 @@ class AnthropicDeployment(ModelDeployment):
         except Exception as e:
             self._handle_error(e, "message")
             raise
+
+    async def open_stream(self, **kwargs) -> AsyncMessageStream:
+        """Enter the SDK's stream helper, which accumulates a terminal Message.
+
+        Unlike create(stream=True) the caller may never iterate — awaiting
+        get_final_message() alone is enough — so usage is not tapped per event
+        here. reconcile_stream charges it once the stream is done.
+        """
+        self.spend_tokens(self._estimate_token_usage(kwargs))
+        self.spend_request()
+
+        try:
+            logger.trace("Opening message stream")
+            return await self.client.messages.stream(
+                model=self.name, **kwargs
+            ).__aenter__()
+        except Exception as e:
+            self._handle_error(e, "stream")
+            raise
+
+    def reconcile_stream(self, stream: AsyncMessageStream, offset: int) -> None:
+        """Charge what the stream actually accumulated against the estimate."""
+        try:
+            usage = stream.current_message_snapshot.usage
+        except Exception:
+            # nothing was consumed, so the preflight estimate stands
+            return
+        self._reconcile_usage(usage, offset)
 
     async def parse(self, *, output_format: type[_T], **kwargs) -> ParsedMessage[_T]:
         """

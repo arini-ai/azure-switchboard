@@ -251,3 +251,31 @@ class TestParseErrorHandling:
 
         # "Hello, world!" is 13 chars -> 3 tokens
         assert anthropic_deployment.tpm_usage == 3
+
+
+class TestAnthropicStreamHelper:
+    """anthropic.messages.stream() accumulates a terminal Message, so usage is
+    charged from what it accumulated rather than tapped per event."""
+
+    def test_reconcile_charges_the_snapshot(
+        self, anthropic_deployment: AnthropicDeployment
+    ):
+        class _Stream:
+            current_message_snapshot = MESSAGE_RESPONSE
+
+        anthropic_deployment.reconcile_stream(_Stream(), offset=3)  # type: ignore[arg-type]
+        # 12 input + 8 output, less the preflight estimate already spent
+        assert anthropic_deployment.tpm_usage == 17
+
+    def test_reconcile_is_a_noop_when_nothing_accumulated(
+        self, anthropic_deployment: AnthropicDeployment
+    ):
+        """The SDK asserts on the snapshot before anything is consumed."""
+
+        class _Stream:
+            @property
+            def current_message_snapshot(self):
+                raise AssertionError("nothing consumed")
+
+        anthropic_deployment.reconcile_stream(_Stream(), offset=3)  # type: ignore[arg-type]
+        assert anthropic_deployment.tpm_usage == 0

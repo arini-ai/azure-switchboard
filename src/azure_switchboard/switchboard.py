@@ -14,9 +14,11 @@ from typing import (
 from collections.abc import Awaitable, Callable, Sequence
 
 from anthropic import AsyncStream as AsyncAnthropicStream
+from anthropic.lib.streaming import AsyncMessageStream
 from anthropic.types import Message, ParsedMessage, RawMessageStreamEvent
 from loguru import logger
 from openai import AsyncStream
+from openai.lib.streaming.chat import AsyncChatCompletionStream
 from openai.types.chat import ChatCompletion, ChatCompletionChunk, ParsedChatCompletion
 from opentelemetry import metrics
 from pydantic import BaseModel
@@ -329,6 +331,17 @@ class _Chat:
                 call=lambda d: d.parse(response_format=response_format, **kwargs),
             )
 
+        def stream(
+            self, *, model: str, session_id: str | None = None, **kwargs
+        ) -> _ChatStream:
+            """Mirror openai.chat.completions.stream(): a context manager whose
+            stream accumulates a terminal completion.
+
+            Not a coroutine, exactly as the SDK's is not — the request is sent
+            when the context is entered.
+            """
+            return _ChatStream(self, model=model, session_id=session_id, kwargs=kwargs)
+
     def __init__(self, switchboard: Switchboard) -> None:
         self.completions = _Chat.Completions(switchboard)
 
@@ -407,6 +420,111 @@ class _Messages:
             fallback=lambda: self._fallback(model),
             call=lambda d: d.parse(output_format=output_format, **kwargs),
         )
+
+    def stream(
+        self, *, model: str, session_id: str | None = None, **kwargs
+    ) -> _MessagesStream:
+        """Mirror anthropic.messages.stream(): a context manager whose stream
+        accumulates a terminal Message.
+
+        Not a coroutine, exactly as the SDK's is not — the request is sent when
+        the context is entered.
+        """
+        return _MessagesStream(self, model=model, session_id=session_id, kwargs=kwargs)
+
+
+class _ChatStream:
+    """Selection and failover for a Chat Completions stream.
+
+    Opening runs the same dispatch as create/parse, so a deployment that fails
+    to open is marked down and another is tried. Once open the stream is the
+    SDK's own, and a failure part-way through cannot be retried -- the same
+    limit create(stream=True) has.
+    """
+
+    def __init__(
+        self,
+        surface: _Chat.Completions,
+        *,
+        model: str,
+        session_id: str | None,
+        kwargs: dict,
+    ) -> None:
+        self._surface = surface
+        self._model = model
+        self._session_id = session_id
+        self._kwargs = kwargs
+        self._deployment: OpenAIDeployment | None = None
+        self._stream: AsyncChatCompletionStream | None = None
+        self._offset = 0
+
+    async def __aenter__(self) -> AsyncChatCompletionStream:
+        surface = self._surface
+
+        def call(d: OpenAIDeployment):
+            self._deployment = d
+            self._offset = d._estimate_token_usage(self._kwargs)
+            return d.open_stream(**self._kwargs)
+
+        self._stream = await surface.sb._dispatch(
+            surface._pool,
+            model=self._model,
+            session_id=self._session_id,
+            fallback=lambda: surface._fallback(self._model),
+            call=call,
+        )
+        return self._stream
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        if self._deployment and self._stream:
+            self._deployment.reconcile_stream(self._stream, self._offset)
+            if exc is not None:
+                self._deployment._handle_error(exc, "stream")
+            await self._stream.close()
+
+
+class _MessagesStream:
+    """Selection and failover for a Messages stream. See _ChatStream."""
+
+    def __init__(
+        self,
+        surface: _Messages,
+        *,
+        model: str,
+        session_id: str | None,
+        kwargs: dict,
+    ) -> None:
+        self._surface = surface
+        self._model = model
+        self._session_id = session_id
+        self._kwargs = kwargs
+        self._deployment: AnthropicDeployment | None = None
+        self._stream: AsyncMessageStream | None = None
+        self._offset = 0
+
+    async def __aenter__(self) -> AsyncMessageStream:
+        surface = self._surface
+
+        def call(d: AnthropicDeployment):
+            self._deployment = d
+            self._offset = d._estimate_token_usage(self._kwargs)
+            return d.open_stream(**self._kwargs)
+
+        self._stream = await surface.sb._dispatch(
+            surface._pool,
+            model=self._model,
+            session_id=self._session_id,
+            fallback=lambda: surface._fallback(self._model),
+            call=call,
+        )
+        return self._stream
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        if self._deployment and self._stream:
+            self._deployment.reconcile_stream(self._stream, self._offset)
+            if exc is not None:
+                self._deployment._handle_error(exc, "stream")
+            await self._stream.close()
 
 
 # borrowed from https://gist.github.com/davesteele/44793cd0348f59f8fadd49d7799bd306

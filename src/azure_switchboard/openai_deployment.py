@@ -12,6 +12,7 @@ from openai import (
     AsyncStream,
     RateLimitError,
 )
+from openai.lib.streaming.chat import AsyncChatCompletionStream
 from openai.types.chat import (
     ChatCompletion,
     ChatCompletionChunk,
@@ -101,6 +102,35 @@ class OpenAIDeployment(ModelDeployment):
         except Exception as e:
             self._handle_error(e, "completion")
             raise
+
+    async def open_stream(self, **kwargs) -> AsyncChatCompletionStream:
+        """Enter the SDK's stream helper, which accumulates a terminal completion.
+
+        Unlike create(stream=True) the caller may never iterate — awaiting
+        get_final_completion() alone is enough — so usage is not tapped per
+        chunk here. reconcile_stream charges it once the stream is done.
+        """
+        self.spend_tokens(self._estimate_token_usage(kwargs))
+        self.spend_request()
+
+        try:
+            logger.trace("Opening completion stream")
+            return await self.client.chat.completions.stream(
+                model=self.name,
+                # the snapshot carries no usage unless it is asked for
+                stream_options=kwargs.pop("stream_options", {"include_usage": True}),
+                **kwargs,
+            ).__aenter__()
+        except Exception as e:
+            self._handle_error(e, "stream")
+            raise
+
+    def reconcile_stream(self, stream: AsyncChatCompletionStream, offset: int) -> None:
+        """Charge what the stream actually accumulated against the estimate."""
+        usage = stream.current_completion_snapshot.usage
+        if usage:
+            self.spend_tokens(usage.total_tokens - offset)
+            self._set_span_attributes(usage)
 
     async def parse(
         self, *, response_format: type[_T], **kwargs

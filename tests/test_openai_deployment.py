@@ -414,3 +414,27 @@ class TestOpenAIDeployment:
                 await deployment.create(**COMPLETION_BODY)
             assert mock.call_count == 1
             assert not deployment.is_healthy()
+
+
+class TestOpenAIStreamHelper:
+    """openai.chat.completions.stream() accumulates a terminal completion, so
+    usage is charged from what it accumulated rather than tapped per chunk."""
+
+    def test_reconcile_charges_the_snapshot(self, deployment: OpenAIDeployment):
+        class _Stream:
+            current_completion_snapshot = COMPLETION_RESPONSE
+
+        deployment.reconcile_stream(_Stream(), offset=5)  # type: ignore[arg-type]
+        # 20 total, less the preflight estimate already spent
+        assert deployment.tpm_usage == 15
+
+    def test_reconcile_is_a_noop_without_usage(self, deployment: OpenAIDeployment):
+        """Usage is absent unless the request asked for it."""
+
+        class _Stream:
+            current_completion_snapshot = COMPLETION_RESPONSE.model_copy(
+                update={"usage": None}
+            )
+
+        deployment.reconcile_stream(_Stream(), offset=5)  # type: ignore[arg-type]
+        assert deployment.tpm_usage == 0
