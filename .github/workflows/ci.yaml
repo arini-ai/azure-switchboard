@@ -27,5 +27,22 @@ jobs:
       - name: Trunk Code Quality
         uses: trunk-io/trunk-action@v1
 
+  typecheck:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.10"
+
+      - name: Run pyright # scoped to src/ in pyproject.toml
+        run: uv run pyright
+
   test:
     uses: ./.github/workflows/test.yaml

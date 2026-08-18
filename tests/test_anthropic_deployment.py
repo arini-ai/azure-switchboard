@@ -5,13 +5,15 @@ from anthropic import APIConnectionError, APITimeoutError, RateLimitError
 from httpx import Request, Response
 from pydantic import BaseModel
 
-from azure_switchboard import AnthropicConfig, Model, SwitchboardError
-from azure_switchboard.anthropic_api import AnthropicDeployment, _content_len
+from azure_switchboard import AnthropicDeployment, Foundry
+from azure_switchboard.resource import Resource
+from azure_switchboard.anthropic_deployment import _content_len
 
 from .conftest import (
-    MESSAGE_PARAMS,
+    MESSAGE_BODY,
     MESSAGE_RESPONSE,
     MESSAGE_STREAM_EVENTS,
+    anthropic_foundry,
     collect_events,
     message_mock,
 )
@@ -33,47 +35,70 @@ def _rate_limit() -> RateLimitError:
     )
 
 
-class TestAnthropicConfig:
-    def test_resource_builds_foundry_url(self):
-        client = AnthropicConfig(name="d", resource="my-res", api_key="k").get_client()
-        assert str(client.base_url).startswith(
+def _assert_cooldown_scope(deployment: AnthropicDeployment, scope: str | None) -> None:
+    """A 429 is one deployment's quota; a connection error is the whole host."""
+    assert deployment.is_cooling() is (scope == "model")
+    assert deployment.resource.is_cooling() is (scope == "resource")
+    # either scope takes this deployment out of selection
+    assert deployment.is_healthy() is (scope is None)
+
+
+class TestAnthropicEndpoint:
+    def test_resource_name_builds_the_anthropic_url(self):
+        deployment = anthropic_foundry("my-res").models["claude-sonnet-5"]
+        assert str(deployment.client.base_url).startswith(
             "https://my-res.services.ai.azure.com/anthropic"
         )
 
-    def test_base_url_overrides_resource(self):
-        client = AnthropicConfig(
-            name="d", base_url="https://custom.example/anthropic/", api_key="k"
-        ).get_client()
+    def test_endpoint_override_wins(self):
+        resource = Foundry(
+            name="d",
+            api_key="k",
+            models=[
+                AnthropicDeployment(
+                    name="claude-sonnet-5", endpoint="https://custom.example/anthropic/"
+                )
+            ],
+        )
+        client = resource.models["claude-sonnet-5"].client
         assert "custom.example" in str(client.base_url)
 
-    def test_requires_an_endpoint(self):
-        with pytest.raises(SwitchboardError, match="resource or base_url"):
-            AnthropicConfig(name="d", api_key="k").get_client()
+    def test_resource_client_is_the_azure_variant(self):
+        """AsyncAnthropicFoundry sends Azure's api-key header, so it is not
+        interchangeable with the first-party client."""
+        deployment = anthropic_foundry("my-res").models["claude-sonnet-5"]
+        assert type(deployment.client).__name__ == "AsyncAnthropicFoundry"
+
+    def test_first_party_client_is_the_plain_variant(self, monkeypatch):
+        """A Resource with no base derives no URL, so the SDK falls back to its
+        vendor default and the plain client is the right one."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+        resource = Resource(
+            "first-party-anthropic", models=[AnthropicDeployment("claude-sonnet-5")]
+        )
+        deployment = resource.models["claude-sonnet-5"]
+        assert deployment.url is None
+        assert type(deployment.client).__name__ == "AsyncAnthropic"
 
 
 class TestAnthropicDeployment:
-    async def test_init(self, anthropic_deployment: AnthropicDeployment):
-        assert anthropic_deployment.client is not None
-        assert anthropic_deployment.model("claude-sonnet-5") is not None
-
-    async def test_unknown_model_rejected(
-        self, anthropic_deployment: AnthropicDeployment
+    async def test_init(
+        self, anthropic_deployment: AnthropicDeployment, anthropic_resource
     ):
-        with pytest.raises(SwitchboardError, match="not configured"):
-            await anthropic_deployment.messages(
-                model="gpt-4o", max_tokens=1, messages=[]
-            )
+        assert anthropic_deployment.name == "claude-sonnet-5"
+        assert anthropic_deployment.resource is anthropic_resource
+        assert anthropic_deployment.client is not None
 
     async def test_messages(self, anthropic_deployment: AnthropicDeployment):
         with patch.object(
             anthropic_deployment.client.messages, "create", side_effect=message_mock()
         ) as mock:
-            response = await anthropic_deployment.messages(**MESSAGE_PARAMS)
+            response = await anthropic_deployment.create(**MESSAGE_BODY)
             mock.assert_called_once()
             assert response == MESSAGE_RESPONSE
 
         # input_tokens + output_tokens, since there is no total_tokens
-        usage = anthropic_deployment.model("claude-sonnet-5").stats()
+        usage = anthropic_deployment.stats()
         assert usage.tpm.startswith("20/")
         assert usage.rpm.startswith("1/")
 
@@ -84,14 +109,14 @@ class TestAnthropicDeployment:
         with patch.object(
             anthropic_deployment.client.messages, "create", side_effect=message_mock()
         ):
-            stream = await anthropic_deployment.messages(stream=True, **MESSAGE_PARAMS)
+            stream = await anthropic_deployment.create(stream=True, **MESSAGE_BODY)
             received, content = await collect_events(stream)
 
         assert len(received) == len(MESSAGE_STREAM_EVENTS)
         assert content == "Hello, world!"
 
         # 12 input + 9 output, with the cumulative delta counted once
-        usage = anthropic_deployment.model("claude-sonnet-5").stats()
+        usage = anthropic_deployment.stats()
         assert usage.tpm.startswith("21/")
         assert usage.rpm.startswith("1/")
 
@@ -100,14 +125,13 @@ class TestAnthropicDeployment:
             anthropic_deployment.client.messages, "parse", side_effect=message_mock()
         ) as mock:
             await anthropic_deployment.parse(
-                model="claude-sonnet-5",
                 output_format=Weather,
                 max_tokens=1024,
                 messages=[{"role": "user", "content": "Weather in Paris?"}],
             )
             assert mock.call_args.kwargs["output_format"] is Weather
 
-        usage = anthropic_deployment.model("claude-sonnet-5").stats()
+        usage = anthropic_deployment.stats()
         assert usage.tpm.startswith("20/")
 
 
@@ -116,38 +140,36 @@ class TestAnthropicErrorHandling:
     down, timeouts do not."""
 
     @pytest.mark.parametrize(
-        "error,should_mark_down",
+        "error,scope",
         [
-            (_rate_limit(), True),
-            (APIConnectionError(request=_request()), True),
-            (APITimeoutError(request=_request()), False),
+            (_rate_limit(), "model"),
+            (APIConnectionError(request=_request()), "resource"),
+            (APITimeoutError(request=_request()), None),
         ],
         ids=["rate_limit", "connection", "timeout"],
     )
     async def test_cooldown_policy(
-        self, anthropic_deployment: AnthropicDeployment, error, should_mark_down
+        self, anthropic_deployment: AnthropicDeployment, error, scope
     ):
-        model = anthropic_deployment.model("claude-sonnet-5")
         with patch.object(
             anthropic_deployment.client.messages, "create", side_effect=error
         ):
             with pytest.raises(type(error)):
-                await anthropic_deployment.messages(**MESSAGE_PARAMS)
-        assert model.is_cooling() is should_mark_down
+                await anthropic_deployment.create(**MESSAGE_BODY)
+        _assert_cooldown_scope(anthropic_deployment, scope)
 
     @pytest.mark.parametrize(
-        "error,should_mark_down",
+        "error,scope",
         [
-            (_rate_limit(), True),
-            (APIConnectionError(request=_request()), True),
-            (APITimeoutError(request=_request()), False),
+            (_rate_limit(), "model"),
+            (APIConnectionError(request=_request()), "resource"),
+            (APITimeoutError(request=_request()), None),
         ],
         ids=["rate_limit", "connection", "timeout"],
     )
     async def test_cooldown_policy_on_stream(
-        self, anthropic_deployment: AnthropicDeployment, error, should_mark_down
+        self, anthropic_deployment: AnthropicDeployment, error, scope
     ):
-        model = anthropic_deployment.model("claude-sonnet-5")
 
         async def _raising_stream(*args, **kwargs):
             raise error
@@ -158,10 +180,10 @@ class TestAnthropicErrorHandling:
             "create",
             new=AsyncMock(side_effect=lambda *a, **k: _raising_stream()),
         ):
-            stream = await anthropic_deployment.messages(stream=True, **MESSAGE_PARAMS)
+            stream = await anthropic_deployment.create(stream=True, **MESSAGE_BODY)
             with pytest.raises(type(error)):
                 await collect_events(stream)
-        assert model.is_cooling() is should_mark_down
+        _assert_cooldown_scope(anthropic_deployment, scope)
 
 
 class TestTokenEstimate:
@@ -175,14 +197,7 @@ class TestTokenEstimate:
         assert _content_len(None) == 0
 
     def test_estimate_counts_blocks_and_system(self):
-        d = AnthropicDeployment(
-            AnthropicConfig(
-                name="d",
-                resource="r",
-                api_key="k",
-                models=[Model(name="claude-sonnet-5")],
-            )
-        )
+        d = anthropic_foundry("d").models["claude-sonnet-5"]
         estimate = d._estimate_token_usage(
             {
                 "system": "s" * 40,
@@ -200,29 +215,27 @@ class TestTokenEstimate:
 
 class TestParseErrorHandling:
     @pytest.mark.parametrize(
-        "error,should_mark_down",
+        "error,scope",
         [
-            (_rate_limit(), True),
-            (APIConnectionError(request=_request()), True),
-            (APITimeoutError(request=_request()), False),
+            (_rate_limit(), "model"),
+            (APIConnectionError(request=_request()), "resource"),
+            (APITimeoutError(request=_request()), None),
         ],
         ids=["rate_limit", "connection", "timeout"],
     )
     async def test_cooldown_policy_on_parse(
-        self, anthropic_deployment: AnthropicDeployment, error, should_mark_down
+        self, anthropic_deployment: AnthropicDeployment, error, scope
     ):
-        model = anthropic_deployment.model("claude-sonnet-5")
         with patch.object(
             anthropic_deployment.client.messages, "parse", side_effect=error
         ):
             with pytest.raises(type(error)):
                 await anthropic_deployment.parse(
-                    model="claude-sonnet-5",
                     output_format=Weather,
                     max_tokens=16,
                     messages=[{"role": "user", "content": "hi"}],
                 )
-        assert model.is_cooling() is should_mark_down
+        _assert_cooldown_scope(anthropic_deployment, scope)
 
     async def test_response_without_usage_only_spends_the_estimate(
         self, anthropic_deployment: AnthropicDeployment
@@ -234,7 +247,35 @@ class TestParseErrorHandling:
             "create",
             new=AsyncMock(return_value=no_usage),
         ):
-            await anthropic_deployment.messages(**MESSAGE_PARAMS)
+            await anthropic_deployment.create(**MESSAGE_BODY)
 
         # "Hello, world!" is 13 chars -> 3 tokens
-        assert anthropic_deployment.model("claude-sonnet-5").tpm_usage == 3
+        assert anthropic_deployment.tpm_usage == 3
+
+
+class TestAnthropicStreamHelper:
+    """anthropic.messages.stream() accumulates a terminal Message, so usage is
+    charged from what it accumulated rather than tapped per event."""
+
+    def test_reconcile_charges_the_snapshot(
+        self, anthropic_deployment: AnthropicDeployment
+    ):
+        class _Stream:
+            current_message_snapshot = MESSAGE_RESPONSE
+
+        anthropic_deployment.reconcile_stream(_Stream(), offset=3)  # type: ignore[arg-type]
+        # 12 input + 8 output, less the preflight estimate already spent
+        assert anthropic_deployment.tpm_usage == 17
+
+    def test_reconcile_is_a_noop_when_nothing_accumulated(
+        self, anthropic_deployment: AnthropicDeployment
+    ):
+        """The SDK asserts on the snapshot before anything is consumed."""
+
+        class _Stream:
+            @property
+            def current_message_snapshot(self):
+                raise AssertionError("nothing consumed")
+
+        anthropic_deployment.reconcile_stream(_Stream(), offset=3)  # type: ignore[arg-type]
+        assert anthropic_deployment.tpm_usage == 0

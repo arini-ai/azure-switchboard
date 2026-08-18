@@ -6,10 +6,10 @@ import respx
 from httpx import Request, Response, TimeoutException
 from openai import APIConnectionError, APITimeoutError, RateLimitError
 
-from azure_switchboard import SwitchboardError
-from azure_switchboard.openai_api import OpenAIConfig, OpenAIDeployment
+from azure_switchboard import Foundry, OpenAIDeployment
 
 from .conftest import (
+    COMPLETION_BODY,
     COMPLETION_PARAMS,
     COMPLETION_RESPONSE,
     COMPLETION_RESPONSE_JSON,
@@ -19,16 +19,15 @@ from .conftest import (
 )
 
 
-class TestDeployment:
-    """Deployment functionality tests."""
+class TestOpenAIDeployment:
+    """Chat Completions deployment tests."""
 
-    async def test_init(self, deployment: OpenAIDeployment):
-        """Test initialization of Deployment."""
-        assert deployment is not None
+    async def test_init(self, deployment: OpenAIDeployment, foundry: Foundry):
+        """A deployment knows its resource and borrows that resource's client."""
+        assert deployment.name == "gpt-4o-mini"
+        assert deployment.resource is foundry
         assert deployment.client is not None
-        assert deployment.models is not None
-        assert deployment.model("gpt-4o-mini") is not None
-        assert deployment.model("gpt-4o") is not None
+        assert set(foundry.models) == {"gpt-4o-mini", "gpt-4o"}
 
     @pytest.mark.mock_models("gpt-4o-mini")
     async def test_completion(
@@ -38,12 +37,12 @@ class TestDeployment:
 
         deployment.client.max_retries = 0
 
-        response = await deployment.create(**COMPLETION_PARAMS)
+        response = await deployment.create(**COMPLETION_BODY)
         assert mock_client.routes["azure"].call_count == 1
         assert response == COMPLETION_RESPONSE
 
         # Check token usage tracking
-        model = deployment.model("gpt-4o-mini")
+        model = deployment
         usage = model.stats()
         assert usage.tpm.startswith(str(COMPLETION_RESPONSE.usage.total_tokens))  # pyright: ignore[reportOptionalMemberAccess]
         assert usage.rpm.startswith("1")
@@ -51,7 +50,7 @@ class TestDeployment:
         # Test exception handling
         mock_client.routes["azure"].side_effect = Exception("test")
         with pytest.raises(APIConnectionError):
-            await deployment.create(**COMPLETION_PARAMS)
+            await deployment.create(**COMPLETION_BODY)
         assert mock_client.routes["azure"].call_count == 2
 
         # account for preflight estimate
@@ -73,7 +72,7 @@ class TestDeployment:
             "create",
             side_effect=chat_completion_mock(),
         ) as mock:
-            stream = await deployment.create(stream=True, **COMPLETION_PARAMS)
+            stream = await deployment.create(stream=True, **COMPLETION_BODY)
             mock.assert_called_once()
 
             # verify basic behavior
@@ -82,7 +81,7 @@ class TestDeployment:
             assert content == "Hello, world!"
 
             # Verify token usage tracking
-            usage = deployment.model("gpt-4o-mini").stats()
+            usage = deployment.stats()
             assert "20/" in usage.tpm
             assert "1/" in usage.rpm
 
@@ -98,17 +97,19 @@ class TestDeployment:
             side_effect=connection_error,
         ) as mock:
             with pytest.raises(APIConnectionError):
-                stream = await deployment.create(stream=True, **COMPLETION_PARAMS)
+                stream = await deployment.create(stream=True, **COMPLETION_BODY)
                 async for _ in stream:
                     pass
             mock.assert_called_once()
 
-            usage = deployment.model("gpt-4o-mini").stats()
+            usage = deployment.stats()
             assert "23/" in usage.tpm
             assert "2/" in usage.rpm
 
-        # Reset from previous connection error test
-        deployment.model("gpt-4o-mini").mark_up()
+        # A connection error cools the resource, not just this deployment
+        assert deployment.resource.is_cooling()
+        assert not deployment.is_cooling()
+        deployment.resource.mark_up()
 
         # Test midstream exception handling — generic exceptions do NOT mark down
         with patch.object(
@@ -116,7 +117,7 @@ class TestDeployment:
             "create",
             side_effect=chat_completion_mock(),
         ) as mock:
-            stream = await deployment.create(stream=True, **COMPLETION_PARAMS)
+            stream = await deployment.create(stream=True, **COMPLETION_BODY)
 
             with patch.object(
                 stream._self_model,  # type: ignore[reportAttributeAccessIssue]
@@ -126,7 +127,7 @@ class TestDeployment:
                 with pytest.raises(Exception, match="asyncstream error"):
                     await collect_chunks(stream)
                 assert mock.call_count == 1
-                assert deployment.model("gpt-4o-mini").is_healthy()
+                assert deployment.is_healthy()
 
         # Test midstream connection error marks down
         connection_error = APIConnectionError(
@@ -144,13 +145,13 @@ class TestDeployment:
             "create",
             new=AsyncMock(return_value=connection_error_stream()),
         ) as mock:
-            stream = await deployment.create(stream=True, **COMPLETION_PARAMS)
+            stream = await deployment.create(stream=True, **COMPLETION_BODY)
             with pytest.raises(APIConnectionError):
                 await collect_chunks(stream)
             assert mock.call_count == 1
-            assert not deployment.model("gpt-4o-mini").is_healthy()
+            assert not deployment.is_healthy()
 
-        deployment.model("gpt-4o-mini").mark_up()
+        deployment.mark_up()
 
         # Test midstream rate limit handling
         rate_limit_error = RateLimitError(
@@ -173,16 +174,16 @@ class TestDeployment:
             "create",
             new=AsyncMock(return_value=rate_limited_stream()),
         ) as mock:
-            stream = await deployment.create(stream=True, **COMPLETION_PARAMS)
+            stream = await deployment.create(stream=True, **COMPLETION_BODY)
             with pytest.raises(RateLimitError):
                 await collect_chunks(stream)
             assert mock.call_count == 1
-            assert not deployment.model("gpt-4o-mini").is_healthy()
+            assert not deployment.is_healthy()
 
     async def test_mark_down(self, deployment: OpenAIDeployment):
         """Test model-level cooldown functionality."""
 
-        model = deployment.model("gpt-4o-mini")
+        model = deployment
 
         model.mark_down()
         assert not model.is_healthy()
@@ -190,21 +191,15 @@ class TestDeployment:
         model.mark_up()
         assert model.is_healthy()
 
-    async def test_valid_model(self, deployment: OpenAIDeployment):
-        """Test that an invalid model raises an error."""
-
-        with pytest.raises(SwitchboardError, match="gpt-fake not configured"):
-            await deployment.create(model="gpt-fake", messages=[])
-
-    async def test_usage(self, deployment: OpenAIDeployment):
-        """Test client-level counters"""
+    async def test_usage(self, deployment: OpenAIDeployment, foundry: Foundry):
+        """Test deployment-level counters"""
 
         # Reset and verify initial state
-        for model in deployment.models.values():
+        for model in foundry.models.values():
             assert "tpm='0" in str(model)
 
-        # Test client-level usage
-        model = deployment.model("gpt-4o-mini")
+        # Test deployment-level usage
+        model = deployment
         usage = model.stats()
         assert usage.tpm == f"0/{model.tpm_limit}"
         assert usage.rpm == f"0/{model.rpm_limit}"
@@ -217,16 +212,15 @@ class TestDeployment:
         assert usage.rpm == f"5/{model.rpm_limit}"
 
         # Reset and verify again
-        deployment.reset_usage()
+        foundry.reset_usage()
         usage = model.stats()
         assert usage.tpm == f"0/{model.tpm_limit}"
         assert usage.rpm == f"0/{model.rpm_limit}"
-        assert model.last_reset > 0
 
     async def test_utilization(self, deployment: OpenAIDeployment):
         """Test utilization calculation."""
 
-        model = deployment.model("gpt-4o-mini")
+        model = deployment
 
         # Check initial utilization (nonzero due to random splay)
         initial_util = model.util
@@ -256,26 +250,22 @@ class TestDeployment:
 
     @pytest.mark.mock_models("gpt-4o-mini", "gpt-4o")
     async def test_multiple_models(
-        self, mock_client: respx.MockRouter, deployment: OpenAIDeployment
+        self, mock_client: respx.MockRouter, foundry: Foundry
     ):
-        """Test that multiple models are handled correctly."""
+        """Deployments on one resource keep separate usage counters."""
 
-        gpt4o = deployment.models["gpt-4o"]
-        gpt4o_mini = deployment.models["gpt-4o-mini"]
+        gpt4o = foundry.models["gpt-4o"]
+        gpt4o_mini = foundry.models["gpt-4o-mini"]
+        deployment = gpt4o_mini
 
-        assert gpt4o is not None
-        assert gpt4o_mini is not None
-
-        _ = await deployment.create(
-            model="gpt-4o", messages=COMPLETION_PARAMS["messages"]
-        )
+        _ = await gpt4o.create(messages=COMPLETION_PARAMS["messages"])
         assert mock_client.routes["azure"].call_count == 1
         assert gpt4o.rpm_usage == 1
         assert gpt4o.tpm_usage > 0
         assert gpt4o_mini.tpm_usage == 0
         assert gpt4o_mini.rpm_usage == 0
 
-        _ = await deployment.create(**COMPLETION_PARAMS)
+        _ = await deployment.create(**COMPLETION_BODY)
         assert mock_client.routes["azure"].call_count == 2
 
         assert gpt4o.rpm_usage == 1
@@ -291,11 +281,11 @@ class TestDeployment:
 
         # Create and run concurrent requests
         num_requests = 10
-        tasks = [deployment.create(**COMPLETION_PARAMS) for _ in range(num_requests)]
+        tasks = [deployment.create(**COMPLETION_BODY) for _ in range(num_requests)]
         responses = await asyncio.gather(*tasks)
 
         # Verify results
-        model = deployment.models["gpt-4o-mini"]
+        model = deployment
         assert len(responses) == num_requests
         assert all(r == COMPLETION_RESPONSE for r in responses)
         assert mock_client.routes["azure"].call_count == num_requests
@@ -316,7 +306,7 @@ class TestDeployment:
             TimeoutException("Timeout 2"),
             expected_response,
         ]
-        response = await deployment.create(**COMPLETION_PARAMS)
+        response = await deployment.create(**COMPLETION_BODY)
         assert response == COMPLETION_RESPONSE
         assert mock_client.routes["azure"].call_count == 3
 
@@ -329,9 +319,9 @@ class TestDeployment:
         ]
 
         with pytest.raises(APITimeoutError):
-            await deployment.create(**COMPLETION_PARAMS)
+            await deployment.create(**COMPLETION_BODY)
         assert mock_client.routes["azure"].call_count == 3
-        assert deployment.is_healthy("gpt-4o-mini")
+        assert deployment.is_healthy()
 
     async def test_timeout_does_not_mark_down(self, deployment: OpenAIDeployment):
         """APITimeoutError should not mark the deployment down."""
@@ -349,8 +339,8 @@ class TestDeployment:
             side_effect=timeout_error,
         ):
             with pytest.raises(APITimeoutError):
-                await deployment.create(**COMPLETION_PARAMS)
-            assert deployment.model("gpt-4o-mini").is_healthy()
+                await deployment.create(**COMPLETION_BODY)
+            assert deployment.is_healthy()
 
         # Repeated timeouts should not pin utilization to 1
         for _ in range(5):
@@ -360,10 +350,10 @@ class TestDeployment:
                 side_effect=timeout_error,
             ):
                 with pytest.raises(APITimeoutError):
-                    await deployment.create(**COMPLETION_PARAMS)
+                    await deployment.create(**COMPLETION_BODY)
 
-        assert deployment.model("gpt-4o-mini").is_healthy()
-        assert deployment.model("gpt-4o-mini").util < 1
+        assert deployment.is_healthy()
+        assert deployment.util < 1
 
     async def test_timeout_does_not_mark_down_stream(
         self, deployment: OpenAIDeployment
@@ -386,20 +376,18 @@ class TestDeployment:
             "create",
             new=AsyncMock(return_value=timeout_stream()),
         ):
-            stream = await deployment.create(stream=True, **COMPLETION_PARAMS)
+            stream = await deployment.create(stream=True, **COMPLETION_BODY)
             with pytest.raises(APITimeoutError):
                 await collect_chunks(stream)
-            assert deployment.model("gpt-4o-mini").is_healthy()
+            assert deployment.is_healthy()
 
     def test_default_timeout(self):
         """Default per-request timeout should be 30s."""
-        config = OpenAIConfig(name="test", api_key="key")
-        assert config.timeout == 30.0
+        assert Foundry(name="test", api_key="key").timeout == 30.0
 
     def test_custom_timeout(self):
-        """Callers that need longer timeouts can override per OpenAIConfig."""
-        config = OpenAIConfig(name="batch", api_key="key", timeout=300.0)
-        assert config.timeout == 300.0
+        """Callers that need longer timeouts can override per Foundry."""
+        assert Foundry(name="batch", api_key="key", timeout=300.0).timeout == 300.0
 
     async def test_rate_limit_marks_down(self, deployment: OpenAIDeployment):
         """Rate limit errors should mark the model down and re-raise."""
@@ -422,11 +410,30 @@ class TestDeployment:
             side_effect=rate_limit_error,
         ) as mock:
             with pytest.raises(RateLimitError):
-                await deployment.create(**COMPLETION_PARAMS)
+                await deployment.create(**COMPLETION_BODY)
             assert mock.call_count == 1
-            assert not deployment.model("gpt-4o-mini").is_healthy()
+            assert not deployment.is_healthy()
 
-    async def test_invalid_model(self, deployment: OpenAIDeployment):
-        """Test that an invalid or unconfigured model is not eligible on a deployment."""
 
-        assert not deployment.is_healthy("invalid-model")
+class TestOpenAIStreamHelper:
+    """openai.chat.completions.stream() accumulates a terminal completion, so
+    usage is charged from what it accumulated rather than tapped per chunk."""
+
+    def test_reconcile_charges_the_snapshot(self, deployment: OpenAIDeployment):
+        class _Stream:
+            current_completion_snapshot = COMPLETION_RESPONSE
+
+        deployment.reconcile_stream(_Stream(), offset=5)  # type: ignore[arg-type]
+        # 20 total, less the preflight estimate already spent
+        assert deployment.tpm_usage == 15
+
+    def test_reconcile_is_a_noop_without_usage(self, deployment: OpenAIDeployment):
+        """Usage is absent unless the request asked for it."""
+
+        class _Stream:
+            current_completion_snapshot = COMPLETION_RESPONSE.model_copy(
+                update={"usage": None}
+            )
+
+        deployment.reconcile_stream(_Stream(), offset=5)  # type: ignore[arg-type]
+        assert deployment.tpm_usage == 0

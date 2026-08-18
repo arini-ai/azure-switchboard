@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # To run this, use:
-#   uv run --env-file .env tools/readme_example.py
+#   just demo
 #
 # /// script
 # requires-python = ">=3.10"
@@ -13,43 +13,41 @@
 import asyncio
 import os
 
-from azure_switchboard import OpenAIConfig, Model, Switchboard
+from azure_switchboard import Foundry, OpenAIDeployment, Switchboard
 
 azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
 azure_openai_api_key = os.getenv("AZURE_OPENAI_API_KEY")
 openai_api_key = os.getenv("OPENAI_API_KEY")
 
-deployments = []
+resources = []
 if azure_openai_endpoint and azure_openai_api_key:
-    # create 3 deployments. reusing the endpoint
+    # create 3 resources. reusing the endpoint
     # is fine for the purposes of this demo
     for name in ("east", "west", "south"):
-        deployments.append(
-            OpenAIConfig(
+        resources.append(
+            Foundry(
                 name=name,
-                base_url=f"{azure_openai_endpoint}/openai/v1/",
                 api_key=azure_openai_api_key,
-                models=[Model(name="gpt-4o-mini")],
+                models=[
+                    OpenAIDeployment(
+                        name="gpt-4o-mini",
+                        endpoint=f"{azure_openai_endpoint}/openai/v1/",
+                    )
+                ],
             )
         )
 
-if openai_api_key:
-    deployments.append(
-        OpenAIConfig(
-            name="openai",
-            api_key=openai_api_key,
-            models=[Model(name="gpt-4o-mini")],
-        )
-    )
-
-if not deployments:
+if not resources and not openai_api_key:
     raise RuntimeError(
         "Set AZURE_OPENAI_ENDPOINT/AZURE_OPENAI_API_KEY or OPENAI_API_KEY to run this example."
     )
 
 
 async def main():
-    async with Switchboard(deployments=deployments) as sb:
+    # OPENAI_API_KEY, if set, backs the pool as a last resort
+    async with Switchboard(
+        resources=resources, openai_fallback=bool(openai_api_key)
+    ) as sb:
         print("Basic functionality:")
         await basic_functionality(sb)
 
@@ -84,19 +82,20 @@ async def basic_functionality(switchboard: Switchboard):
 async def session_affinity(switchboard: Switchboard):
     session_id = "anything"
 
-    # First message will select a random healthy
-    # deployment and associate it with the session_id
+    # First message will select a random healthy deployment
+    # and pin the session_id to the foundry hosting it
     r = await switchboard.chat.completions.create(
         session_id=session_id,
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Who won the World Series in 2020?"}],
     )
 
-    d1 = switchboard.select_deployment(model="gpt-4o-mini", session_id=session_id)
-    print("deployment 1:", d1)
+    # the session is now pinned to whichever foundry served it
+    f1 = switchboard.sessions[session_id]
+    print("foundry 1:", f1.name)
     print("response 1:", r.choices[0].message.content)
 
-    # Follow-up requests with the same session_id will route to the same deployment
+    # Follow-up requests with the same session_id will route to the same foundry
     r2 = await switchboard.chat.completions.create(
         session_id=session_id,
         model="gpt-4o-mini",
@@ -109,20 +108,20 @@ async def session_affinity(switchboard: Switchboard):
 
     print("response 2:", r2.choices[0].message.content)
 
-    # Simulate a failure by marking down the deployment
-    d1.models["gpt-4o-mini"].mark_down()
+    # Simulate a failure by marking down the deployment that served us
+    f1.models["gpt-4o-mini"].mark_down()
 
-    # A new deployment will be selected for this session_id
+    # A new foundry will be selected for this session_id
     r3 = await switchboard.chat.completions.create(
         session_id=session_id,
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Who won the World Series in 2021?"}],
     )
 
-    d2 = switchboard.select_deployment(model="gpt-4o-mini", session_id=session_id)
-    print("deployment 2:", d2)
+    f2 = switchboard.sessions[session_id]
+    print("foundry 2:", f2.name)
     print("response 3:", r3.choices[0].message.content)
-    assert d2 != d1
+    assert f2 is not f1
 
 
 if __name__ == "__main__":

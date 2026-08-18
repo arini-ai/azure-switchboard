@@ -5,19 +5,21 @@ import random
 from collections import OrderedDict
 from functools import cached_property
 from typing import (
-    Awaitable,
-    Callable,
     Literal,
-    Sequence,
+    Protocol,
     TypeVar,
-    cast,
     overload,
 )
 
+from collections.abc import Awaitable, Callable, Sequence
+
+from anthropic import AsyncAnthropic
 from anthropic import AsyncStream as AsyncAnthropicStream
+from anthropic.lib.streaming import AsyncMessageStream
 from anthropic.types import Message, ParsedMessage, RawMessageStreamEvent
 from loguru import logger
-from openai import AsyncStream
+from openai import AsyncOpenAI, AsyncStream
+from openai.lib.streaming.chat import AsyncChatCompletionStream
 from openai.types.chat import ChatCompletion, ChatCompletionChunk, ParsedChatCompletion
 from opentelemetry import metrics
 from pydantic import BaseModel
@@ -27,32 +29,20 @@ from tenacity import (
     stop_after_attempt,
 )
 
-from azure_switchboard.model import UtilStats
-
-from .openai_api import OpenAIConfig, OpenAIDeployment
-from .deployment import DeploymentBase
+from .anthropic_deployment import AnthropicDeployment
 from .exceptions import SwitchboardError
-from .anthropic_api import AnthropicConfig, AnthropicDeployment
+from .resource import Resource
+from .deployment import ModelDeployment, UtilStats
+from .openai_deployment import OpenAIDeployment
 
 _T = TypeVar("_T", bound=BaseModel)
 _R = TypeVar("_R")
-
-DeploymentSpec = OpenAIConfig | AnthropicConfig
+_M = TypeVar("_M", bound=ModelDeployment)
 
 meter = metrics.get_meter("azure_switchboard.switchboard")
-deployment_util = meter.create_gauge(
-    name="switchboard.deployment.model.utilization",
-    description="Utilization of a model on a deployment",
-    unit="%",
-)
 healthy_deployments_gauge = meter.create_gauge(
     name="healthy_deployments_count",
     description="Number of healthy deployments available for a model",
-    unit="1",
-)
-deployment_failures_counter = meter.create_counter(
-    name="deployment_failures",
-    description="Number of deployment failures",
     unit="1",
 )
 request_counter = meter.create_counter(
@@ -62,14 +52,42 @@ request_counter = meter.create_counter(
 )
 
 
-def two_random_choices(model: str, options: list[DeploymentBase]) -> DeploymentBase:
+class Selector(Protocol):
+    """Picks one of the healthy deployments of a model.
+
+    A Protocol rather than a Callable alias so the type variable is scoped to
+    the call: one selector serves both pools without widening either.
+    """
+
+    def __call__(self, options: list[_M], /) -> _M: ...
+
+
+def two_random_choices(options: list[_M], /) -> _M:
     """Power of two random choices algorithm.
 
-    Randomly select 2 deployments and return the one
-    with lower util for the given model.
+    Randomly select 2 deployments and return the one with lower util. Every
+    option is a deployment of the same model, so the model name is not an
+    input to the choice.
     """
     selected = random.sample(options, min(2, len(options)))
-    return min(selected, key=lambda d: d.util(model))
+    return min(selected, key=lambda d: d.util)
+
+
+def _check_fallback_credentials(openai: bool, anthropic: bool) -> None:
+    """Build the vendor clients up front.
+
+    A fallback is reached for when every pooled deployment is already down, so
+    an unusable credential would surface as a raw SDK error mid-failover — and
+    one the retry policy would keep retrying, since it is not a
+    SwitchboardError. Fail at construction instead.
+    """
+    try:
+        if openai:
+            AsyncOpenAI()
+        if anthropic:
+            AsyncAnthropic()
+    except Exception as e:
+        raise SwitchboardError(f"fallback is enabled but unusable: {e}") from e
 
 
 DEFAULT_FAILOVER_POLICY = AsyncRetrying(
@@ -79,50 +97,34 @@ DEFAULT_FAILOVER_POLICY = AsyncRetrying(
 )
 
 
-def _build_deployment(config: DeploymentSpec) -> DeploymentBase:
-    if isinstance(config, AnthropicConfig):
-        return AnthropicDeployment(config)
-    return OpenAIDeployment(config)
-
-
 class Switchboard:
     def __init__(
         self,
-        deployments: Sequence[DeploymentSpec],
-        selector: Callable[
-            [str, list[DeploymentBase]], DeploymentBase
-        ] = two_random_choices,
+        resources: Sequence[Resource],
+        selector: Selector = two_random_choices,
         failover_policy: AsyncRetrying = DEFAULT_FAILOVER_POLICY,
         ratelimit_window: float = 60.0,
         max_sessions: int = 1024,
+        openai_fallback: bool = False,
+        anthropic_fallback: bool = False,
     ) -> None:
-        if not deployments:
-            raise SwitchboardError("No deployments provided")
+        if not resources and not (openai_fallback or anthropic_fallback):
+            raise SwitchboardError("No resources provided")
 
-        self.deployments: dict[str, DeploymentBase] = {}
-        # Routing is by model name alone, so a name on both providers would
-        # make the serving surface ambiguous.
-        owners: dict[str, tuple[str, str]] = {}
-        for config in deployments:
-            if config.name in self.deployments:
-                raise SwitchboardError(f"Duplicate deployment name: {config.name}")
+        self.resources: dict[str, Resource] = {}
+        for resource in resources:
+            if resource.name in self.resources:
+                raise SwitchboardError(f"Duplicate resource name: {resource.name}")
+            self.resources[resource.name] = resource
 
-            provider = "anthropic" if isinstance(config, AnthropicConfig) else "openai"
-            for model in config.models:
-                owner = owners.setdefault(model.name, (provider, config.name))
-                if owner[0] != provider:
-                    raise SwitchboardError(
-                        f"{model.name} is registered on both {owner[0]} "
-                        f"({owner[1]}) and {provider} ({config.name}) deployments; "
-                        "a model name must belong to exactly one provider"
-                    )
-
-            self.deployments[config.name] = _build_deployment(config)
+        _check_fallback_credentials(openai_fallback, anthropic_fallback)
+        self._openai_fallback_enabled = openai_fallback
+        self._anthropic_fallback_enabled = anthropic_fallback
 
         self.selector = selector
         self.failover_policy = failover_policy
 
-        self.sessions = _LRUDict(max_size=max_sessions)
+        self.sessions: _LRUDict = _LRUDict(max_size=max_sessions)
         self.ratelimit_reset_task: asyncio.Task | None = None
 
         self.ratelimit_window = ratelimit_window
@@ -161,100 +163,135 @@ class Switchboard:
             except asyncio.CancelledError:
                 pass
 
+    def _all_resources(self) -> list[Resource]:
+        # each surface owns its first-party resource, so usage against a
+        # fallback shows up in stats and resets on the same schedule
+        first_party = [
+            self.chat.completions._first_party,
+            self.messages._first_party,
+        ]
+        return list(self.resources.values()) + [r for r in first_party if r]
+
     def reset_usage(self) -> None:
-        for deployment in self.deployments.values():
-            deployment.reset_usage()
+        for resource in self._all_resources():
+            resource.reset_usage()
 
     def stats(self) -> dict[str, dict[str, UtilStats]]:
-        return {
-            name: deployment.stats() for name, deployment in self.deployments.items()
-        }
+        return {f.name: f.stats() for f in self._all_resources()}
 
-    def select_deployment(
-        self, *, model: str, session_id: str | None = None
-    ) -> DeploymentBase:
+    def _select(
+        self,
+        pool: dict[str, list[_M]],
+        *,
+        model: str,
+        session_id: str | None,
+        fallback: Callable[[], _M | None],
+    ) -> _M:
+        """Pick a deployment for a model out of one API's pool.
+
+        Generic over the pool, so both surfaces share this implementation while
+        each keeps its own concrete deployment type.
         """
-        Select a deployment using the configured selection algorithm.
-        If session_id is provided, try to use that specific deployment first.
-        """
-        if session_id and session_id in self.sessions:
-            deployment = self.sessions[session_id]
-            if deployment.is_healthy(model):
-                return deployment
+        candidates = pool.get(model, [])
 
-            m = deployment.models.get(model)
-            logger.bind(util=vars(m.stats()) if m else None).warning(
-                f"{model} is unhealthy on {deployment.name}, falling back to selection"
-            )
-
-        eligible_deployments = [
-            d for d in self.deployments.values() if d.is_healthy(model)
-        ]
-
-        if not eligible_deployments:
-            # No healthy deployments — fall back to any deployment that supports
-            # this model (even if cooling down) rather than failing immediately.
-            # This prevents cascade failures when a single deployment has a
-            # transient error: without fallback, the 10s cooldown would reject
-            # every request, turning one failure into dozens.
-            fallback_deployments = [
-                d for d in self.deployments.values() if model in d.models
+        if session_id and (pinned := self.sessions.get(session_id)):
+            # Affinity is to the resource, so a session that uses several models
+            # keeps hitting the same one and its prompt cache stays warm.
+            preferred = [
+                m for m in candidates if m.resource is pinned and m.is_healthy()
             ]
-            if not fallback_deployments:
-                raise SwitchboardError(f"No deployments available for {model}")
-            logger.warning(
-                f"No healthy deployments for {model}, using best-effort fallback"
-            )
-            eligible_deployments = fallback_deployments
+            if preferred:
+                return self.selector(preferred)
+            logger.warning(f"{model} is unhealthy on {pinned.name}, reselecting")
 
-        healthy_deployments_gauge.set(len(eligible_deployments), {"model": model})
+        eligible = [m for m in candidates if m.is_healthy()]
+        # recorded before the early return, since zero is the value worth alerting on
+        healthy_deployments_gauge.set(len(eligible), {"model": model})
 
-        if len(eligible_deployments) == 1:
-            deployment = eligible_deployments[0]
-        else:
-            deployment = self.selector(model, eligible_deployments)
+        if not eligible:
+            if (first_party := fallback()) and first_party.is_healthy():
+                logger.warning(f"No healthy deployments for {model}, using first-party")
+                return first_party
+            raise SwitchboardError(f"No deployments available for {model}")
 
-        logger.trace(f"Selected deployment: {deployment.name}")
+        selected = self.selector(eligible)
+        logger.trace(f"Selected deployment: {selected.resource.name}/{selected.name}")
 
         if session_id:
-            self.sessions[session_id] = deployment
+            self.sessions[session_id] = selected.resource
 
-        return deployment
+        return selected
+
+    async def _dispatch(
+        self,
+        pool: dict[str, list[_M]],
+        *,
+        model: str,
+        session_id: str | None,
+        fallback: Callable[[], _M | None],
+        call: Callable[[_M], Awaitable[_R]],
+    ) -> _R:
+        with logger.contextualize(model=model, session_id=session_id):
+            # failover_policy is copied so concurrent requests
+            # dont share retry state
+            async for attempt in self.failover_policy.copy():
+                with attempt:
+                    deployment = self._select(
+                        pool, model=model, session_id=session_id, fallback=fallback
+                    )
+                    with logger.contextualize(resource=deployment.resource.name):
+                        logger.trace("Sending request")
+                        response = await call(deployment)
+                    request_counter.add(
+                        1,
+                        {"model": model, "resource": deployment.resource.name},
+                    )
+                    return response
+
+        # unreachable while the policy reraises, which the default does; an
+        # explicit failure beats returning None if that is ever swapped out
+        raise SwitchboardError(f"Failover exhausted for {model}")
 
     def __repr__(self) -> str:
-        return f"Switchboard({self.deployments})"
+        return f"Switchboard({self.resources})"
 
 
 class _Chat:
     class Completions:
+        """Everything specific to Chat Completions: the deployments that speak
+        it, and the fallback for when none of them is usable."""
+
         def __init__(self, sb: Switchboard) -> None:
             self.sb = sb
 
-        async def _dispatch(
-            self,
-            *,
-            model: str,
-            session_id: str | None,
-            call: Callable[[OpenAIDeployment], Awaitable[_R]],
-        ) -> _R:  # pyright: ignore[reportReturnType]
-            with logger.contextualize(model=model, session_id=session_id):
-                # failover_policy is copied so concurrent requests
-                # dont share retry state
-                async for attempt in self.sb.failover_policy.copy():
-                    with attempt:
-                        deployment = cast(
-                            OpenAIDeployment,
-                            self.sb.select_deployment(
-                                model=model, session_id=session_id
-                            ),
-                        )
-                        with logger.contextualize(deployment=deployment.name):
-                            logger.trace("Sending request")
-                            response = await call(deployment)
-                        request_counter.add(
-                            1, {"model": model, "deployment": deployment.name}
-                        )
-                        return response
+            self._pool: dict[str, list[OpenAIDeployment]] = {}
+            for resource in sb.resources.values():
+                for model in resource.models.values():
+                    if isinstance(model, OpenAIDeployment):
+                        self._pool.setdefault(model.name, []).append(model)
+
+            # Not part of the pool: it is what selection reaches for once the
+            # pool has nothing healthy left.
+            self._first_party = (
+                Resource(name="first-party-openai")
+                if sb._openai_fallback_enabled
+                else None
+            )
+            self._fallbacks: dict[str, OpenAIDeployment] = {}
+
+        def _fallback(self, model: str) -> OpenAIDeployment | None:
+            """The first-party deployment of a model, created on first need.
+
+            Any model name resolves, including one on no resource at all — the
+            vendor's API is the authority on whether it exists.
+            """
+            if self._first_party is None:
+                return None
+            if model not in self._fallbacks:
+                deployment = OpenAIDeployment(model)
+                self._first_party.add(deployment)
+                self._fallbacks[model] = deployment
+            return self._fallbacks[model]
 
         @overload
         async def create(
@@ -274,10 +311,12 @@ class _Chat:
             stream: bool = False,
             **kwargs,
         ) -> ChatCompletion | AsyncStream[ChatCompletionChunk]:
-            return await self._dispatch(
+            return await self.sb._dispatch(
+                self._pool,
                 model=model,
                 session_id=session_id,
-                call=lambda d: d.create(model=model, stream=stream, **kwargs),
+                fallback=lambda: self._fallback(model),
+                call=lambda d: d.create(stream=stream, **kwargs),
             )
 
         async def parse(
@@ -288,46 +327,57 @@ class _Chat:
             session_id: str | None = None,
             **kwargs,
         ) -> ParsedChatCompletion[_T]:
-            return await self._dispatch(
+            return await self.sb._dispatch(
+                self._pool,
                 model=model,
                 session_id=session_id,
-                call=lambda d: d.parse(
-                    model=model, response_format=response_format, **kwargs
-                ),
+                fallback=lambda: self._fallback(model),
+                call=lambda d: d.parse(response_format=response_format, **kwargs),
             )
+
+        def stream(
+            self, *, model: str, session_id: str | None = None, **kwargs
+        ) -> _ChatStream:
+            """Mirror openai.chat.completions.stream(): a context manager whose
+            stream accumulates a terminal completion.
+
+            Not a coroutine, exactly as the SDK's is not — the request is sent
+            when the context is entered.
+            """
+            return _ChatStream(self, model=model, session_id=session_id, kwargs=kwargs)
 
     def __init__(self, switchboard: Switchboard) -> None:
         self.completions = _Chat.Completions(switchboard)
 
 
 class _Messages:
+    """Everything specific to the Messages API: the deployments that speak it,
+    and the fallback for when none of them is usable."""
+
     def __init__(self, sb: Switchboard) -> None:
         self.sb = sb
 
-    # duplicated with impl in _Chat to avoid fighting the type checker
-    async def _dispatch(
-        self,
-        *,
-        model: str,
-        session_id: str | None,
-        call: Callable[[AnthropicDeployment], Awaitable[_R]],
-    ) -> _R:  # pyright: ignore[reportReturnType]
-        with logger.contextualize(model=model, session_id=session_id):
-            # failover_policy is copied so concurrent requests
-            # dont share retry state
-            async for attempt in self.sb.failover_policy.copy():
-                with attempt:
-                    deployment = cast(
-                        AnthropicDeployment,
-                        self.sb.select_deployment(model=model, session_id=session_id),
-                    )
-                    with logger.contextualize(deployment=deployment.name):
-                        logger.trace("Sending request")
-                        response = await call(deployment)
-                    request_counter.add(
-                        1, {"model": model, "deployment": deployment.name}
-                    )
-                    return response
+        self._pool: dict[str, list[AnthropicDeployment]] = {}
+        for resource in sb.resources.values():
+            for model in resource.models.values():
+                if isinstance(model, AnthropicDeployment):
+                    self._pool.setdefault(model.name, []).append(model)
+
+        self._first_party = (
+            Resource(name="first-party-anthropic")
+            if sb._anthropic_fallback_enabled
+            else None
+        )
+        self._fallbacks: dict[str, AnthropicDeployment] = {}
+
+    def _fallback(self, model: str) -> AnthropicDeployment | None:
+        if self._first_party is None:
+            return None
+        if model not in self._fallbacks:
+            deployment = AnthropicDeployment(model)
+            self._first_party.add(deployment)
+            self._fallbacks[model] = deployment
+        return self._fallbacks[model]
 
     @overload
     async def create(
@@ -351,10 +401,12 @@ class _Messages:
         `max_tokens` is required by the Messages API and is passed through
         unchanged; switchboard does not supply a default.
         """
-        return await self._dispatch(
+        return await self.sb._dispatch(
+            self._pool,
             model=model,
             session_id=session_id,
-            call=lambda d: d.messages(model=model, stream=stream, **kwargs),
+            fallback=lambda: self._fallback(model),
+            call=lambda d: d.create(stream=stream, **kwargs),
         )
 
     async def parse(
@@ -365,11 +417,126 @@ class _Messages:
         session_id: str | None = None,
         **kwargs,
     ) -> ParsedMessage[_T]:
-        return await self._dispatch(
+        return await self.sb._dispatch(
+            self._pool,
             model=model,
             session_id=session_id,
-            call=lambda d: d.parse(model=model, output_format=output_format, **kwargs),
+            fallback=lambda: self._fallback(model),
+            call=lambda d: d.parse(output_format=output_format, **kwargs),
         )
+
+    def stream(
+        self, *, model: str, session_id: str | None = None, **kwargs
+    ) -> _MessagesStream:
+        """Mirror anthropic.messages.stream(): a context manager whose stream
+        accumulates a terminal Message.
+
+        Not a coroutine, exactly as the SDK's is not — the request is sent when
+        the context is entered.
+        """
+        return _MessagesStream(self, model=model, session_id=session_id, kwargs=kwargs)
+
+
+class _ChatStream:
+    """Selection and failover for a Chat Completions stream.
+
+    Opening runs the same dispatch as create/parse, so a deployment that fails
+    to open is marked down and another is tried. Once open the stream is the
+    SDK's own, and a failure part-way through cannot be retried -- the same
+    limit create(stream=True) has.
+    """
+
+    def __init__(
+        self,
+        surface: _Chat.Completions,
+        *,
+        model: str,
+        session_id: str | None,
+        kwargs: dict,
+    ) -> None:
+        self._surface = surface
+        self._model = model
+        self._session_id = session_id
+        self._kwargs = kwargs
+        self._deployment: OpenAIDeployment | None = None
+        self._stream: AsyncChatCompletionStream | None = None
+        self._offset = 0
+
+    async def __aenter__(self) -> AsyncChatCompletionStream:
+        surface = self._surface
+
+        def call(d: OpenAIDeployment):
+            self._deployment = d
+            self._offset = d._estimate_token_usage(self._kwargs)
+            return d.open_stream(**self._kwargs)
+
+        self._stream = await surface.sb._dispatch(
+            surface._pool,
+            model=self._model,
+            session_id=self._session_id,
+            fallback=lambda: surface._fallback(self._model),
+            call=call,
+        )
+        return self._stream
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        if not (self._deployment and self._stream):
+            return
+        try:
+            # accounting must not be able to leak the connection
+            self._deployment.reconcile_stream(self._stream, self._offset)
+            if exc is not None:
+                self._deployment._handle_error(exc, "stream")
+        finally:
+            await self._stream.close()
+
+
+class _MessagesStream:
+    """Selection and failover for a Messages stream. See _ChatStream."""
+
+    def __init__(
+        self,
+        surface: _Messages,
+        *,
+        model: str,
+        session_id: str | None,
+        kwargs: dict,
+    ) -> None:
+        self._surface = surface
+        self._model = model
+        self._session_id = session_id
+        self._kwargs = kwargs
+        self._deployment: AnthropicDeployment | None = None
+        self._stream: AsyncMessageStream | None = None
+        self._offset = 0
+
+    async def __aenter__(self) -> AsyncMessageStream:
+        surface = self._surface
+
+        def call(d: AnthropicDeployment):
+            self._deployment = d
+            self._offset = d._estimate_token_usage(self._kwargs)
+            return d.open_stream(**self._kwargs)
+
+        self._stream = await surface.sb._dispatch(
+            surface._pool,
+            model=self._model,
+            session_id=self._session_id,
+            fallback=lambda: surface._fallback(self._model),
+            call=call,
+        )
+        return self._stream
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        if not (self._deployment and self._stream):
+            return
+        try:
+            # accounting must not be able to leak the connection
+            self._deployment.reconcile_stream(self._stream, self._offset)
+            if exc is not None:
+                self._deployment._handle_error(exc, "stream")
+        finally:
+            await self._stream.close()
 
 
 # borrowed from https://gist.github.com/davesteele/44793cd0348f59f8fadd49d7799bd306
@@ -380,7 +547,7 @@ class _LRUDict(OrderedDict):
 
         super().__init__(*args, **kwargs)
 
-    def __setitem__(self, key: str, value: DeploymentBase) -> None:
+    def __setitem__(self, key: str, value: Resource) -> None:
         super().__setitem__(key, value)
         super().move_to_end(key)
 
@@ -388,8 +555,13 @@ class _LRUDict(OrderedDict):
             oldkey = next(iter(self))
             super().__delitem__(oldkey)
 
-    def __getitem__(self, key: str) -> DeploymentBase:
+    def __getitem__(self, key: str) -> Resource:
         val = super().__getitem__(key)
         super().move_to_end(key)
 
         return val
+
+    def get(self, key: str, default: Resource | None = None) -> Resource | None:  # type: ignore[override]
+        # dict.get does not route through __getitem__, so without this a read
+        # never refreshes and an active session is evicted before an idle one
+        return self[key] if key in self else default
