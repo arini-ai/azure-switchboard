@@ -151,12 +151,12 @@ def deployment(foundry: Foundry) -> OpenAIDeployment:
 
 @pytest.fixture
 async def switchboard():
-    foundries = [
+    resources = [
         openai_foundry("test1"),
         openai_foundry("test2"),
         openai_foundry("test3"),
     ]
-    async with Switchboard(foundries=foundries, ratelimit_window=0) as sb:
+    async with Switchboard(resources=resources, ratelimit_window=0) as sb:
         yield sb
 
 
@@ -358,12 +358,12 @@ def anthropic_deployment(anthropic_resource: Foundry) -> AnthropicDeployment:
 
 @pytest.fixture
 async def anthropic_switchboard():
-    foundries = [
+    resources = [
         anthropic_foundry("test1"),
         anthropic_foundry("test2"),
         anthropic_foundry("test3"),
     ]
-    async with Switchboard(foundries=foundries, ratelimit_window=0) as sb:
+    async with Switchboard(resources=resources, ratelimit_window=0) as sb:
         yield sb
 
 

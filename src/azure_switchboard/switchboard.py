@@ -31,7 +31,7 @@ from tenacity import (
 
 from .anthropic_deployment import AnthropicDeployment
 from .exceptions import SwitchboardError
-from .resource import Foundry, Resource
+from .resource import Resource
 from .deployment import ModelDeployment, UtilStats
 from .openai_deployment import OpenAIDeployment
 
@@ -100,7 +100,7 @@ DEFAULT_FAILOVER_POLICY = AsyncRetrying(
 class Switchboard:
     def __init__(
         self,
-        foundries: Sequence[Foundry],
+        resources: Sequence[Resource],
         selector: Selector = two_random_choices,
         failover_policy: AsyncRetrying = DEFAULT_FAILOVER_POLICY,
         ratelimit_window: float = 60.0,
@@ -108,14 +108,14 @@ class Switchboard:
         openai_fallback: bool = False,
         anthropic_fallback: bool = False,
     ) -> None:
-        if not foundries and not (openai_fallback or anthropic_fallback):
-            raise SwitchboardError("No foundries provided")
+        if not resources and not (openai_fallback or anthropic_fallback):
+            raise SwitchboardError("No resources provided")
 
-        self.foundries: dict[str, Foundry] = {}
-        for foundry in foundries:
-            if foundry.name in self.foundries:
-                raise SwitchboardError(f"Duplicate foundry name: {foundry.name}")
-            self.foundries[foundry.name] = foundry
+        self.resources: dict[str, Resource] = {}
+        for resource in resources:
+            if resource.name in self.resources:
+                raise SwitchboardError(f"Duplicate resource name: {resource.name}")
+            self.resources[resource.name] = resource
 
         _check_fallback_credentials(openai_fallback, anthropic_fallback)
         self._openai_fallback_enabled = openai_fallback
@@ -170,7 +170,7 @@ class Switchboard:
             self.chat.completions._first_party,
             self.messages._first_party,
         ]
-        return list(self.foundries.values()) + [f for f in first_party if f]
+        return list(self.resources.values()) + [r for r in first_party if r]
 
     def reset_usage(self) -> None:
         for resource in self._all_resources():
@@ -253,7 +253,7 @@ class Switchboard:
         raise SwitchboardError(f"Failover exhausted for {model}")
 
     def __repr__(self) -> str:
-        return f"Switchboard({self.foundries})"
+        return f"Switchboard({self.resources})"
 
 
 class _Chat:
@@ -265,8 +265,8 @@ class _Chat:
             self.sb = sb
 
             self._pool: dict[str, list[OpenAIDeployment]] = {}
-            for foundry in sb.foundries.values():
-                for model in foundry.models.values():
+            for resource in sb.resources.values():
+                for model in resource.models.values():
                     if isinstance(model, OpenAIDeployment):
                         self._pool.setdefault(model.name, []).append(model)
 
@@ -358,8 +358,8 @@ class _Messages:
         self.sb = sb
 
         self._pool: dict[str, list[AnthropicDeployment]] = {}
-        for foundry in sb.foundries.values():
-            for model in foundry.models.values():
+        for resource in sb.resources.values():
+            for model in resource.models.values():
                 if isinstance(model, AnthropicDeployment):
                     self._pool.setdefault(model.name, []).append(model)
 

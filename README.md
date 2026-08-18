@@ -24,7 +24,7 @@ Because the API is a property of the deployment rather than the resource, one Fo
 ```python
 from azure_switchboard import AnthropicDeployment, Foundry, OpenAIDeployment, Switchboard
 
-sb = Switchboard(foundries=[
+sb = Switchboard(resources=[
     Foundry(
         name="east",
         api_key=...,
@@ -53,6 +53,18 @@ async with sb:
 ```
 
 Endpoints derive from the resource name as `https://{name}.services.ai.azure.com`, onto which each deployment appends its API path — `/openai/v1/` or `/anthropic/`. Pass `endpoint=` on a deployment to override the whole URL: for a legacy `<resource>.openai.azure.com` host, or a non-Azure one.
+
+`Foundry` is the Azure specialization of `Resource`, which is what derives that
+endpoint. For a host that derives nothing — an OpenAI-compatible gateway, say —
+use `Resource` directly and give each deployment an explicit `endpoint`:
+
+```python
+Switchboard(resources=[
+    Resource(name="gateway", api_key=..., models=[
+        OpenAIDeployment("gpt-4o-mini", endpoint="https://gateway.internal/v1/"),
+    ]),
+])
+```
 
 ## Features
 
@@ -103,7 +115,7 @@ Switchboard(deployments=[
 ])
 
 # after
-Switchboard(foundries=[
+Switchboard(resources=[
     Foundry(name="east", api_key=..., models=[
         OpenAIDeployment("gpt-4o-mini", tpm=30000, rpm=300),
         AnthropicDeployment("claude-sonnet-5", tpm=30000, rpm=300),
@@ -115,7 +127,7 @@ Switchboard(foundries=[
 | --------------------------------------------- | ---------------------------------------------------------------------- |
 | `OpenAIConfig(...)` / `AnthropicConfig(...)`  | `Foundry(...)`                                                         |
 | `Model("gpt-4o-mini", ...)`                   | `OpenAIDeployment(...)` or `AnthropicDeployment(...)`                  |
-| `Switchboard(deployments=[...])`              | `Switchboard(foundries=[...])`                                         |
+| `Switchboard(deployments=[...])`              | `Switchboard(resources=[...])`                                         |
 | `base_url="https://east...openai/v1/"`        | derived from `Foundry(name=...)`; `endpoint=` per deployment overrides |
 | `AnthropicConfig(resource="east")`            | `Foundry(name="east")`                                                 |
 | `OpenAIConfig(base_url=None)` for first-party | `Switchboard(openai_fallback=True)`                                    |
@@ -159,12 +171,12 @@ azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
 azure_openai_api_key = os.getenv("AZURE_OPENAI_API_KEY")
 openai_api_key = os.getenv("OPENAI_API_KEY")
 
-foundries = []
+resources = []
 if azure_openai_endpoint and azure_openai_api_key:
-    # create 3 foundries. reusing the endpoint
+    # create 3 resources. reusing the endpoint
     # is fine for the purposes of this demo
     for name in ("east", "west", "south"):
-        foundries.append(
+        resources.append(
             Foundry(
                 name=name,
                 api_key=azure_openai_api_key,
@@ -177,7 +189,7 @@ if azure_openai_endpoint and azure_openai_api_key:
             )
         )
 
-if not foundries and not openai_api_key:
+if not resources and not openai_api_key:
     raise RuntimeError(
         "Set AZURE_OPENAI_ENDPOINT/AZURE_OPENAI_API_KEY or OPENAI_API_KEY to run this example."
     )
@@ -186,7 +198,7 @@ if not foundries and not openai_api_key:
 async def main():
     # OPENAI_API_KEY, if set, backs the pool as a last resort
     async with Switchboard(
-        foundries=foundries, openai_fallback=bool(openai_api_key)
+        resources=resources, openai_fallback=bool(openai_api_key)
     ) as sb:
         print("Basic functionality:")
         await basic_functionality(sb)
@@ -348,15 +360,15 @@ Distribution overhead scales ~linearly with the number of deployments.
 
 ### switchboard.Switchboard Parameters
 
-| Parameter            | Description                                                                           | Default              |
-| -------------------- | ------------------------------------------------------------------------------------- | -------------------- |
-| `foundries`          | Resources to balance across. May be empty if a fallback is configured.                | Required             |
-| `selector`           | Deployment selection function, `(eligible_deployments) -> deployment`                 | `two_random_choices` |
-| `failover_policy`    | tenacity `AsyncRetrying` policy, copied per call so requests do not share retry state | 2 attempts           |
-| `ratelimit_window`   | How often usage counters reset (seconds). Set `0` to disable periodic reset.          | 60.0                 |
-| `max_sessions`       | LRU capacity for session affinity pins                                                | 1024                 |
-| `openai_fallback`    | Fall back to the OpenAI API, keyed from `OPENAI_API_KEY`                              | False                |
-| `anthropic_fallback` | Fall back to the Anthropic API, keyed from `ANTHROPIC_API_KEY`                        | False                |
+| Parameter            | Description                                                                                        | Default              |
+| -------------------- | -------------------------------------------------------------------------------------------------- | -------------------- |
+| `resources`          | `Foundry` or plain `Resource` objects to balance across. May be empty if a fallback is configured. | Required             |
+| `selector`           | Deployment selection function, `(eligible_deployments) -> deployment`                              | `two_random_choices` |
+| `failover_policy`    | tenacity `AsyncRetrying` policy, copied per call so requests do not share retry state              | 2 attempts           |
+| `ratelimit_window`   | How often usage counters reset (seconds). Set `0` to disable periodic reset.                       | 60.0                 |
+| `max_sessions`       | LRU capacity for session affinity pins                                                             | 1024                 |
+| `openai_fallback`    | Fall back to the OpenAI API, keyed from `OPENAI_API_KEY`                                           | False                |
+| `anthropic_fallback` | Fall back to the Anthropic API, keyed from `ANTHROPIC_API_KEY`                                     | False                |
 
 Every candidate passed to a selector is a deployment of the requested model, so the model name is not an input to the choice.
 

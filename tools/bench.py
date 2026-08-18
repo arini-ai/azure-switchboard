@@ -23,7 +23,7 @@ from azure_switchboard import Foundry, OpenAIDeployment, Switchboard
 
 
 async def bench(args: argparse.Namespace) -> None:
-    foundries = [
+    resources = [
         Foundry(
             name=f"bench_{n}",
             api_key=os.environ["AZURE_OPENAI_API_KEY"],
@@ -39,7 +39,7 @@ async def bench(args: argparse.Namespace) -> None:
         for n in range(args.deployments)
     ]
 
-    async with Switchboard(foundries) as switchboard:
+    async with Switchboard(resources) as switchboard:
         print(
             f"Distributing {args.requests} requests across {args.deployments} deployments"
         )

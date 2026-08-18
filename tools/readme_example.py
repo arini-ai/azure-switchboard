@@ -19,12 +19,12 @@ azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
 azure_openai_api_key = os.getenv("AZURE_OPENAI_API_KEY")
 openai_api_key = os.getenv("OPENAI_API_KEY")
 
-foundries = []
+resources = []
 if azure_openai_endpoint and azure_openai_api_key:
-    # create 3 foundries. reusing the endpoint
+    # create 3 resources. reusing the endpoint
     # is fine for the purposes of this demo
     for name in ("east", "west", "south"):
-        foundries.append(
+        resources.append(
             Foundry(
                 name=name,
                 api_key=azure_openai_api_key,
@@ -37,7 +37,7 @@ if azure_openai_endpoint and azure_openai_api_key:
             )
         )
 
-if not foundries and not openai_api_key:
+if not resources and not openai_api_key:
     raise RuntimeError(
         "Set AZURE_OPENAI_ENDPOINT/AZURE_OPENAI_API_KEY or OPENAI_API_KEY to run this example."
     )
@@ -46,7 +46,7 @@ if not foundries and not openai_api_key:
 async def main():
     # OPENAI_API_KEY, if set, backs the pool as a last resort
     async with Switchboard(
-        foundries=foundries, openai_fallback=bool(openai_api_key)
+        resources=resources, openai_fallback=bool(openai_api_key)
     ) as sb:
         print("Basic functionality:")
         await basic_functionality(sb)

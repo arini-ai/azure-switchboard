@@ -3,7 +3,7 @@ from openai.types.chat import ParsedChatCompletion
 
 from .anthropic_deployment import AnthropicDeployment
 from .exceptions import SwitchboardError
-from .resource import Foundry
+from .resource import Foundry, Resource
 from .openai_deployment import OpenAIDeployment
 from .switchboard import Switchboard
 
@@ -16,6 +16,7 @@ __all__ = [
     "AnthropicDeployment",
     "Foundry",
     "OpenAIDeployment",
+    "Resource",
     "ParsedChatCompletion",
     "SwitchboardError",
     "Switchboard",

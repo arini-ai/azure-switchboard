@@ -15,7 +15,7 @@ class TestInit:
         records: list[dict] = []
         sink_id = _logger.add(lambda m: records.append(m.record))
         switchboard = Switchboard(
-            foundries=[
+            resources=[
                 Foundry(
                     name="mini-only",
                     api_key="mini-only",
@@ -31,12 +31,12 @@ class TestInit:
         )
         try:
             _logger.disable("azure_switchboard")
-            switchboard.sessions["test"] = switchboard.foundries["mini-only"]
+            switchboard.sessions["test"] = switchboard.resources["mini-only"]
             _ = select_openai(switchboard, session_id="test", model="gpt-4o")
             assert not records
 
             _logger.enable("azure_switchboard")
-            switchboard.sessions["test"] = switchboard.foundries["mini-only"]
+            switchboard.sessions["test"] = switchboard.resources["mini-only"]
             _ = select_openai(switchboard, session_id="test", model="gpt-4o")
             assert any(
                 "is unhealthy on mini-only, reselecting" in r["message"]
@@ -52,6 +52,7 @@ class TestInit:
             "Foundry",
             "OpenAIDeployment",
             "ParsedChatCompletion",
+            "Resource",
             "SwitchboardError",
             "Switchboard",
         }

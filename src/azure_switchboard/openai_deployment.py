@@ -29,6 +29,10 @@ _T = TypeVar("_T", bound=BaseModel)
 class OpenAIDeployment(ModelDeployment):
     """A model deployment speaking the Chat Completions API."""
 
+    ratelimit_error = RateLimitError
+    timeout_error = APITimeoutError
+    connection_error = APIConnectionError
+
     # Assigned by Foundry.add, which shares one client per URL.
     client: AsyncOpenAI
 
@@ -159,26 +163,6 @@ class OpenAIDeployment(ModelDeployment):
         except Exception as e:
             self._handle_error(e, "parse")
             raise
-
-    def _handle_error(self, exc: Exception, op: str, log=logger) -> None:
-        """Scope a markdown to what the error actually implicates.
-
-        A 429 is one deployment's quota; a connection error is the whole
-        resource. Timeouts during upstream-wide slowdowns are uncorrelated with
-        which deployment was chosen, so they mark down nothing.
-
-        The timeout branch has to come before the connection one:
-        APITimeoutError subclasses APIConnectionError, so testing connection
-        first would cool the whole resource on every timeout.
-        """
-        if isinstance(exc, RateLimitError):
-            log.exception(f"Marking down model for rate limit on {op}")
-            self.mark_down()
-        elif isinstance(exc, APITimeoutError):
-            log.warning(f"Upstream timeout on {op}; not marking down")
-        elif isinstance(exc, APIConnectionError):
-            log.exception(f"Marking down resource for connection error on {op}")
-            self.resource.mark_down()
 
     def _estimate_token_usage(self, kwargs: dict) -> int:
         # ~4 chars per token, input only.

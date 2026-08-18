@@ -3,8 +3,9 @@ from __future__ import annotations
 import random
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
+from loguru import logger
 from opentelemetry import trace
 
 from .exceptions import SwitchboardError
@@ -68,7 +69,6 @@ class ModelDeployment(Cooldown):
 
         self.tpm_usage: int = 0
         self.rpm_usage: int = 0
-        self.last_reset: float = 0
 
         self._resource: Resource | None = None
 
@@ -96,6 +96,32 @@ class ModelDeployment(Cooldown):
         the SDK falls back to its vendor default.
         """
         raise NotImplementedError
+
+    # Each API's SDK raises its own classes for these, so subclasses name
+    # theirs and _handle_error is written once.
+    ratelimit_error: ClassVar[type[Exception]]
+    timeout_error: ClassVar[type[Exception]]
+    connection_error: ClassVar[type[Exception]]
+
+    def _handle_error(self, exc: Exception, op: str, log=logger) -> None:
+        """Scope a cooldown to what the error actually implicates.
+
+        A 429 is one deployment's quota; a connection error is the whole
+        resource. Timeouts during upstream-wide slowdowns are uncorrelated with
+        which deployment was chosen, so they cool nothing.
+
+        The timeout branch has to come before the connection one: in both SDKs
+        the timeout error subclasses the connection error, so testing
+        connection first would cool the whole resource on every timeout.
+        """
+        if isinstance(exc, self.ratelimit_error):
+            log.exception(f"Marking down model for rate limit on {op}")
+            self.mark_down()
+        elif isinstance(exc, self.timeout_error):
+            log.warning(f"Upstream timeout on {op}; not marking down")
+        elif isinstance(exc, self.connection_error):
+            log.exception(f"Marking down resource for connection error on {op}")
+            self.resource.mark_down()
 
     def is_healthy(self) -> bool:
         return self.util < 1
@@ -127,7 +153,6 @@ class ModelDeployment(Cooldown):
 
         self.tpm_usage = 0
         self.rpm_usage = 0
-        self.last_reset = time.time()
 
     def stats(self) -> UtilStats:
         return UtilStats(

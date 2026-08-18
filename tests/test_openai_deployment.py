@@ -216,7 +216,6 @@ class TestOpenAIDeployment:
         usage = model.stats()
         assert usage.tpm == f"0/{model.tpm_limit}"
         assert usage.rpm == f"0/{model.rpm_limit}"
-        assert model.last_reset > 0
 
     async def test_utilization(self, deployment: OpenAIDeployment):
         """Test utilization calculation."""

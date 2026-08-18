@@ -49,7 +49,7 @@ def build() -> Switchboard:
     """One Foundry hosting both APIs — the thing the old model could not express."""
     resource = os.environ["AZURE_FOUNDRY"]
     return Switchboard(
-        foundries=[
+        resources=[
             Foundry(
                 name=resource,
                 api_key=os.environ["AZURE_API_KEY"],
@@ -130,7 +130,7 @@ async def stream_helpers(sb: Switchboard) -> None:
     async with sb.messages.stream(
         model=MESSAGES_MODEL, max_tokens=64, messages=PROMPT
     ) as s:
-        before = sb.foundries[os.environ["AZURE_FOUNDRY"]].models[MESSAGES_MODEL]
+        before = sb.resources[os.environ["AZURE_FOUNDRY"]].models[MESSAGES_MODEL]
         spent_before = before.tpm_usage
         final = await s.get_final_message()
     spent_after = before.tpm_usage
@@ -170,7 +170,7 @@ async def usage_tracking(sb: Switchboard) -> None:
 
 async def one_resource_two_clients(sb: Switchboard) -> None:
     print("\none resource, two APIs")
-    resource = sb.foundries[os.environ["AZURE_FOUNDRY"]]
+    resource = sb.resources[os.environ["AZURE_FOUNDRY"]]
     chat = resource.models[CHAT_MODEL]
     msgs = resource.models[MESSAGES_MODEL]
     check("shared credential", chat.resource is msgs.resource)
@@ -189,7 +189,7 @@ async def one_resource_two_clients(sb: Switchboard) -> None:
 async def first_party_fallback(sb: Switchboard) -> None:
     """Cool the Azure resource and confirm the request still lands."""
     print("\nfirst-party fallback")
-    resource = sb.foundries[os.environ["AZURE_FOUNDRY"]]
+    resource = sb.resources[os.environ["AZURE_FOUNDRY"]]
     resource.mark_down(60)
 
     if os.getenv("OPENAI_API_KEY"):
@@ -229,7 +229,7 @@ async def no_fallback_raises() -> None:
         api_key=os.environ["AZURE_API_KEY"],
         models=[OpenAIDeployment(CHAT_MODEL)],
     )
-    sb = Switchboard(foundries=[resource], ratelimit_window=0)
+    sb = Switchboard(resources=[resource], ratelimit_window=0)
     resource.models[CHAT_MODEL].mark_down(60)
     try:
         await sb.chat.completions.create(model=CHAT_MODEL, messages=PROMPT)
