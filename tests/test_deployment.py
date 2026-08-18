@@ -7,7 +7,7 @@ from httpx import Request, Response, TimeoutException
 from openai import APIConnectionError, APITimeoutError, RateLimitError
 
 from azure_switchboard import SwitchboardError
-from azure_switchboard.deployment import Deployment, DeploymentConfig
+from azure_switchboard.chat import OpenAIConfig, OpenAIDeployment
 
 from .conftest import (
     COMPLETION_PARAMS,
@@ -22,7 +22,7 @@ from .conftest import (
 class TestDeployment:
     """Deployment functionality tests."""
 
-    async def test_init(self, deployment: Deployment):
+    async def test_init(self, deployment: OpenAIDeployment):
         """Test initialization of Deployment."""
         assert deployment is not None
         assert deployment.client is not None
@@ -32,7 +32,7 @@ class TestDeployment:
 
     @pytest.mark.mock_models("gpt-4o-mini")
     async def test_completion(
-        self, mock_client: respx.MockRouter, deployment: Deployment
+        self, mock_client: respx.MockRouter, deployment: OpenAIDeployment
     ):
         """Test basic chat completion functionality."""
 
@@ -59,7 +59,7 @@ class TestDeployment:
         assert "23/" in usage.tpm
         assert "2/" in usage.rpm
 
-    async def test_streaming(self, deployment: Deployment):
+    async def test_streaming(self, deployment: OpenAIDeployment):
         """Test streaming functionality.
 
         It's annoying to try to mock HTTP streaming responses so we cheat
@@ -179,7 +179,7 @@ class TestDeployment:
             assert mock.call_count == 1
             assert not deployment.model("gpt-4o-mini").is_healthy()
 
-    async def test_mark_down(self, deployment: Deployment):
+    async def test_mark_down(self, deployment: OpenAIDeployment):
         """Test model-level cooldown functionality."""
 
         model = deployment.model("gpt-4o-mini")
@@ -190,13 +190,13 @@ class TestDeployment:
         model.mark_up()
         assert model.is_healthy()
 
-    async def test_valid_model(self, deployment: Deployment):
+    async def test_valid_model(self, deployment: OpenAIDeployment):
         """Test that an invalid model raises an error."""
 
         with pytest.raises(SwitchboardError, match="gpt-fake not configured"):
             await deployment.create(model="gpt-fake", messages=[])
 
-    async def test_usage(self, deployment: Deployment):
+    async def test_usage(self, deployment: OpenAIDeployment):
         """Test client-level counters"""
 
         # Reset and verify initial state
@@ -223,7 +223,7 @@ class TestDeployment:
         assert usage.rpm == f"0/{model.rpm_limit}"
         assert model.last_reset > 0
 
-    async def test_utilization(self, deployment: Deployment):
+    async def test_utilization(self, deployment: OpenAIDeployment):
         """Test utilization calculation."""
 
         model = deployment.model("gpt-4o-mini")
@@ -256,7 +256,7 @@ class TestDeployment:
 
     @pytest.mark.mock_models("gpt-4o-mini", "gpt-4o")
     async def test_multiple_models(
-        self, mock_client: respx.MockRouter, deployment: Deployment
+        self, mock_client: respx.MockRouter, deployment: OpenAIDeployment
     ):
         """Test that multiple models are handled correctly."""
 
@@ -285,7 +285,7 @@ class TestDeployment:
 
     @pytest.mark.mock_models("gpt-4o-mini")
     async def test_concurrency(
-        self, mock_client: respx.MockRouter, deployment: Deployment
+        self, mock_client: respx.MockRouter, deployment: OpenAIDeployment
     ):
         """Test handling of multiple concurrent requests."""
 
@@ -305,7 +305,7 @@ class TestDeployment:
 
     @pytest.mark.mock_models("gpt-4o-mini")
     async def test_timeout_retry(
-        self, mock_client: respx.MockRouter, deployment: Deployment
+        self, mock_client: respx.MockRouter, deployment: OpenAIDeployment
     ):
         """Test timeout retry behavior."""
 
@@ -333,7 +333,7 @@ class TestDeployment:
         assert mock_client.routes["azure"].call_count == 3
         assert deployment.is_healthy("gpt-4o-mini")
 
-    async def test_timeout_does_not_mark_down(self, deployment: Deployment):
+    async def test_timeout_does_not_mark_down(self, deployment: OpenAIDeployment):
         """APITimeoutError should not mark the deployment down."""
 
         deployment.client.max_retries = 0
@@ -365,7 +365,9 @@ class TestDeployment:
         assert deployment.model("gpt-4o-mini").is_healthy()
         assert deployment.model("gpt-4o-mini").util < 1
 
-    async def test_timeout_does_not_mark_down_stream(self, deployment: Deployment):
+    async def test_timeout_does_not_mark_down_stream(
+        self, deployment: OpenAIDeployment
+    ):
         """Mid-stream APITimeoutError should not mark the deployment down."""
 
         deployment.client.max_retries = 0
@@ -391,15 +393,15 @@ class TestDeployment:
 
     def test_default_timeout(self):
         """Default per-request timeout should be 30s."""
-        config = DeploymentConfig(name="test", api_key="key")
+        config = OpenAIConfig(name="test", api_key="key")
         assert config.timeout == 30.0
 
     def test_custom_timeout(self):
-        """Callers that need longer timeouts can override per DeploymentConfig."""
-        config = DeploymentConfig(name="batch", api_key="key", timeout=300.0)
+        """Callers that need longer timeouts can override per OpenAIConfig."""
+        config = OpenAIConfig(name="batch", api_key="key", timeout=300.0)
         assert config.timeout == 300.0
 
-    async def test_rate_limit_marks_down(self, deployment: Deployment):
+    async def test_rate_limit_marks_down(self, deployment: OpenAIDeployment):
         """Rate limit errors should mark the model down and re-raise."""
 
         deployment.client.max_retries = 0
@@ -424,7 +426,7 @@ class TestDeployment:
             assert mock.call_count == 1
             assert not deployment.model("gpt-4o-mini").is_healthy()
 
-    async def test_invalid_model(self, deployment: Deployment):
+    async def test_invalid_model(self, deployment: OpenAIDeployment):
         """Test that an invalid or unconfigured model is not eligible on a deployment."""
 
         assert not deployment.is_healthy("invalid-model")

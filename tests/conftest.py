@@ -17,12 +17,28 @@ from openai.types.completion_usage import (
 )
 from pydantic import BaseModel as PydanticBaseModel
 
+from anthropic.types import (
+    Message as AnthropicMessage,
+    MessageDeltaUsage,
+    RawContentBlockDeltaEvent,
+    RawContentBlockStartEvent,
+    RawContentBlockStopEvent,
+    RawMessageDeltaEvent,
+    RawMessageStartEvent,
+    RawMessageStopEvent,
+    TextBlock,
+    TextDelta,
+)
+from anthropic.types.raw_message_delta_event import Delta
+
 from azure_switchboard import (
-    DeploymentConfig,
+    AnthropicConfig,
     Model,
+    OpenAIConfig,
     Switchboard,
 )
-from azure_switchboard.deployment import Deployment
+from azure_switchboard.chat import OpenAIDeployment
+from azure_switchboard.messages import AnthropicDeployment
 
 
 async def collect_chunks(
@@ -38,17 +54,17 @@ async def collect_chunks(
     return received_chunks, content
 
 
-def openai_config(name: str = "openai") -> DeploymentConfig:
+def openai_config(name: str = "openai") -> OpenAIConfig:
     """Create an OpenAI deployment config for testing."""
-    return DeploymentConfig(
+    return OpenAIConfig(
         name=name,
         api_key="test",
         models=[Model(name="gpt-4o-mini"), Model(name="gpt-4o")],
     )
 
 
-def azure_config(name: str) -> DeploymentConfig:
-    return DeploymentConfig(
+def azure_config(name: str) -> OpenAIConfig:
+    return OpenAIConfig(
         name=name,
         base_url=f"https://{name}.openai.azure.com/openai/v1/",
         api_key=name,
@@ -97,7 +113,7 @@ def model():
 
 @pytest.fixture
 def deployment():
-    return Deployment(azure_config("test1"))
+    return OpenAIDeployment(azure_config("test1"))
 
 
 @pytest.fixture
@@ -257,3 +273,134 @@ PARSED_RESPONSE = ParsedChatCompletion[WeatherResult](
         prompt_tokens_details=PromptTokensDetails(cached_tokens=0),
     ),
 )
+
+
+# --- Anthropic Messages API fixtures ------------------------------------
+
+
+def anthropic_config(name: str = "foundry") -> AnthropicConfig:
+    """Create an Anthropic Foundry deployment config for testing."""
+    return AnthropicConfig(
+        name=name,
+        resource=name,
+        api_key=name,
+        models=[
+            Model(name="claude-sonnet-5", tpm=10000, rpm=60),
+            Model(name="claude-haiku-4-5", tpm=10000, rpm=60),
+        ],
+    )
+
+
+def message_mock():
+    """Basic mock that replicates anthropic client messages behavior."""
+
+    async def _stream(items: list):
+        for item in items:
+            yield item
+
+    def side_effect(*args, **kwargs):
+        if kwargs.get("stream"):
+            return _stream(MESSAGE_STREAM_EVENTS)
+        return MESSAGE_RESPONSE
+
+    return AsyncMock(side_effect=side_effect)
+
+
+@pytest.fixture
+def anthropic_deployment():
+    return AnthropicDeployment(anthropic_config("test1"))
+
+
+@pytest.fixture
+async def anthropic_switchboard():
+    deployments = [
+        anthropic_config("test1"),
+        anthropic_config("test2"),
+        anthropic_config("test3"),
+    ]
+    async with Switchboard(deployments=deployments, ratelimit_window=0) as sb:
+        yield sb
+
+
+MESSAGE_PARAMS: dict[str, Any] = {
+    "model": "claude-sonnet-5",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "Hello, world!"}],
+}
+
+MESSAGE_RESPONSE_JSON = {
+    "id": "msg_test",
+    "type": "message",
+    "role": "assistant",
+    "model": "claude-sonnet-5",
+    "content": [{"type": "text", "text": "Hello! How can I assist you today?"}],
+    "stop_reason": "end_turn",
+    "stop_sequence": None,
+    "usage": {
+        "input_tokens": 12,
+        "output_tokens": 8,
+        "cache_read_input_tokens": 4,
+        "cache_creation_input_tokens": 0,
+    },
+}
+
+MESSAGE_RESPONSE = AnthropicMessage.model_validate(MESSAGE_RESPONSE_JSON)
+
+# Usage arrives in two places: input on message_start, cumulative output on
+# each message_delta. Totals here: 12 input + 9 output = 21 tokens.
+MESSAGE_STREAM_EVENTS = [
+    RawMessageStartEvent(
+        type="message_start",
+        message=AnthropicMessage.model_validate(
+            {
+                **MESSAGE_RESPONSE_JSON,
+                "content": [],
+                "stop_reason": None,
+                "usage": {
+                    "input_tokens": 12,
+                    "output_tokens": 0,
+                    "cache_read_input_tokens": 4,
+                    "cache_creation_input_tokens": 0,
+                },
+            }
+        ),
+    ),
+    RawContentBlockStartEvent(
+        type="content_block_start",
+        index=0,
+        content_block=TextBlock(type="text", text=""),
+    ),
+    RawContentBlockDeltaEvent(
+        type="content_block_delta",
+        index=0,
+        delta=TextDelta(type="text_delta", text="Hello"),
+    ),
+    RawContentBlockDeltaEvent(
+        type="content_block_delta",
+        index=0,
+        delta=TextDelta(type="text_delta", text=", world!"),
+    ),
+    RawContentBlockStopEvent(type="content_block_stop", index=0),
+    RawMessageDeltaEvent(
+        type="message_delta",
+        delta=Delta(stop_reason="end_turn", stop_sequence=None),
+        usage=MessageDeltaUsage(output_tokens=5),
+    ),
+    RawMessageDeltaEvent(
+        type="message_delta",
+        delta=Delta(stop_reason="end_turn", stop_sequence=None),
+        usage=MessageDeltaUsage(output_tokens=9),
+    ),
+    RawMessageStopEvent(type="message_stop"),
+]
+
+
+async def collect_events(stream) -> tuple[list, str]:
+    """Collect all events from a message stream and assemble the text."""
+    received = []
+    content = ""
+    async for event in stream:
+        received.append(event)
+        if event.type == "content_block_delta" and event.delta.type == "text_delta":
+            content += event.delta.text
+    return received, content

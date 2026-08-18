@@ -21,7 +21,18 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-keywords = ["azure", "openai", "loadbalancing", "llm", "ai", "litellm"]
+keywords = [
+  "azure",
+  "openai",
+  "anthropic",
+  "claude",
+  "loadbalancing",
+  "llm",
+  "ai",
+]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.122.0"]
 
 [project.urls]
 Homepage = "https://github.com/arini-ai/azure-switchboard"
@@ -32,6 +43,7 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+  "anthropic>=0.122.0",
   "bumpver>=2024.1130",
   "ipykernel>=6.29.5",
   "ipython>=8.0.0,!=9.0.0",

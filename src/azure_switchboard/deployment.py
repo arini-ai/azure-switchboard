@@ -1,66 +1,38 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
-from typing import Literal, TypeVar, cast, overload
+from typing import ClassVar, Literal
 
-import wrapt
-from loguru import logger
-from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, AsyncStream, RateLimitError
-from openai.types.chat import (
-    ChatCompletion,
-    ChatCompletionChunk,
-    ParsedChatCompletion,
-)
-from openai.types.completion_usage import CompletionUsage
 from opentelemetry import trace
-from pydantic import BaseModel
-
-from azure_switchboard.model import UtilStats
 
 from .exceptions import SwitchboardError
-from .model import Model
+from .model import Model, UtilStats
 
-_T = TypeVar("_T", bound=BaseModel)
-
-
-@dataclass
-class DeploymentConfig:
-    """Configuration for an Azure OpenAI or OpenAI deployment."""
-
-    name: str
-    base_url: str | None = None
-    api_key: str | None = None
-    # 30s suits interactive workloads; override for long-running batch jobs
-    timeout: float = 30.0
-    models: list[Model] = field(default_factory=list)
-
-    def get_client(self) -> AsyncOpenAI:
-        return AsyncOpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url,
-            timeout=self.timeout,
-        )
+Api = Literal["chat", "messages"]
 
 
-class Deployment:
-    """Runtime state of a deployment"""
+class DeploymentBase:
+    """Provider-agnostic runtime state for a deployment.
 
-    def __init__(
-        self,
-        config: DeploymentConfig,
-    ) -> None:
-        self.config = config
-        self.client = config.get_client()
-        self.models = {m.name: m for m in config.models}
+    Holds the per-model utilization counters that drive selection. Everything
+    here is protocol-independent: subclasses add the calls that actually speak
+    to an upstream API.
+    """
+
+    # Which wire protocol this deployment speaks. Selection filters on it so a
+    # model name registered against one provider can never be routed to the other.
+    api: ClassVar[Api]
+
+    def __init__(self, name: str, models: list[Model]) -> None:
+        self._name = name
+        self.models = {m.name: m for m in models}
 
     def __repr__(self) -> str:
         elems = ", ".join(map(str, self.models.values()))
-        return f"Deployment<{self.config.name}>([{elems}])"
+        return f"{type(self).__name__}<{self._name}>([{elems}])"
 
     @property
     def name(self) -> str:
-        return self.config.name
+        return self._name
 
     def reset_usage(self) -> None:
         for model in self.models.values():
@@ -78,196 +50,21 @@ class Deployment:
     def model(self, name: str) -> Model:
         return self.models[name]
 
-    @overload
-    async def create(
-        self, *, model: str, stream: Literal[True], **kwargs
-    ) -> AsyncStream[ChatCompletionChunk]: ...
-
-    @overload
-    async def create(self, *, model: str, **kwargs) -> ChatCompletion: ...
-
-    async def create(
-        self,
-        *,
-        model: str,
-        stream: bool = False,
-        **kwargs,
-    ) -> ChatCompletion | AsyncStream[ChatCompletionChunk]:
-        """
-        Send a chat completion request to this client.
-        Tracks usage metrics for load balancing.
-        """
-
+    def _check_model(self, model: str) -> Model:
         if model not in self.models:
             raise SwitchboardError(f"{model} not configured for deployment")
+        return self.models[model]
 
-        # add input token estimate before we send the request so utilization is
-        # kept up to date for other requests that might be executing concurrently.
-        _preflight_estimate = self._estimate_token_usage(kwargs)
-        self.models[model].spend_tokens(_preflight_estimate)
-        self.models[model].spend_request()
+    def _record_token_details(
+        self, *, cached: int | None = None, reasoning: int | None = None
+    ) -> None:
+        """Record token details on the active span.
 
-        try:
-            if stream:
-                logger.trace("Creating streaming completion")
-                response_stream = await self.client.chat.completions.create(
-                    model=model,
-                    stream=True,
-                    stream_options=kwargs.pop(
-                        "stream_options", {"include_usage": True}
-                    ),
-                    **kwargs,
-                )
-
-                # streaming util gets updated inside _AsyncStreamWrapper
-                return _AsyncStreamWrapper(
-                    stream=response_stream,
-                    deployment=self,
-                    model=self.models[model],
-                    offset=_preflight_estimate,
-                )
-
-            logger.trace("Creating chat completion")
-            response = cast(
-                ChatCompletion,
-                await self.client.chat.completions.create(
-                    model=model,
-                    **kwargs,
-                ),
-            )
-
-            if response.usage:
-                # dont double-count our preflight estimate
-                self.models[model].spend_tokens(
-                    response.usage.total_tokens - _preflight_estimate
-                )
-                self._set_span_attributes(response.usage)
-
-            return response
-
-        except RateLimitError:
-            logger.exception("Marking down model for rate limit")
-            self.models[model].mark_down()
-            raise
-        except APITimeoutError:
-            # Timeouts during upstream-wide slowdowns are uncorrelated with
-            # which deployment was chosen — marking it down wastes capacity.
-            logger.warning("Upstream timeout on completion; not marking down")
-            raise
-        except APIConnectionError:
-            logger.exception("Marking down model for connection error")
-            self.models[model].mark_down()
-            raise
-
-    async def parse(
-        self,
-        *,
-        model: str,
-        response_format: type[_T],
-        **kwargs,
-    ) -> ParsedChatCompletion[_T]:
+        Both providers report cached and reasoning tokens, under different
+        field names; subclasses extract, this normalizes onto gen_ai.* attrs.
         """
-        Send a structured output parse request to this client.
-        Tracks usage metrics for load balancing.
-        """
-
-        if model not in self.models:
-            raise SwitchboardError(f"{model} not configured for deployment")
-
-        _preflight_estimate = self._estimate_token_usage(kwargs)
-        self.models[model].spend_tokens(_preflight_estimate)
-        self.models[model].spend_request()
-
-        try:
-            logger.trace("Creating parsed completion")
-            response = await self.client.beta.chat.completions.parse(
-                model=model, response_format=response_format, **kwargs
-            )
-
-            if response.usage:
-                self.models[model].spend_tokens(
-                    response.usage.total_tokens - _preflight_estimate
-                )
-                self._set_span_attributes(response.usage)
-
-            return response
-        except RateLimitError:
-            logger.exception("Marking down model for rate limit on parse")
-            self.models[model].mark_down()
-            raise
-        except APITimeoutError:
-            logger.warning("Upstream timeout on parse; not marking down")
-            raise
-        except APIConnectionError:
-            logger.exception("Marking down model for connection error on parse")
-            self.models[model].mark_down()
-            raise
-
-    def _estimate_token_usage(self, kwargs: dict) -> int:
-        # loose estimate of token cost. were only considering
-        # input tokens for now, we can add output estimates as well later.
-        # openai says roughly 4 characters per token, so sum len of messages
-        # and divide by 4.
-        t_input = sum(len(m.get("content", "")) for m in kwargs.get("messages", []))
-        # t_output = kwargs.get("max_tokens", 500)
-        return t_input // 4
-
-    def _set_span_attributes(self, usage: CompletionUsage) -> None:
         span = trace.get_current_span()
-        if prompt := usage.prompt_tokens_details:
-            if prompt.cached_tokens:
-                span.set_attribute("gen_ai.usage.cached_tokens", prompt.cached_tokens)
-        if completion := usage.completion_tokens_details:
-            if completion.reasoning_tokens:
-                span.set_attribute(
-                    "gen_ai.usage.reasoning_tokens", completion.reasoning_tokens
-                )
-
-
-class _AsyncStreamWrapper(wrapt.ObjectProxy):
-    """Wrap an openai.AsyncStream to track usage"""
-
-    def __init__(
-        self,
-        stream: AsyncStream[ChatCompletionChunk],
-        deployment: Deployment,
-        model: Model,
-        offset: int = 0,
-    ):
-        super().__init__(stream)
-        self._self_deployment: Deployment = deployment
-        self._self_model: Model = model
-        self._self_offset: int = offset
-        # Stream chunks are consumed after Switchboard.create() returns, so the
-        # contextualized logger scope from create() is no longer active here.
-        # Keep a bound logger on the wrapper to retain deployment/model context
-        # for mid-stream error logs.
-        self._self_logger = logger.bind(
-            deployment=deployment.name,
-            model=model.name,
-        )
-
-    async def __aiter__(self) -> AsyncIterator[ChatCompletionChunk]:
-        try:
-            async for chunk in self.__wrapped__:
-                chunk = cast(ChatCompletionChunk, chunk)
-                # only the last chunk contains the usage info
-                if chunk.usage:
-                    self._self_model.spend_tokens(
-                        # dont double-count our preflight estimate
-                        chunk.usage.total_tokens - self._self_offset
-                    )
-                    self._self_deployment._set_span_attributes(chunk.usage)
-
-                yield chunk
-        except RateLimitError:
-            self._self_logger.exception("Marking down model for rate limit on stream")
-            self._self_model.mark_down()
-            raise
-        except APITimeoutError:
-            self._self_logger.warning("Upstream timeout on stream; not marking down")
-            raise
-        except APIConnectionError:
-            self._self_logger.exception("Marking down model for connection error on stream")
-            self._self_model.mark_down()
-            raise
+        if cached:
+            span.set_attribute("gen_ai.usage.cached_tokens", cached)
+        if reasoning:
+            span.set_attribute("gen_ai.usage.reasoning_tokens", reasoning)

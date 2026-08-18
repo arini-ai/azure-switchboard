@@ -3,7 +3,15 @@ from __future__ import annotations
 import asyncio
 import random
 from collections import OrderedDict
-from typing import Callable, Literal, Sequence, TypeVar, overload
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Literal,
+    Sequence,
+    TypeVar,
+    overload,
+)
 
 from loguru import logger
 from openai import AsyncStream
@@ -18,13 +26,14 @@ from tenacity import (
 
 from azure_switchboard.model import UtilStats
 
-from .deployment import (
-    DeploymentConfig,
-    Deployment,
-)
+from .chat import OpenAIConfig, OpenAIDeployment
+from .deployment import Api, DeploymentBase
 from .exceptions import SwitchboardError
+from .messages import AnthropicConfig, AnthropicDeployment
 
 _T = TypeVar("_T", bound=BaseModel)
+
+DeploymentSpec = OpenAIConfig | AnthropicConfig
 
 meter = metrics.get_meter("azure_switchboard.switchboard")
 deployment_util = meter.create_gauge(
@@ -49,7 +58,7 @@ request_counter = meter.create_counter(
 )
 
 
-def two_random_choices(model: str, options: list[Deployment]) -> Deployment:
+def two_random_choices(model: str, options: list[DeploymentBase]) -> DeploymentBase:
     """Power of two random choices algorithm.
 
     Randomly select 2 deployments and return the one
@@ -66,12 +75,18 @@ DEFAULT_FAILOVER_POLICY = AsyncRetrying(
 )
 
 
+def _build_deployment(config: DeploymentSpec) -> DeploymentBase:
+    if isinstance(config, AnthropicConfig):
+        return AnthropicDeployment(config)
+    return OpenAIDeployment(config)
+
+
 class Switchboard:
     def __init__(
         self,
-        deployments: Sequence[DeploymentConfig],
+        deployments: Sequence[DeploymentSpec],
         selector: Callable[
-            [str, list[Deployment]], Deployment
+            [str, list[DeploymentBase]], DeploymentBase
         ] = two_random_choices,
         failover_policy: AsyncRetrying = DEFAULT_FAILOVER_POLICY,
         ratelimit_window: float = 60.0,
@@ -80,11 +95,11 @@ class Switchboard:
         if not deployments:
             raise SwitchboardError("No deployments provided")
 
-        self.deployments: dict[str, Deployment] = {}
+        self.deployments: dict[str, DeploymentBase] = {}
         for deployment in deployments:
             if deployment.name in self.deployments:
                 raise SwitchboardError(f"Duplicate deployment name: {deployment.name}")
-            self.deployments[deployment.name] = Deployment(deployment)
+            self.deployments[deployment.name] = _build_deployment(deployment)
 
         self.selector = selector
         self.failover_policy = failover_policy
@@ -132,16 +147,20 @@ class Switchboard:
         }
 
     def select_deployment(
-        self, *, model: str, session_id: str | None = None
-    ) -> Deployment:
+        self, *, model: str, api: Api = "chat", session_id: str | None = None
+    ) -> DeploymentBase:
         """
         Select a deployment using the power of two random choices algorithm.
         If session_id is provided, try to use that specific deployment first.
+
+        Only deployments speaking `api` are eligible, so a model name
+        registered against one provider is never routed to the other.
         """
         # Handle session-based routing first
         if session_id and session_id in self.sessions:
             deployment = self.sessions[session_id]
-            if deployment.is_healthy(model):
+            # A session may be shared across APIs; only reuse a matching one.
+            if deployment.api == api and deployment.is_healthy(model):
                 return deployment
 
             m = deployment.models.get(model)
@@ -149,10 +168,10 @@ class Switchboard:
                 f"{model} is unhealthy on {deployment.name}, falling back to selection"
             )
 
+        candidates = [d for d in self.deployments.values() if d.api == api]
+
         # Get eligible deployments for the requested model
-        eligible_deployments = [
-            d for d in self.deployments.values() if d.is_healthy(model)
-        ]
+        eligible_deployments = [d for d in candidates if d.is_healthy(model)]
 
         if not eligible_deployments:
             # No healthy deployments — fall back to any deployment that supports
@@ -160,9 +179,7 @@ class Switchboard:
             # This prevents cascade failures when a single deployment has a
             # transient error: without fallback, the 10s cooldown would reject
             # every request, turning one failure into dozens.
-            fallback_deployments = [
-                d for d in self.deployments.values() if model in d.models
-            ]
+            fallback_deployments = [d for d in candidates if model in d.models]
             if not fallback_deployments:
                 raise SwitchboardError(f"No deployments available for {model}")
             logger.warning(
@@ -185,6 +202,34 @@ class Switchboard:
 
         return deployment
 
+    async def _dispatch(
+        self,
+        *,
+        model: str,
+        api: Api,
+        session_id: str | None,
+        call: Callable[[Any], Awaitable[Any]],
+    ) -> Any:
+        """Select a deployment and issue `call` against it, with failover.
+
+        The failover policy is copied per call so concurrent requests don't
+        share retry state.
+        """
+        with logger.contextualize(model=model, session_id=session_id):
+            async for attempt in self.failover_policy.copy():
+                with attempt:
+                    deployment = self.select_deployment(
+                        model=model, api=api, session_id=session_id
+                    )
+                    with logger.contextualize(deployment=deployment.name):
+                        logger.trace("Sending request")
+                        response = await call(deployment)
+                    request_counter.add(
+                        1,
+                        {"model": model, "deployment": deployment.name, "api": api},
+                    )
+                    return response
+
     @overload
     async def create(
         self, *, session_id: str | None = None, stream: Literal[True], **kwargs
@@ -206,21 +251,12 @@ class Switchboard:
         """
         Send a chat completion request to the selected deployment, with automatic failover.
         """
-        with logger.contextualize(model=model, session_id=session_id):
-            async for attempt in self.failover_policy.copy():
-                with attempt:
-                    deployment = self.select_deployment(
-                        model=model, session_id=session_id
-                    )
-                    with logger.contextualize(deployment=deployment.name):
-                        logger.trace("Sending completion request")
-                        response = await deployment.create(
-                            model=model, stream=stream, **kwargs
-                        )
-                    request_counter.add(
-                        1, {"model": model, "deployment": deployment.name}
-                    )
-                    return response
+        return await self._dispatch(
+            model=model,
+            api="chat",
+            session_id=session_id,
+            call=lambda d: d.create(model=model, stream=stream, **kwargs),
+        )
 
     async def parse(
         self,
@@ -233,23 +269,54 @@ class Switchboard:
         """
         Send a structured output parse request to the selected deployment, with automatic failover.
         """
-        with logger.contextualize(model=model, session_id=session_id):
-            async for attempt in self.failover_policy.copy():
-                with attempt:
-                    deployment = self.select_deployment(
-                        model=model, session_id=session_id
-                    )
-                    with logger.contextualize(deployment=deployment.name):
-                        logger.trace("Sending parse request")
-                        response = await deployment.parse(
-                            model=model,
-                            response_format=response_format,
-                            **kwargs,
-                        )
-                    request_counter.add(
-                        1, {"model": model, "deployment": deployment.name}
-                    )
-                    return response
+        return await self._dispatch(
+            model=model,
+            api="chat",
+            session_id=session_id,
+            call=lambda d: d.parse(
+                model=model, response_format=response_format, **kwargs
+            ),
+        )
+
+    async def messages(
+        self,
+        *,
+        model: str,
+        session_id: str | None = None,
+        stream: bool = False,
+        **kwargs,
+    ) -> Any:
+        """
+        Send a Messages API request to the selected deployment, with automatic failover.
+
+        `max_tokens` is required by the Messages API and is passed through
+        unchanged; switchboard does not supply a default.
+        """
+        return await self._dispatch(
+            model=model,
+            api="messages",
+            session_id=session_id,
+            call=lambda d: d.messages(model=model, stream=stream, **kwargs),
+        )
+
+    async def parse_messages(
+        self,
+        *,
+        model: str,
+        output_format: type[_T],
+        session_id: str | None = None,
+        **kwargs,
+    ) -> Any:
+        """
+        Send a Messages API structured output request to the selected
+        deployment, with automatic failover.
+        """
+        return await self._dispatch(
+            model=model,
+            api="messages",
+            session_id=session_id,
+            call=lambda d: d.parse(model=model, output_format=output_format, **kwargs),
+        )
 
     def __repr__(self) -> str:
         return f"Switchboard({self.deployments})"
@@ -263,7 +330,7 @@ class _LRUDict(OrderedDict):
 
         super().__init__(*args, **kwargs)
 
-    def __setitem__(self, key: str, value: Deployment) -> None:
+    def __setitem__(self, key: str, value: DeploymentBase) -> None:
         super().__setitem__(key, value)
         super().move_to_end(key)
 
@@ -271,7 +338,7 @@ class _LRUDict(OrderedDict):
             oldkey = next(iter(self))
             super().__delitem__(oldkey)
 
-    def __getitem__(self, key: str) -> Deployment:
+    def __getitem__(self, key: str) -> DeploymentBase:
         val = super().__getitem__(key)
         super().move_to_end(key)
 

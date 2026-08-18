@@ -19,14 +19,14 @@ import time
 
 from rich import print
 
-from azure_switchboard import AzureDeployment, Model, Switchboard
+from azure_switchboard import Model, OpenAIConfig, Switchboard
 
 
 async def bench(args: argparse.Namespace) -> None:
     deployments = [
-        AzureDeployment(
+        OpenAIConfig(
             name=f"bench_{n}",
-            endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+            base_url=f"{os.environ['AZURE_OPENAI_ENDPOINT']}/openai/v1/",
             api_key=os.environ["AZURE_OPENAI_API_KEY"],
             models=[Model(name="gpt-4o-mini", tpm=30000, rpm=300)],
         )

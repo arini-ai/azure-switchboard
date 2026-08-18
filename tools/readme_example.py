@@ -13,7 +13,7 @@
 import asyncio
 import os
 
-from azure_switchboard import DeploymentConfig, Model, Switchboard
+from azure_switchboard import OpenAIConfig, Model, Switchboard
 
 azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
 azure_openai_api_key = os.getenv("AZURE_OPENAI_API_KEY")
@@ -25,7 +25,7 @@ if azure_openai_endpoint and azure_openai_api_key:
     # is fine for the purposes of this demo
     for name in ("east", "west", "south"):
         deployments.append(
-            DeploymentConfig(
+            OpenAIConfig(
                 name=name,
                 base_url=f"{azure_openai_endpoint}/openai/v1/",
                 api_key=azure_openai_api_key,
@@ -35,7 +35,7 @@ if azure_openai_endpoint and azure_openai_api_key:
 
 if openai_api_key:
     deployments.append(
-        DeploymentConfig(
+        OpenAIConfig(
             name="openai",
             api_key=openai_api_key,
             models=[Model(name="gpt-4o-mini")],
