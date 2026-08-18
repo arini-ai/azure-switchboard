@@ -6,7 +6,6 @@ from collections import OrderedDict
 from functools import cached_property
 from typing import (
     Awaitable,
-    Generic,
     Callable,
     Literal,
     Sequence,
@@ -236,54 +235,40 @@ class Switchboard:
         return f"Switchboard({self.deployments})"
 
 
-class _Surface(Generic[_D]):
-    """One provider's call surface: selection, failover, and metrics.
+async def _dispatch(
+    sb: Switchboard,
+    deployment_type: type[_D],
+    *,
+    model: str,
+    session_id: str | None,
+    call: Callable[[_D], Awaitable[_R]],
+) -> _R:  # pyright: ignore[reportReturnType]
+    """Select a deployment and issue `call` against it, with failover.
 
-    Subclasses bind `_D` to their deployment class and set `deployment_type`
-    to that same class, so the callables handed to `_dispatch` are concretely
-    typed and the runtime narrowing agrees with the annotation.
+    `deployment_type` is the provider class whose surface `call` uses. The
+    isinstance check narrows the selection -- which routes on model name alone
+    and so doesn't know which surface asked -- to that class, which is both
+    what types the callable and what turns a wrong-surface call into a
+    SwitchboardError rather than an AttributeError.
 
-    The failover loop lives here rather than in each surface so the per-call
-    `failover_policy.copy()` (#62) has exactly one place to be correct.
+    Shared by both surfaces rather than copied into each: the per-call
+    `failover_policy.copy()` (#62) gets exactly one place to be correct.
     """
-
-    deployment_type: type[_D]
-
-    def __init__(self, sb: Switchboard) -> None:
-        self.sb = sb
-
-    async def _dispatch(
-        self,
-        *,
-        model: str,
-        session_id: str | None,
-        call: Callable[[_D], Awaitable[_R]],
-    ) -> _R:  # pyright: ignore[reportReturnType]
-        """Select a deployment and issue `call` against it, with failover.
-
-        A model name belongs to exactly one provider (enforced at
-        construction), so a deployment of the wrong type here means the caller
-        reached for the wrong surface.
-        """
-        with logger.contextualize(model=model, session_id=session_id):
-            async for attempt in self.sb.failover_policy.copy():
-                with attempt:
-                    deployment = self.sb.select_deployment(
-                        model=model, session_id=session_id
+    with logger.contextualize(model=model, session_id=session_id):
+        async for attempt in sb.failover_policy.copy():
+            with attempt:
+                deployment = sb.select_deployment(model=model, session_id=session_id)
+                if not isinstance(deployment, deployment_type):
+                    raise SwitchboardError(
+                        f"{model} is served by {deployment.name} over the "
+                        f"{type(deployment).__name__} API, not "
+                        f"{deployment_type.__name__}"
                     )
-                    if not isinstance(deployment, self.deployment_type):
-                        raise SwitchboardError(
-                            f"{model} is served by {deployment.name} over the "
-                            f"{type(deployment).__name__} API, not "
-                            f"{self.deployment_type.__name__}"
-                        )
-                    with logger.contextualize(deployment=deployment.name):
-                        logger.trace("Sending request")
-                        response = await call(deployment)
-                    request_counter.add(
-                        1, {"model": model, "deployment": deployment.name}
-                    )
-                    return response
+                with logger.contextualize(deployment=deployment.name):
+                    logger.trace("Sending request")
+                    response = await call(deployment)
+                request_counter.add(1, {"model": model, "deployment": deployment.name})
+                return response
 
 
 class _Chat:
@@ -293,10 +278,11 @@ class _Chat:
     carry behavior.
     """
 
-    class Completions(_Surface[OpenAIDeployment]):
+    class Completions:
         """Mirrors `openai.AsyncOpenAI.chat.completions`."""
 
-        deployment_type = OpenAIDeployment
+        def __init__(self, sb: Switchboard) -> None:
+            self.sb = sb
 
         @overload
         async def create(
@@ -319,7 +305,9 @@ class _Chat:
             """
             Send a chat completion request to the selected deployment, with automatic failover.
             """
-            return await self._dispatch(
+            return await _dispatch(
+                self.sb,
+                OpenAIDeployment,
                 model=model,
                 session_id=session_id,
                 call=lambda d: d.create(model=model, stream=stream, **kwargs),
@@ -337,7 +325,9 @@ class _Chat:
             Send a structured output parse request to the selected deployment, with
             automatic failover.
             """
-            return await self._dispatch(
+            return await _dispatch(
+                self.sb,
+                OpenAIDeployment,
                 model=model,
                 session_id=session_id,
                 call=lambda d: d.parse(
@@ -349,10 +339,11 @@ class _Chat:
         self.completions = _Chat.Completions(switchboard)
 
 
-class _Messages(_Surface[AnthropicDeployment]):
+class _Messages:
     """Mirrors `anthropic.AsyncAnthropic.messages`."""
 
-    deployment_type = AnthropicDeployment
+    def __init__(self, sb: Switchboard) -> None:
+        self.sb = sb
 
     @overload
     async def create(
@@ -376,7 +367,9 @@ class _Messages(_Surface[AnthropicDeployment]):
         `max_tokens` is required by the Messages API and is passed through
         unchanged; switchboard does not supply a default.
         """
-        return await self._dispatch(
+        return await _dispatch(
+            self.sb,
+            AnthropicDeployment,
             model=model,
             session_id=session_id,
             call=lambda d: d.messages(model=model, stream=stream, **kwargs),
@@ -394,7 +387,9 @@ class _Messages(_Surface[AnthropicDeployment]):
         Send a Messages API structured output request to the selected
         deployment, with automatic failover.
         """
-        return await self._dispatch(
+        return await _dispatch(
+            self.sb,
+            AnthropicDeployment,
             model=model,
             session_id=session_id,
             call=lambda d: d.parse(model=model, output_format=output_format, **kwargs),
