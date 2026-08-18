@@ -40,7 +40,7 @@
 
 ### Runtime
 
-- openai>=1.62.0
+- openai>=2.0.0
 - loguru>=0.7.3
 - opentelemetry-api>=1.30.0
 - tenacity>=9.0.0

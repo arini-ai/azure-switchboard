@@ -9,7 +9,7 @@ requires-python = ">=3.10"
 dependencies = [
   "anthropic>=0.122.0",
   "loguru>=0.7.3",
-  "openai>=1.62.0",
+  "openai>=2.0.0",
   "opentelemetry-api>=1.30.0",
   "tenacity>=9.0.0",
   "wrapt>=1.17.2",

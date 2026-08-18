@@ -20,7 +20,7 @@ class TestDeploymentParse:
     async def test_parse_returns_parsed_completion(self, deployment: OpenAIDeployment):
         """Test basic parse returns ParsedChatCompletion with correct parsed model."""
         with patch.object(
-            deployment.client.beta.chat.completions,
+            deployment.client.chat.completions,
             "parse",
             new=AsyncMock(return_value=PARSED_RESPONSE),
         ) as mock:
@@ -35,7 +35,7 @@ class TestDeploymentParse:
     async def test_parse_tracks_usage(self, deployment: OpenAIDeployment):
         """Test that parse() updates TPM/RPM counters like create() does."""
         with patch.object(
-            deployment.client.beta.chat.completions,
+            deployment.client.chat.completions,
             "parse",
             new=AsyncMock(return_value=PARSED_RESPONSE),
         ):
@@ -70,7 +70,7 @@ class TestDeploymentParse:
         )
 
         with patch.object(
-            deployment.client.beta.chat.completions,
+            deployment.client.chat.completions,
             "parse",
             new=AsyncMock(side_effect=rate_limit_error),
         ):
@@ -84,7 +84,7 @@ class TestDeploymentParse:
     ):
         """Test that generic exceptions do NOT mark model down — only network/rate-limit errors do."""
         with patch.object(
-            deployment.client.beta.chat.completions,
+            deployment.client.chat.completions,
             "parse",
             new=AsyncMock(side_effect=Exception("upstream error")),
         ):
@@ -104,7 +104,7 @@ class TestDeploymentParse:
             )
         )
         with patch.object(
-            deployment.client.beta.chat.completions,
+            deployment.client.chat.completions,
             "parse",
             new=AsyncMock(side_effect=connection_error),
         ):
@@ -122,7 +122,7 @@ class TestDeploymentParse:
             )
         )
         with patch.object(
-            deployment.client.beta.chat.completions,
+            deployment.client.chat.completions,
             "parse",
             new=AsyncMock(side_effect=timeout_error),
         ):
