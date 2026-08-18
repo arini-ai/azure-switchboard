@@ -26,11 +26,11 @@ from tenacity import (
     stop_after_attempt,
 )
 
-from .anthropic_model import AnthropicModel
+from .anthropic_deployment import AnthropicDeployment
 from .exceptions import SwitchboardError
 from .foundry import FirstParty, Foundry
 from .model import ModelBase, UtilStats
-from .openai_model import OpenAIModel
+from .openai_deployment import OpenAIDeployment
 
 _T = TypeVar("_T", bound=BaseModel)
 _R = TypeVar("_R")
@@ -110,10 +110,10 @@ class Switchboard:
             # Each surface partitions these into its own pool; reject anything
             # neither would claim here, rather than on first use.
             for model in foundry.models.values():
-                if not isinstance(model, (OpenAIModel, AnthropicModel)):
+                if not isinstance(model, (OpenAIDeployment, AnthropicDeployment)):
                     raise SwitchboardError(
-                        f"{foundry.name}: {model.name} is not an OpenAIModel "
-                        "or AnthropicModel"
+                        f"{foundry.name}: {model.name} is not an OpenAIDeployment "
+                        "or AnthropicDeployment"
                     )
 
         self._openai_fallback_enabled = openai_fallback
@@ -258,10 +258,10 @@ class _Chat:
         def __init__(self, sb: Switchboard) -> None:
             self.sb = sb
 
-            self._pool: dict[str, list[OpenAIModel]] = {}
+            self._pool: dict[str, list[OpenAIDeployment]] = {}
             for foundry in sb.foundries.values():
                 for model in foundry.models.values():
-                    if isinstance(model, OpenAIModel):
+                    if isinstance(model, OpenAIDeployment):
                         self._pool.setdefault(model.name, []).append(model)
 
             # Not part of the pool: it is what selection reaches for once the
@@ -269,9 +269,9 @@ class _Chat:
             self._first_party = (
                 FirstParty("openai") if sb._openai_fallback_enabled else None
             )
-            self._fallbacks: dict[str, OpenAIModel] = {}
+            self._fallbacks: dict[str, OpenAIDeployment] = {}
 
-        def _fallback(self, model: str) -> OpenAIModel | None:
+        def _fallback(self, model: str) -> OpenAIDeployment | None:
             """The first-party deployment of a model, created on first need.
 
             Any model name resolves, including one on no foundry at all — the
@@ -280,7 +280,7 @@ class _Chat:
             if self._first_party is None:
                 return None
             if model not in self._fallbacks:
-                deployment = OpenAIModel(model)
+                deployment = OpenAIDeployment(model)
                 self._first_party.add(deployment)
                 self._fallbacks[model] = deployment
             return self._fallbacks[model]
@@ -338,22 +338,22 @@ class _Messages:
     def __init__(self, sb: Switchboard) -> None:
         self.sb = sb
 
-        self._pool: dict[str, list[AnthropicModel]] = {}
+        self._pool: dict[str, list[AnthropicDeployment]] = {}
         for foundry in sb.foundries.values():
             for model in foundry.models.values():
-                if isinstance(model, AnthropicModel):
+                if isinstance(model, AnthropicDeployment):
                     self._pool.setdefault(model.name, []).append(model)
 
         self._first_party = (
             FirstParty("anthropic") if sb._anthropic_fallback_enabled else None
         )
-        self._fallbacks: dict[str, AnthropicModel] = {}
+        self._fallbacks: dict[str, AnthropicDeployment] = {}
 
-    def _fallback(self, model: str) -> AnthropicModel | None:
+    def _fallback(self, model: str) -> AnthropicDeployment | None:
         if self._first_party is None:
             return None
         if model not in self._fallbacks:
-            deployment = AnthropicModel(model)
+            deployment = AnthropicDeployment(model)
             self._first_party.add(deployment)
             self._fallbacks[model] = deployment
         return self._fallbacks[model]

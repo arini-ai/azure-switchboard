@@ -5,9 +5,9 @@ from anthropic import APIConnectionError, APITimeoutError, RateLimitError
 from httpx import Request, Response
 from pydantic import BaseModel
 
-from azure_switchboard import AnthropicModel, Foundry
+from azure_switchboard import AnthropicDeployment, Foundry
 from azure_switchboard.foundry import FirstParty
-from azure_switchboard.anthropic_model import _content_len
+from azure_switchboard.anthropic_deployment import _content_len
 
 from .conftest import (
     MESSAGE_BODY,
@@ -35,7 +35,7 @@ def _rate_limit() -> RateLimitError:
     )
 
 
-def _assert_cooldown_scope(deployment: AnthropicModel, scope: str | None) -> None:
+def _assert_cooldown_scope(deployment: AnthropicDeployment, scope: str | None) -> None:
     """A 429 is one deployment's quota; a connection error is the whole host."""
     assert deployment.is_cooling() is (scope == "model")
     assert deployment.foundry.is_cooling() is (scope == "foundry")
@@ -55,7 +55,7 @@ class TestAnthropicEndpoint:
             name="d",
             api_key="k",
             models=[
-                AnthropicModel(
+                AnthropicDeployment(
                     name="claude-sonnet-5", endpoint="https://custom.example/anthropic/"
                 )
             ],
@@ -71,19 +71,23 @@ class TestAnthropicEndpoint:
 
     def test_first_party_client_is_the_plain_variant(self, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
-        resource = FirstParty("anthropic", models=[AnthropicModel("claude-sonnet-5")])
+        resource = FirstParty(
+            "anthropic", models=[AnthropicDeployment("claude-sonnet-5")]
+        )
         deployment = resource.models["claude-sonnet-5"]
         assert deployment.url is None
         assert type(deployment.client).__name__ == "AsyncAnthropic"
 
 
-class TestAnthropicModel:
-    async def test_init(self, anthropic_deployment: AnthropicModel, anthropic_resource):
+class TestAnthropicDeployment:
+    async def test_init(
+        self, anthropic_deployment: AnthropicDeployment, anthropic_resource
+    ):
         assert anthropic_deployment.name == "claude-sonnet-5"
         assert anthropic_deployment.foundry is anthropic_resource
         assert anthropic_deployment.client is not None
 
-    async def test_messages(self, anthropic_deployment: AnthropicModel):
+    async def test_messages(self, anthropic_deployment: AnthropicDeployment):
         with patch.object(
             anthropic_deployment.client.messages, "create", side_effect=message_mock()
         ) as mock:
@@ -97,7 +101,7 @@ class TestAnthropicModel:
         assert usage.rpm.startswith("1/")
 
     async def test_streaming_accumulates_usage(
-        self, anthropic_deployment: AnthropicModel
+        self, anthropic_deployment: AnthropicDeployment
     ):
         """Input lands on message_start; output_tokens is cumulative per delta."""
         with patch.object(
@@ -114,7 +118,7 @@ class TestAnthropicModel:
         assert usage.tpm.startswith("21/")
         assert usage.rpm.startswith("1/")
 
-    async def test_parse(self, anthropic_deployment: AnthropicModel):
+    async def test_parse(self, anthropic_deployment: AnthropicDeployment):
         with patch.object(
             anthropic_deployment.client.messages, "parse", side_effect=message_mock()
         ) as mock:
@@ -143,7 +147,7 @@ class TestAnthropicErrorHandling:
         ids=["rate_limit", "connection", "timeout"],
     )
     async def test_cooldown_policy(
-        self, anthropic_deployment: AnthropicModel, error, scope
+        self, anthropic_deployment: AnthropicDeployment, error, scope
     ):
         with patch.object(
             anthropic_deployment.client.messages, "create", side_effect=error
@@ -162,7 +166,7 @@ class TestAnthropicErrorHandling:
         ids=["rate_limit", "connection", "timeout"],
     )
     async def test_cooldown_policy_on_stream(
-        self, anthropic_deployment: AnthropicModel, error, scope
+        self, anthropic_deployment: AnthropicDeployment, error, scope
     ):
 
         async def _raising_stream(*args, **kwargs):
@@ -218,7 +222,7 @@ class TestParseErrorHandling:
         ids=["rate_limit", "connection", "timeout"],
     )
     async def test_cooldown_policy_on_parse(
-        self, anthropic_deployment: AnthropicModel, error, scope
+        self, anthropic_deployment: AnthropicDeployment, error, scope
     ):
         with patch.object(
             anthropic_deployment.client.messages, "parse", side_effect=error
@@ -232,7 +236,7 @@ class TestParseErrorHandling:
         _assert_cooldown_scope(anthropic_deployment, scope)
 
     async def test_response_without_usage_only_spends_the_estimate(
-        self, anthropic_deployment: AnthropicModel
+        self, anthropic_deployment: AnthropicDeployment
     ):
         """Some responses carry no usage block; the preflight estimate stands."""
         no_usage = MESSAGE_RESPONSE.model_copy(update={"usage": None})

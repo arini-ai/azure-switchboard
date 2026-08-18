@@ -13,7 +13,7 @@
 import asyncio
 import os
 
-from azure_switchboard import Foundry, OpenAIModel, Switchboard
+from azure_switchboard import Foundry, OpenAIDeployment, Switchboard
 
 azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
 azure_openai_api_key = os.getenv("AZURE_OPENAI_API_KEY")
@@ -29,7 +29,7 @@ if azure_openai_endpoint and azure_openai_api_key:
                 name=name,
                 api_key=azure_openai_api_key,
                 models=[
-                    OpenAIModel(
+                    OpenAIDeployment(
                         name="gpt-4o-mini",
                         endpoint=f"{azure_openai_endpoint}/openai/v1/",
                     )

@@ -1,7 +1,7 @@
 import azure_switchboard
 from loguru import logger as _logger
 
-from azure_switchboard import Foundry, OpenAIModel, Switchboard
+from azure_switchboard import Foundry, OpenAIDeployment, Switchboard
 
 from .conftest import select_openai
 
@@ -19,12 +19,12 @@ class TestInit:
                 Foundry(
                     name="mini-only",
                     api_key="mini-only",
-                    models=[OpenAIModel(name="gpt-4o-mini", tpm=1000, rpm=6)],
+                    models=[OpenAIDeployment(name="gpt-4o-mini", tpm=1000, rpm=6)],
                 ),
                 Foundry(
                     name="full-only",
                     api_key="full-only",
-                    models=[OpenAIModel(name="gpt-4o", tpm=1000, rpm=6)],
+                    models=[OpenAIDeployment(name="gpt-4o", tpm=1000, rpm=6)],
                 ),
             ],
             ratelimit_window=0,
@@ -48,9 +48,9 @@ class TestInit:
 
     def test_public_export_surface(self):
         assert set(azure_switchboard.__all__) == {
-            "AnthropicModel",
+            "AnthropicDeployment",
             "Foundry",
-            "OpenAIModel",
+            "OpenAIDeployment",
             "ParsedChatCompletion",
             "SwitchboardError",
             "Switchboard",

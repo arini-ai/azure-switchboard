@@ -19,7 +19,7 @@ import time
 
 from rich import print
 
-from azure_switchboard import Foundry, OpenAIModel, Switchboard
+from azure_switchboard import Foundry, OpenAIDeployment, Switchboard
 
 
 async def bench(args: argparse.Namespace) -> None:
@@ -28,7 +28,7 @@ async def bench(args: argparse.Namespace) -> None:
             name=f"bench_{n}",
             api_key=os.environ["AZURE_OPENAI_API_KEY"],
             models=[
-                OpenAIModel(
+                OpenAIDeployment(
                     name="gpt-4o-mini",
                     tpm=30000,
                     rpm=300,

@@ -1,20 +1,17 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Hashable, Iterable
-from typing import Any, TypeVar
+from collections.abc import Callable, Iterable
 
-from .anthropic_model import AnthropicModel
+from .anthropic_deployment import AnthropicClient, AnthropicDeployment
 from .exceptions import SwitchboardError
 from .model import UtilStats
-from .openai_model import OpenAIModel
-
-_C = TypeVar("_C")
+from .openai_deployment import OpenAIClient, OpenAIDeployment
 
 # Every deployment speaks one of the APIs switchboard serves. ModelBase carries
 # the quota and cooldown machinery they share and bounds the generic selection
 # code, but nothing is ever only a ModelBase, so a resource says so.
-Deployment = OpenAIModel | AnthropicModel
+Deployment = OpenAIDeployment | AnthropicDeployment
 
 
 class Foundry:
@@ -46,7 +43,9 @@ class Foundry:
         # The prefix each deployment appends its API path to.
         self.base: str | None = f"https://{name}.services.ai.azure.com/"
 
-        self._clients: dict[Hashable, Any] = {}
+        # Keyed by URL: within one API, that is what distinguishes a client.
+        self._openai_clients: dict[str | None, OpenAIClient] = {}
+        self._anthropic_clients: dict[str | None, AnthropicClient] = {}
 
         self.models: dict[str, Deployment] = {}
         for model in models:
@@ -58,22 +57,30 @@ class Foundry:
         model.bind(self)
         self.models[model.name] = model
 
-    def cached_client(self, key: Hashable, build: Callable[[], _C]) -> _C:
-        """Share one SDK client across the deployments that can use it.
+    def openai_client(
+        self, url: str | None, build: Callable[[], OpenAIClient]
+    ) -> OpenAIClient:
+        """Share one client across the deployments served from the same URL.
 
-        Deployments call this with a key of their own choosing, normally their
-        API and URL, so two models of the same API on this resource share a
-        connection pool while one that overrides its endpoint gets its own.
+        Two deployments of this API on this resource share a connection pool;
+        one that overrides its endpoint gets its own.
         """
-        if key not in self._clients:
-            self._clients[key] = build()
-        return self._clients[key]
+        if url not in self._openai_clients:
+            self._openai_clients[url] = build()
+        return self._openai_clients[url]
+
+    def anthropic_client(
+        self, url: str | None, build: Callable[[], AnthropicClient]
+    ) -> AnthropicClient:
+        if url not in self._anthropic_clients:
+            self._anthropic_clients[url] = build()
+        return self._anthropic_clients[url]
 
     def mark_down(self, seconds: float = 0.0) -> None:
         """Take the whole resource out of selection.
 
         Reserved for errors that are properties of the host rather than of one
-        model's quota — see AnthropicModel/OpenAIModel error handling.
+        model's quota — see AnthropicDeployment/OpenAIDeployment error handling.
         """
         self.cooldown_until = time.time() + (seconds or self.default_cooldown)
 

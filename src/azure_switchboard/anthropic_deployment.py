@@ -21,8 +21,12 @@ from .model import ModelBase
 
 _T = TypeVar("_T", bound=BaseModel)
 
+# AsyncAnthropicFoundry subclasses AsyncAnthropic, so the base type covers both
+# the Foundry client and the first-party one.
+AnthropicClient = AsyncAnthropic
 
-class AnthropicModel(ModelBase):
+
+class AnthropicDeployment(ModelBase):
     """A model deployment speaking the Anthropic Messages API."""
 
     @property
@@ -33,20 +37,20 @@ class AnthropicModel(ModelBase):
         return f"{base}anthropic/" if base else None
 
     @property
-    def client(self) -> AsyncAnthropic:
+    def client(self) -> AnthropicClient:
         # AsyncAnthropicFoundry overrides auth to send Azure's api-key header,
         # so it is not interchangeable with the first-party client. No URL
         # means we are not on Foundry at all.
         foundry, url = self.foundry, self.url
         if url is None:
-            return foundry.cached_client(
-                (AsyncAnthropic, None),
+            return foundry.anthropic_client(
+                None,
                 lambda: AsyncAnthropic(
                     api_key=foundry.api_key, timeout=foundry.timeout
                 ),
             )
-        return foundry.cached_client(
-            (AsyncAnthropicFoundry, url),
+        return foundry.anthropic_client(
+            url,
             lambda: AsyncAnthropicFoundry(
                 base_url=url, api_key=foundry.api_key, timeout=foundry.timeout
             ),
@@ -180,11 +184,11 @@ class _AsyncMessageStreamWrapper(wrapt.ObjectProxy):
     def __init__(
         self,
         stream: AsyncStream[RawMessageStreamEvent],
-        model: AnthropicModel,
+        model: AnthropicDeployment,
         offset: int = 0,
     ):
         super().__init__(stream)
-        self._self_model: AnthropicModel = model
+        self._self_model: AnthropicDeployment = model
         self._self_offset: int = offset
         self._self_output_spent: int = 0
         # Events are consumed after create() returns, once its contextualize

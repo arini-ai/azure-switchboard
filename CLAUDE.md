@@ -64,8 +64,8 @@
   - `switchboard.py`: Main client implementation with load balancing logic
   - `foundry.py`: `Foundry`, an Azure resource: endpoint, credential, clients, deployments
   - `model.py`: `ModelBase`, the provider-agnostic deployment: quota, utilization, cooldown
-  - `openai_model.py`: `OpenAIModel`, a deployment speaking Chat Completions
-  - `anthropic_model.py`: `AnthropicModel`, a deployment speaking the Messages API
+  - `openai_deployment.py`: `OpenAIDeployment`, a deployment speaking Chat Completions
+  - `anthropic_deployment.py`: `AnthropicDeployment`, a deployment speaking the Messages API
 - `tests/`: Comprehensive test suite
 - `tools/`: Demo and benchmark utilities
 

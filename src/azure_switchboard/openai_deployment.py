@@ -24,8 +24,12 @@ from .model import ModelBase
 
 _T = TypeVar("_T", bound=BaseModel)
 
+# Azure OpenAI is reached through the same client as OpenAI, via base_url, so
+# AsyncAzureOpenAI never appears here. It subclasses AsyncOpenAI in any case.
+OpenAIClient = AsyncOpenAI
 
-class OpenAIModel(ModelBase):
+
+class OpenAIDeployment(ModelBase):
     """A model deployment speaking the Chat Completions API."""
 
     @property
@@ -36,10 +40,10 @@ class OpenAIModel(ModelBase):
         return f"{base}openai/v1/" if base else None
 
     @property
-    def client(self) -> AsyncOpenAI:
+    def client(self) -> OpenAIClient:
         foundry, url = self.foundry, self.url
-        return foundry.cached_client(
-            (AsyncOpenAI, url),
+        return foundry.openai_client(
+            url,
             lambda: AsyncOpenAI(
                 api_key=foundry.api_key, base_url=url, timeout=foundry.timeout
             ),
@@ -165,11 +169,11 @@ class _AsyncStreamWrapper(wrapt.ObjectProxy):
     def __init__(
         self,
         stream: AsyncStream[ChatCompletionChunk],
-        model: OpenAIModel,
+        model: OpenAIDeployment,
         offset: int = 0,
     ):
         super().__init__(stream)
-        self._self_model: OpenAIModel = model
+        self._self_model: OpenAIDeployment = model
         self._self_offset: int = offset
         # Chunks are consumed after create() returns, once its contextualize
         # scope is gone, so bind the context for mid-stream error logs.

@@ -5,11 +5,10 @@ import pytest
 import respx
 from anthropic import APIConnectionError
 from httpx import Request
-from openai import AsyncOpenAI
 from pydantic import BaseModel
 
-from azure_switchboard import Foundry, OpenAIModel, Switchboard, SwitchboardError
-from azure_switchboard.anthropic_model import AnthropicModel
+from azure_switchboard import Foundry, OpenAIDeployment, Switchboard, SwitchboardError
+from azure_switchboard.anthropic_deployment import AnthropicDeployment
 from azure_switchboard.model import ModelBase
 
 from .conftest import (
@@ -55,7 +54,9 @@ class TestSwitchboard:
     async def test_streaming(self, switchboard: Switchboard):
         """Test streaming through switchboard."""
 
-        with patch("azure_switchboard.openai_model.OpenAIModel.create") as mock:
+        with patch(
+            "azure_switchboard.openai_deployment.OpenAIDeployment.create"
+        ) as mock:
             mock.side_effect = chat_completion_mock()
             stream = await switchboard.chat.completions.create(
                 stream=True, **COMPLETION_PARAMS
@@ -136,12 +137,12 @@ class TestSwitchboard:
                 Foundry(
                     name="mini-only",
                     api_key="mini-only",
-                    models=[OpenAIModel(name="gpt-4o-mini", tpm=1000, rpm=6)],
+                    models=[OpenAIDeployment(name="gpt-4o-mini", tpm=1000, rpm=6)],
                 ),
                 Foundry(
                     name="full-only",
                     api_key="full-only",
-                    models=[OpenAIModel(name="gpt-4o", tpm=1000, rpm=6)],
+                    models=[OpenAIDeployment(name="gpt-4o", tpm=1000, rpm=6)],
                 ),
             ],
             ratelimit_window=0,
@@ -251,7 +252,7 @@ class TestSwitchboard:
         switchboard.foundries["ant1"].models["claude-sonnet-5"].mark_down()
 
         selection = select_anthropic(switchboard, model="claude-sonnet-5")
-        assert isinstance(selection, AnthropicModel)
+        assert isinstance(selection, AnthropicDeployment)
         assert selection.foundry.name == "first-party-anthropic"
 
     async def test_each_fallback_is_scoped_to_its_own_api(self):
@@ -283,7 +284,7 @@ class TestSwitchboard:
     async def test_foundry_must_hold_typed_deployments(self):
         resource = Foundry(name="odd", api_key="k")
         resource.models["mystery"] = ModelBase(name="mystery")
-        with pytest.raises(SwitchboardError, match="not an OpenAIModel"):
+        with pytest.raises(SwitchboardError, match="not an OpenAIDeployment"):
             Switchboard(foundries=[resource])
 
     def _within_bounds(self, val, min, max, tolerance=0.05):
@@ -532,11 +533,11 @@ class TestMixedPoolSelection:
         assert set(mixed.chat.completions._pool) == {"gpt-4o-mini", "gpt-4o"}
         assert set(mixed.messages._pool) == {"claude-sonnet-5", "claude-haiku-4-5"}
         assert all(
-            isinstance(d, OpenAIModel)
+            isinstance(d, OpenAIDeployment)
             for d in mixed.chat.completions._pool["gpt-4o-mini"]
         )
         assert all(
-            isinstance(d, AnthropicModel)
+            isinstance(d, AnthropicDeployment)
             for d in mixed.messages._pool["claude-sonnet-5"]
         )
 
@@ -545,11 +546,11 @@ class TestMixedPoolSelection:
         for _ in range(20):
             assert isinstance(
                 select_openai(mixed, model="gpt-4o-mini"),
-                OpenAIModel,
+                OpenAIDeployment,
             )
             assert isinstance(
                 select_anthropic(mixed, model="claude-sonnet-5"),
-                AnthropicModel,
+                AnthropicDeployment,
             )
 
     def test_stats_span_both_providers(self, mixed: Switchboard):
@@ -578,19 +579,19 @@ class TestMixedPoolSessionAffinity:
         requested model, so one session_id spanning both APIs is safe."""
         chat = select_openai(mixed, model="gpt-4o-mini", session_id="shared")
         msgs = select_anthropic(mixed, model="claude-sonnet-5", session_id="shared")
-        assert isinstance(chat, OpenAIModel)
-        assert isinstance(msgs, AnthropicModel)
+        assert isinstance(chat, OpenAIDeployment)
+        assert isinstance(msgs, AnthropicDeployment)
 
 
 class TestMixedPoolDispatch:
     async def test_both_surfaces_route_correctly(self, mixed: Switchboard):
         with patch(
-            "azure_switchboard.openai_model.OpenAIModel.create",
+            "azure_switchboard.openai_deployment.OpenAIDeployment.create",
             side_effect=chat_completion_mock(),
         ) as chat_mock:
             await mixed.chat.completions.create(**COMPLETION_PARAMS)
         with patch(
-            "azure_switchboard.anthropic_model.AnthropicModel.create",
+            "azure_switchboard.anthropic_deployment.AnthropicDeployment.create",
             side_effect=message_mock(),
         ) as msg_mock:
             await mixed.messages.create(**MESSAGE_PARAMS)
@@ -600,7 +601,7 @@ class TestMixedPoolDispatch:
 
     async def test_parse_messages_routes_to_the_messages_api(self, mixed: Switchboard):
         with patch(
-            "azure_switchboard.anthropic_model.AnthropicModel.parse",
+            "azure_switchboard.anthropic_deployment.AnthropicDeployment.parse",
             side_effect=message_mock(),
         ) as mock:
             await mixed.messages.parse(
@@ -627,7 +628,8 @@ class TestMixedPoolDispatch:
             return "ok"
 
         with patch(
-            "azure_switchboard.anthropic_model.AnthropicModel.create", new=flaky
+            "azure_switchboard.anthropic_deployment.AnthropicDeployment.create",
+            new=flaky,
         ):
             assert await mixed.messages.create(**MESSAGE_PARAMS) == "ok"
 
@@ -654,7 +656,7 @@ class TestMixedPoolConstruction:
                 Foundry(
                     name="compat",
                     api_key="k",
-                    models=[OpenAIModel(name="claude-sonnet-5")],
+                    models=[OpenAIDeployment(name="claude-sonnet-5")],
                 ),
                 anthropic_foundry("native"),
             ]
@@ -676,7 +678,9 @@ class TestMixedPoolConstruction:
             Switchboard(
                 foundries=[
                     Foundry(
-                        name="dup", api_key="k", models=[OpenAIModel(name="gpt-4o")]
+                        name="dup",
+                        api_key="k",
+                        models=[OpenAIDeployment(name="gpt-4o")],
                     ),
                     anthropic_foundry("dup"),
                 ]
@@ -687,7 +691,10 @@ class TestMixedPoolConstruction:
             Foundry(
                 name="r",
                 api_key="k",
-                models=[OpenAIModel(name="gpt-4o"), OpenAIModel(name="gpt-4o")],
+                models=[
+                    OpenAIDeployment(name="gpt-4o"),
+                    OpenAIDeployment(name="gpt-4o"),
+                ],
             )
 
     def test_one_foundry_serves_both_apis(self):
@@ -700,8 +707,8 @@ class TestMixedPoolConstruction:
             name="east",
             api_key="k",
             models=[
-                OpenAIModel(name="gpt-4o-mini"),
-                AnthropicModel(name="claude-sonnet-5"),
+                OpenAIDeployment(name="gpt-4o-mini"),
+                AnthropicDeployment(name="claude-sonnet-5"),
             ],
         )
         sb = Switchboard(foundries=[resource])
@@ -723,7 +730,7 @@ class TestMixedPoolConstruction:
             name="legacy",
             api_key="k",
             models=[
-                OpenAIModel(
+                OpenAIDeployment(
                     name="gpt-4o",
                     endpoint="https://legacy.openai.azure.com/openai/v1/",
                 )
@@ -739,16 +746,20 @@ class TestMixedPoolConstruction:
         resource = Foundry(
             name="east",
             api_key="k",
-            models=[OpenAIModel(name="gpt-4o-mini"), OpenAIModel(name="gpt-4o")],
+            models=[
+                OpenAIDeployment(name="gpt-4o-mini"),
+                OpenAIDeployment(name="gpt-4o"),
+            ],
         )
         a, b = resource.models["gpt-4o-mini"], resource.models["gpt-4o"]
         assert a.client is b.client
 
     def test_client_is_built_only_for_the_apis_in_use(self):
         resource = Foundry(
-            name="east", api_key="k", models=[OpenAIModel(name="gpt-4o-mini")]
+            name="east", api_key="k", models=[OpenAIDeployment(name="gpt-4o-mini")]
         )
         _ = resource.models["gpt-4o-mini"].client
-        assert list(resource._clients) == [
-            (AsyncOpenAI, "https://east.services.ai.azure.com/openai/v1/")
+        assert list(resource._openai_clients) == [
+            "https://east.services.ai.azure.com/openai/v1/"
         ]
+        assert not resource._anthropic_clients

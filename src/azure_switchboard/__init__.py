@@ -1,10 +1,10 @@
 from loguru import logger as _logger
 from openai.types.chat import ParsedChatCompletion
 
-from .anthropic_model import AnthropicModel
+from .anthropic_deployment import AnthropicDeployment
 from .exceptions import SwitchboardError
 from .foundry import Foundry
-from .openai_model import OpenAIModel
+from .openai_deployment import OpenAIDeployment
 from .switchboard import Switchboard
 
 # As a library, do not configure sinks or emit logs by default.
@@ -13,9 +13,9 @@ _logger.disable("azure_switchboard")
 
 
 __all__ = [
-    "AnthropicModel",
+    "AnthropicDeployment",
     "Foundry",
-    "OpenAIModel",
+    "OpenAIDeployment",
     "ParsedChatCompletion",
     "SwitchboardError",
     "Switchboard",

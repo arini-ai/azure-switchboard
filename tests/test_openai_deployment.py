@@ -6,7 +6,7 @@ import respx
 from httpx import Request, Response, TimeoutException
 from openai import APIConnectionError, APITimeoutError, RateLimitError
 
-from azure_switchboard import Foundry, OpenAIModel
+from azure_switchboard import Foundry, OpenAIDeployment
 
 from .conftest import (
     COMPLETION_BODY,
@@ -19,10 +19,10 @@ from .conftest import (
 )
 
 
-class TestOpenAIModel:
+class TestOpenAIDeployment:
     """Chat Completions deployment tests."""
 
-    async def test_init(self, deployment: OpenAIModel, foundry: Foundry):
+    async def test_init(self, deployment: OpenAIDeployment, foundry: Foundry):
         """A deployment knows its resource and borrows that resource's client."""
         assert deployment.name == "gpt-4o-mini"
         assert deployment.foundry is foundry
@@ -31,7 +31,7 @@ class TestOpenAIModel:
 
     @pytest.mark.mock_models("gpt-4o-mini")
     async def test_completion(
-        self, mock_client: respx.MockRouter, deployment: OpenAIModel
+        self, mock_client: respx.MockRouter, deployment: OpenAIDeployment
     ):
         """Test basic chat completion functionality."""
 
@@ -58,7 +58,7 @@ class TestOpenAIModel:
         assert "23/" in usage.tpm
         assert "2/" in usage.rpm
 
-    async def test_streaming(self, deployment: OpenAIModel):
+    async def test_streaming(self, deployment: OpenAIDeployment):
         """Test streaming functionality.
 
         It's annoying to try to mock HTTP streaming responses so we cheat
@@ -180,7 +180,7 @@ class TestOpenAIModel:
             assert mock.call_count == 1
             assert not deployment.is_healthy()
 
-    async def test_mark_down(self, deployment: OpenAIModel):
+    async def test_mark_down(self, deployment: OpenAIDeployment):
         """Test model-level cooldown functionality."""
 
         model = deployment
@@ -191,7 +191,7 @@ class TestOpenAIModel:
         model.mark_up()
         assert model.is_healthy()
 
-    async def test_usage(self, deployment: OpenAIModel, foundry: Foundry):
+    async def test_usage(self, deployment: OpenAIDeployment, foundry: Foundry):
         """Test deployment-level counters"""
 
         # Reset and verify initial state
@@ -218,7 +218,7 @@ class TestOpenAIModel:
         assert usage.rpm == f"0/{model.rpm_limit}"
         assert model.last_reset > 0
 
-    async def test_utilization(self, deployment: OpenAIModel):
+    async def test_utilization(self, deployment: OpenAIDeployment):
         """Test utilization calculation."""
 
         model = deployment
@@ -276,7 +276,7 @@ class TestOpenAIModel:
 
     @pytest.mark.mock_models("gpt-4o-mini")
     async def test_concurrency(
-        self, mock_client: respx.MockRouter, deployment: OpenAIModel
+        self, mock_client: respx.MockRouter, deployment: OpenAIDeployment
     ):
         """Test handling of multiple concurrent requests."""
 
@@ -296,7 +296,7 @@ class TestOpenAIModel:
 
     @pytest.mark.mock_models("gpt-4o-mini")
     async def test_timeout_retry(
-        self, mock_client: respx.MockRouter, deployment: OpenAIModel
+        self, mock_client: respx.MockRouter, deployment: OpenAIDeployment
     ):
         """Test timeout retry behavior."""
 
@@ -324,7 +324,7 @@ class TestOpenAIModel:
         assert mock_client.routes["azure"].call_count == 3
         assert deployment.is_healthy()
 
-    async def test_timeout_does_not_mark_down(self, deployment: OpenAIModel):
+    async def test_timeout_does_not_mark_down(self, deployment: OpenAIDeployment):
         """APITimeoutError should not mark the deployment down."""
 
         deployment.client.max_retries = 0
@@ -356,7 +356,9 @@ class TestOpenAIModel:
         assert deployment.is_healthy()
         assert deployment.util < 1
 
-    async def test_timeout_does_not_mark_down_stream(self, deployment: OpenAIModel):
+    async def test_timeout_does_not_mark_down_stream(
+        self, deployment: OpenAIDeployment
+    ):
         """Mid-stream APITimeoutError should not mark the deployment down."""
 
         deployment.client.max_retries = 0
@@ -388,7 +390,7 @@ class TestOpenAIModel:
         """Callers that need longer timeouts can override per Foundry."""
         assert Foundry(name="batch", api_key="key", timeout=300.0).timeout == 300.0
 
-    async def test_rate_limit_marks_down(self, deployment: OpenAIModel):
+    async def test_rate_limit_marks_down(self, deployment: OpenAIDeployment):
         """Rate limit errors should mark the model down and re-raise."""
 
         deployment.client.max_retries = 0

@@ -32,16 +32,16 @@ from anthropic.types import (
 from anthropic.types.raw_message_delta_event import Delta
 
 from azure_switchboard import (
-    AnthropicModel,
+    AnthropicDeployment,
     Foundry,
-    OpenAIModel,
+    OpenAIDeployment,
     Switchboard,
 )
 
 
 def select_openai(
     sb: Switchboard, *, model: str, session_id: str | None = None
-) -> OpenAIModel:
+) -> OpenAIDeployment:
     """Resolve a model the way a chat request would, for selection assertions.
 
     Switchboard exposes no public selection entry point: the surfaces mirror
@@ -59,7 +59,7 @@ def select_openai(
 
 def select_anthropic(
     sb: Switchboard, *, model: str, session_id: str | None = None
-) -> AnthropicModel:
+) -> AnthropicDeployment:
     """Resolve a model the way a messages request would."""
     surface = sb.messages
     return sb._select(
@@ -89,8 +89,8 @@ def openai_foundry(name: str) -> Foundry:
         name=name,
         api_key=name,
         models=[
-            OpenAIModel(name="gpt-4o-mini", tpm=10000, rpm=60),
-            OpenAIModel(name="gpt-4o", tpm=10000, rpm=60),
+            OpenAIDeployment(name="gpt-4o-mini", tpm=10000, rpm=60),
+            OpenAIDeployment(name="gpt-4o", tpm=10000, rpm=60),
         ],
     )
 
@@ -136,7 +136,7 @@ def mock_client(request: pytest.FixtureRequest):
 @pytest.fixture
 def model():
     """An unbound deployment, for the utilization arithmetic on its own."""
-    return OpenAIModel(name="gpt-4o-mini", tpm=1000, rpm=6)
+    return OpenAIDeployment(name="gpt-4o-mini", tpm=1000, rpm=6)
 
 
 @pytest.fixture
@@ -145,8 +145,8 @@ def foundry():
 
 
 @pytest.fixture
-def deployment(foundry: Foundry) -> OpenAIModel:
-    return cast(OpenAIModel, foundry.models["gpt-4o-mini"])
+def deployment(foundry: Foundry) -> OpenAIDeployment:
+    return cast(OpenAIDeployment, foundry.models["gpt-4o-mini"])
 
 
 @pytest.fixture
@@ -325,8 +325,8 @@ def anthropic_foundry(name: str = "foundry") -> Foundry:
         name=name,
         api_key=name,
         models=[
-            AnthropicModel(name="claude-sonnet-5", tpm=10000, rpm=60),
-            AnthropicModel(name="claude-haiku-4-5", tpm=10000, rpm=60),
+            AnthropicDeployment(name="claude-sonnet-5", tpm=10000, rpm=60),
+            AnthropicDeployment(name="claude-haiku-4-5", tpm=10000, rpm=60),
         ],
     )
 
@@ -352,8 +352,8 @@ def anthropic_resource():
 
 
 @pytest.fixture
-def anthropic_deployment(anthropic_resource: Foundry) -> AnthropicModel:
-    return cast(AnthropicModel, anthropic_resource.models["claude-sonnet-5"])
+def anthropic_deployment(anthropic_resource: Foundry) -> AnthropicDeployment:
+    return cast(AnthropicDeployment, anthropic_resource.models["claude-sonnet-5"])
 
 
 @pytest.fixture

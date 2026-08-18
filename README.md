@@ -17,26 +17,26 @@ uv add azure-switchboard
 The model mirrors Azure's own:
 
 - A **`Foundry`** is a resource: an endpoint, a credential, and the deployments it hosts.
-- An **`OpenAIModel`** or **`AnthropicModel`** is a deployment: a model instance with its own TPM/RPM allocation, speaking one API.
+- An **`OpenAIDeployment`** or **`AnthropicDeployment`** is a deployment: a model instance with its own TPM/RPM allocation, speaking one API.
 
 Because the API is a property of the deployment rather than the resource, one Foundry can serve both — reached at `sb.chat.completions` and `sb.messages` respectively, on one credential and one connection pool per API.
 
 ```python
-from azure_switchboard import AnthropicModel, Foundry, OpenAIModel, Switchboard
+from azure_switchboard import AnthropicDeployment, Foundry, OpenAIDeployment, Switchboard
 
 sb = Switchboard(foundries=[
     Foundry(
         name="east",
         api_key=...,
         models=[
-            OpenAIModel("gpt-4o-mini", tpm=30000, rpm=300),
-            AnthropicModel("claude-sonnet-5", tpm=30000, rpm=300),
+            OpenAIDeployment("gpt-4o-mini", tpm=30000, rpm=300),
+            AnthropicDeployment("claude-sonnet-5", tpm=30000, rpm=300),
         ],
     ),
     Foundry(
         name="west",
         api_key=...,
-        models=[OpenAIModel("gpt-4o-mini", tpm=30000, rpm=300)],
+        models=[OpenAIDeployment("gpt-4o-mini", tpm=30000, rpm=300)],
     ),
 ])
 
@@ -94,7 +94,7 @@ Endpoints derive from the resource name as `https://{name}.services.ai.azure.com
 import asyncio
 import os
 
-from azure_switchboard import Foundry, OpenAIModel, Switchboard
+from azure_switchboard import Foundry, OpenAIDeployment, Switchboard
 
 azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
 azure_openai_api_key = os.getenv("AZURE_OPENAI_API_KEY")
@@ -110,7 +110,7 @@ if azure_openai_endpoint and azure_openai_api_key:
                 name=name,
                 api_key=azure_openai_api_key,
                 models=[
-                    OpenAIModel(
+                    OpenAIDeployment(
                         name="gpt-4o-mini",
                         endpoint=f"{azure_openai_endpoint}/openai/v1/",
                     )
@@ -275,7 +275,7 @@ Distribution overhead scales ~linearly with the number of deployments.
 | `models`           | Deployments hosted on this resource                                               | `()`     |
 | `default_cooldown` | Cooldown (seconds) applied to the whole resource when it is unreachable           | 10.0     |
 
-### switchboard.OpenAIModel / switchboard.AnthropicModel Parameters
+### switchboard.OpenAIDeployment / switchboard.AnthropicDeployment Parameters
 
 | Parameter          | Description                                                          | Default       |
 | ------------------ | -------------------------------------------------------------------- | ------------- |
@@ -285,7 +285,7 @@ Distribution overhead scales ~linearly with the number of deployments.
 | `endpoint`         | Full base URL, overriding the one derived from the resource name     | Derived       |
 | `default_cooldown` | Cooldown duration (seconds) after this deployment is marked down     | 10.0          |
 
-`OpenAIModel` appends `openai/v1/` to the resource endpoint and is served at `sb.chat.completions`; `AnthropicModel` appends `anthropic/` and is served at `sb.messages`.
+`OpenAIDeployment` appends `openai/v1/` to the resource endpoint and is served at `sb.chat.completions`; `AnthropicDeployment` appends `anthropic/` and is served at `sb.messages`.
 
 ### switchboard.Switchboard Parameters
 
