@@ -476,10 +476,14 @@ class _ChatStream:
         return self._stream
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
-        if self._deployment and self._stream:
+        if not (self._deployment and self._stream):
+            return
+        try:
+            # accounting must not be able to leak the connection
             self._deployment.reconcile_stream(self._stream, self._offset)
             if exc is not None:
                 self._deployment._handle_error(exc, "stream")
+        finally:
             await self._stream.close()
 
 
@@ -520,10 +524,14 @@ class _MessagesStream:
         return self._stream
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
-        if self._deployment and self._stream:
+        if not (self._deployment and self._stream):
+            return
+        try:
+            # accounting must not be able to leak the connection
             self._deployment.reconcile_stream(self._stream, self._offset)
             if exc is not None:
                 self._deployment._handle_error(exc, "stream")
+        finally:
             await self._stream.close()
 
 
@@ -548,3 +556,8 @@ class _LRUDict(OrderedDict):
         super().move_to_end(key)
 
         return val
+
+    def get(self, key: str, default: Resource | None = None) -> Resource | None:  # type: ignore[override]
+        # dict.get does not route through __getitem__, so without this a read
+        # never refreshes and an active session is evicted before an idle one
+        return self[key] if key in self else default

@@ -11,6 +11,7 @@ from azure_switchboard import Foundry, OpenAIDeployment, Switchboard, Switchboar
 from azure_switchboard.anthropic_deployment import AnthropicDeployment
 from azure_switchboard.deployment import ModelDeployment
 from azure_switchboard.resource import Resource
+from azure_switchboard.switchboard import _LRUDict
 
 from .conftest import (
     COMPLETION_PARAMS,
@@ -698,6 +699,22 @@ class TestMixedPoolConstruction:
                 ],
             )
 
+    def test_a_name_is_unique_within_a_resource_across_apis_too(self):
+        """A shared name is fine across resources, but not within one.
+
+        Deployment names identify a deployment inside an Azure resource, so
+        they are unique there for the same reason they are in Azure.
+        """
+        with pytest.raises(SwitchboardError, match="duplicate model"):
+            Foundry(
+                name="r",
+                api_key="k",
+                models=[
+                    OpenAIDeployment(name="shared"),
+                    AnthropicDeployment(name="shared"),
+                ],
+            )
+
     def test_one_resource_serves_both_apis(self):
         """The case the pre-Foundry model could not express at all.
 
@@ -782,3 +799,34 @@ class TestMixedPoolConstruction:
             "https://east.services.ai.azure.com/openai/v1/"
         ]
         assert not resource._anthropic_clients
+
+
+class TestSessionLRU:
+    """Sessions evict least-recently-*used*, which means reads count."""
+
+    def test_a_read_refreshes_the_entry(self):
+        sessions = _LRUDict(max_size=2)
+        a, b, c = (Resource(n) for n in "abc")
+        sessions["a"] = a
+        sessions["b"] = b
+
+        # dict.get does not route through __getitem__ on a subclass, so this
+        # is the read that used to leave the entry stale
+        assert sessions.get("a") is a
+        sessions["c"] = c
+
+        assert "a" in sessions, "reading a session should have refreshed it"
+        assert "b" not in sessions
+
+    def test_get_returns_the_default_when_absent(self):
+        assert _LRUDict(max_size=2).get("nope") is None
+
+    def test_selection_refreshes_the_pinned_session(self):
+        sb = Switchboard(foundries=[openai_foundry("test1")], max_sessions=2)
+        sb.sessions["keep"] = sb.foundries["test1"]
+        sb.sessions["other"] = sb.foundries["test1"]
+
+        select_openai(sb, model="gpt-4o-mini", session_id="keep")
+        sb.sessions["new"] = sb.foundries["test1"]
+
+        assert "keep" in sb.sessions

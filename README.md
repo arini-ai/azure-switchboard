@@ -67,7 +67,7 @@ Endpoints derive from the resource name as `https://{name}.services.ai.azure.com
   | `anthropic.messages.parse`       | `sb.messages.parse`          | `ParsedMessage[T]`          |
   | `anthropic.messages.stream`      | `sb.messages.stream`         | `AsyncMessageStream`        |
 
-- **Multi-Provider**: OpenAI and Anthropic deployments coexist on one resource and in one Switchboard. Each API gets its own pool, so the calling surface resolves a model name — the same name may exist on both.
+- **Multi-Provider**: OpenAI and Anthropic deployments coexist on one resource and in one Switchboard. Each API gets its own pool, so the calling surface resolves a model name — one pool may hold a name the other also holds. Within a single resource, deployment names are unique, as they are in Azure.
 - **Coordination-Free**: The default Two Random Choices algorithm does not require coordination between client instances to achieve excellent load distribution characteristics.
 - **Utilization-Aware**: TPM/RPM utilization is tracked per deployment for use during selection.
 - **Batteries Included**:
