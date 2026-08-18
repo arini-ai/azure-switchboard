@@ -3,8 +3,15 @@ from __future__ import annotations
 import time
 from typing import Any, Iterable
 
+from .anthropic_model import AnthropicModel
 from .exceptions import SwitchboardError
-from .model import ModelBase, UtilStats
+from .model import UtilStats
+from .openai_model import OpenAIModel
+
+# Every deployment speaks one of the APIs switchboard serves. ModelBase carries
+# the quota and cooldown machinery they share and bounds the generic selection
+# code, but nothing is ever only a ModelBase, so a resource says so.
+Deployment = OpenAIModel | AnthropicModel
 
 
 class Foundry:
@@ -24,7 +31,7 @@ class Foundry:
         *,
         api_key: str | None = None,
         timeout: float = 30.0,
-        models: Iterable[ModelBase] = (),
+        models: Iterable[Deployment] = (),
         default_cooldown: float = 10.0,
     ) -> None:
         self.name = name
@@ -38,22 +45,22 @@ class Foundry:
         # sibling's.
         self._clients: dict[tuple[str, str | None], Any] = {}
 
-        self.models: dict[str, ModelBase] = {}
+        self.models: dict[str, Deployment] = {}
         for model in models:
             self.add(model)
 
-    def add(self, model: ModelBase) -> None:
+    def add(self, model: Deployment) -> None:
         if model.name in self.models:
             raise SwitchboardError(f"{self.name}: duplicate model {model.name}")
         model.bind(self)
         self.models[model.name] = model
 
-    def base_url(self, model: ModelBase) -> str | None:
+    def base_url(self, model: Deployment) -> str | None:
         return (
             model.endpoint or f"https://{self.name}.services.ai.azure.com/{model.path}"
         )
 
-    def client_for(self, model: ModelBase) -> Any:
+    def client_for(self, model: Deployment) -> Any:
         url = self.base_url(model)
         key = (type(model).api, url)
         if key not in self._clients:
@@ -96,9 +103,9 @@ class FirstParty(Foundry):
     """
 
     def __init__(
-        self, api: str, *, timeout: float = 30.0, models: Iterable[ModelBase] = ()
+        self, api: str, *, timeout: float = 30.0, models: Iterable[Deployment] = ()
     ):
         super().__init__(name=f"first-party-{api}", timeout=timeout, models=models)
 
-    def base_url(self, model: ModelBase) -> str | None:
+    def base_url(self, model: Deployment) -> str | None:
         return model.endpoint
