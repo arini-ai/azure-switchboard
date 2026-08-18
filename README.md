@@ -1,6 +1,6 @@
 # Azure Switchboard
 
-Batteries-included, coordination-free client loadbalancing for Azure OpenAI and OpenAI.
+Batteries-included, coordination-free client loadbalancing for Azure AI Foundry — OpenAI and Anthropic models alike.
 
 ```bash
 uv add azure-switchboard
@@ -52,7 +52,7 @@ async with sb:
     )
 ```
 
-Endpoints derive from the resource name as `https://{name}.services.ai.azure.com/`, onto which each deployment appends its API path. Pass `endpoint=` on a deployment to override it — for a legacy `<resource>.openai.azure.com` host, or a non-Azure one.
+Endpoints derive from the resource name as `https://{name}.services.ai.azure.com`, onto which each deployment appends its API path — `/openai/v1/` or `/anthropic/`. Pass `endpoint=` on a deployment to override the whole URL: for a legacy `<resource>.openai.azure.com` host, or a non-Azure one.
 
 ## Features
 
@@ -75,6 +75,63 @@ Endpoints derive from the resource name as `https://{name}.services.ai.azure.com
   - **Pluggable Selection**: Custom selection algorithms can be provided by passing a callable to the `selector` parameter on the Switchboard constructor.
   - **OpenTelemetry Integration**: Built-in metrics for request routing and healthy deployment counts.
 - **Lightweight**: Small codebase with minimal dependencies: `openai`, `anthropic`, `loguru`, `tenacity`, `wrapt`, and `opentelemetry-api`.
+
+## Migrating from 2026.8.0
+
+The configuration API was replaced wholesale. Previously a "deployment" owned the
+endpoint and credential and listed models inside it, and the API spec was fixed by
+which config class you chose — so one Azure resource serving both a GPT and a Claude
+model had to be registered twice, splitting its quota accounting in two.
+
+```python
+# before
+Switchboard(deployments=[
+    OpenAIConfig(
+        name="east",
+        base_url="https://east.openai.azure.com/openai/v1/",
+        api_key=...,
+        models=[Model(name="gpt-4o-mini", tpm=30000, rpm=300)],
+    ),
+    AnthropicConfig(
+        name="east-anthropic",          # the same resource, registered again
+        resource="east",
+        api_key=...,
+        models=[Model(name="claude-sonnet-5", tpm=30000, rpm=300)],
+    ),
+])
+
+# after
+Switchboard(foundries=[
+    Foundry(name="east", api_key=..., models=[
+        OpenAIDeployment("gpt-4o-mini", tpm=30000, rpm=300),
+        AnthropicDeployment("claude-sonnet-5", tpm=30000, rpm=300),
+    ]),
+])
+```
+
+| 2026.8.0                                      | Now                                                                    |
+| --------------------------------------------- | ---------------------------------------------------------------------- |
+| `OpenAIConfig(...)` / `AnthropicConfig(...)`  | `Foundry(...)`                                                         |
+| `Model("gpt-4o-mini", ...)`                   | `OpenAIDeployment(...)` or `AnthropicDeployment(...)`                  |
+| `Switchboard(deployments=[...])`              | `Switchboard(foundries=[...])`                                         |
+| `base_url="https://east...openai/v1/"`        | derived from `Foundry(name=...)`; `endpoint=` per deployment overrides |
+| `AnthropicConfig(resource="east")`            | `Foundry(name="east")`                                                 |
+| `OpenAIConfig(base_url=None)` for first-party | `Switchboard(openai_fallback=True)`                                    |
+| `sb.select_deployment(model=...)`             | removed — read `sb.sessions[session_id]` for the pinned resource       |
+| `selector(model, deployments)`                | `selector(deployments)`                                                |
+
+Three behavioural changes come with it:
+
+- **An exhausted pool raises.** Previously the last resort was a deployment already
+  cooling down; now it is `SwitchboardError` unless a first-party fallback is
+  configured.
+- **Connection errors cool the whole resource**, not just the deployment that saw
+  one — see [Cooldown Scope](#cooldown-scope). Rate limits still cool one deployment.
+- **Session affinity pins to the resource**, so a session using several models keeps
+  one prompt cache warm.
+
+Telemetry follows the rename: the log context key and the `requests` counter
+attribute are `resource`, previously `deployment`.
 
 ## Runnable Example
 
@@ -285,7 +342,7 @@ Distribution overhead scales ~linearly with the number of deployments.
 | `endpoint`         | Full base URL, overriding the one derived from the resource name     | Derived       |
 | `default_cooldown` | Cooldown duration (seconds) after this deployment is marked down     | 10.0          |
 
-`OpenAIDeployment` appends `openai/v1/` to the resource endpoint and is served at `sb.chat.completions`; `AnthropicDeployment` appends `anthropic/` and is served at `sb.messages`.
+`OpenAIDeployment` appends `/openai/v1/` to the resource endpoint and is served at `sb.chat.completions`; `AnthropicDeployment` appends `/anthropic/` and is served at `sb.messages`.
 
 ### switchboard.Switchboard Parameters
 
@@ -343,8 +400,14 @@ just install
 ### Running tests
 
 ```bash
-just test
+just test        # unit tests; every upstream is mocked
+just typecheck   # pyright over src/, as CI runs it
 ```
+
+`just smoke` drives real inference against a live Foundry resource, to check the
+wiring the mocks cannot. It needs `AZURE_FOUNDRY` and `AZURE_API_KEY`, and picks up
+`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` to exercise first-party fallback. The
+committed `.envrc` sources `.envrc.local`, which is gitignored — put your keys there.
 
 ### Release
 
