@@ -54,7 +54,7 @@ async with sb:
 ## Features
 
 - **API Compatibility**: `Switchboard.create` is a transparently-typed proxy for `OpenAI.chat.completions.create`, and `Switchboard.messages` for `Anthropic.messages.create`.
-- **Multi-Provider**: OpenAI and Anthropic deployments coexist in one pool. Selection is scoped by wire protocol, so a model name registered against one provider is never routed to the other.
+- **Multi-Provider**: OpenAI and Anthropic deployments coexist in one pool. Routing is keyed on model name, so a name registered against both providers is rejected at construction rather than resolving ambiguously.
 - **Coordination-Free**: The default Two Random Choices algorithm does not require coordination between client instances to achieve excellent load distribution characteristics.
 - **Utilization-Aware**: TPM/RPM utilization is tracked per model per deployment for use during selection.
 - **Batteries Included**:

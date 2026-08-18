@@ -5,6 +5,8 @@ from unittest.mock import patch
 import pytest
 
 from azure_switchboard import Model, OpenAIConfig, Switchboard, SwitchboardError
+from azure_switchboard.anthropic_api import AnthropicDeployment
+from azure_switchboard.openai_api import OpenAIDeployment
 
 from .conftest import (
     COMPLETION_PARAMS,
@@ -32,24 +34,18 @@ async def mixed():
 
 class TestSelection:
     def test_builds_the_right_runtime_per_config(self, mixed: Switchboard):
-        assert mixed.deployments["oai1"].api == "chat"
-        assert mixed.deployments["ant1"].api == "messages"
+        assert isinstance(mixed.deployments["oai1"], OpenAIDeployment)
+        assert isinstance(mixed.deployments["ant1"], AnthropicDeployment)
 
-    def test_api_filter_scopes_selection(self, mixed: Switchboard):
+    def test_model_name_routes_to_its_provider(self, mixed: Switchboard):
+        """Model names are unique to a provider, so the name alone routes."""
         for _ in range(20):
-            assert mixed.select_deployment(model="gpt-4o-mini").api == "chat"
-            assert (
-                mixed.select_deployment(model="claude-sonnet-5", api="messages").api
-                == "messages"
+            assert isinstance(
+                mixed.select_deployment(model="gpt-4o-mini"), OpenAIDeployment
             )
-
-    def test_wrong_api_for_model_is_rejected(self, mixed: Switchboard):
-        """A chat model must not be reachable over the messages API, and
-        vice versa, even though both live in the same pool."""
-        with pytest.raises(SwitchboardError, match="No deployments available"):
-            mixed.select_deployment(model="gpt-4o-mini", api="messages")
-        with pytest.raises(SwitchboardError, match="No deployments available"):
-            mixed.select_deployment(model="claude-sonnet-5", api="chat")
+            assert isinstance(
+                mixed.select_deployment(model="claude-sonnet-5"), AnthropicDeployment
+            )
 
     def test_stats_span_both_providers(self, mixed: Switchboard):
         stats = mixed.stats()
@@ -73,15 +69,12 @@ class TestSessionAffinity:
             )
 
     def test_shared_session_id_does_not_cross_providers(self, mixed: Switchboard):
-        """Reusing a session_id across APIs must not hand back a deployment
-        that doesn't speak the requested protocol."""
+        """A cached session deployment is only reused when it serves the
+        requested model, so one session_id spanning both APIs is safe."""
         chat = mixed.select_deployment(model="gpt-4o-mini", session_id="shared")
-        msgs = mixed.select_deployment(
-            model="claude-sonnet-5", api="messages", session_id="shared"
-        )
-        assert chat.api == "chat"
-        assert msgs.api == "messages"
-        assert chat is not msgs
+        msgs = mixed.select_deployment(model="claude-sonnet-5", session_id="shared")
+        assert isinstance(chat, OpenAIDeployment)
+        assert isinstance(msgs, AnthropicDeployment)
 
 
 class TestDispatch:
@@ -151,6 +144,29 @@ class TestDispatch:
 
 
 class TestConstruction:
+    def test_model_registered_on_both_providers_rejected(self):
+        """Routing is by model name alone, so a name shared across providers
+        would make the serving surface ambiguous. Reject it up front."""
+        with pytest.raises(SwitchboardError, match="must belong to exactly one"):
+            Switchboard(
+                deployments=[
+                    OpenAIConfig(
+                        name="compat",
+                        base_url="https://r.services.ai.azure.com/openai/v1/",
+                        api_key="k",
+                        models=[Model(name="claude-sonnet-5")],
+                    ),
+                    anthropic_config("native"),
+                ]
+            )
+
+    def test_same_model_on_many_deployments_of_one_provider_is_fine(self):
+        """Sharing a model across deployments is the whole point of the pool."""
+        sb = Switchboard(
+            deployments=[azure_config("a"), azure_config("b"), azure_config("c")]
+        )
+        assert len(sb.deployments) == 3
+
     def test_duplicate_names_across_providers_rejected(self):
         with pytest.raises(SwitchboardError, match="Duplicate deployment name"):
             Switchboard(

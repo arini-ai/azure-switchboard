@@ -71,7 +71,7 @@
 ## Key Features
 
 - API-compatible drop-in replacement for OpenAI's ChatCompletion API and Anthropic's Messages API
-- OpenAI and Anthropic deployments coexist in one pool, with selection scoped by wire protocol
+- OpenAI and Anthropic deployments coexist in one pool, routed by model name (cross-provider name collisions rejected at construction)
 - Coordination-free load balancing with "power of two random choices" algorithm
 - TPM/RPM rate limit tracking per model/deployment
 - Session affinity for efficient prompt caching

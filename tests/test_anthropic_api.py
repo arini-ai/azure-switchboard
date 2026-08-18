@@ -48,7 +48,6 @@ class TestAnthropicConfig:
 
 class TestAnthropicDeployment:
     async def test_init(self, anthropic_deployment: AnthropicDeployment):
-        assert anthropic_deployment.api == "messages"
         assert anthropic_deployment.client is not None
         assert anthropic_deployment.model("claude-sonnet-5") is not None
 

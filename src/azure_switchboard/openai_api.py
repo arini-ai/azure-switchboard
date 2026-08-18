@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import ClassVar, Literal, TypeVar, cast, overload
+from typing import Literal, TypeVar, cast, overload
 
 import wrapt
 from loguru import logger
@@ -21,7 +21,7 @@ from openai.types.chat import (
 from openai.types.completion_usage import CompletionUsage
 from pydantic import BaseModel
 
-from .deployment import Api, DeploymentBase
+from .deployment import DeploymentBase
 from .model import Model
 
 _T = TypeVar("_T", bound=BaseModel)
@@ -48,8 +48,6 @@ class OpenAIConfig:
 
 class OpenAIDeployment(DeploymentBase):
     """Runtime state of a deployment speaking the Chat Completions API"""
-
-    api: ClassVar[Api] = "chat"
 
     def __init__(self, config: OpenAIConfig) -> None:
         super().__init__(config.name, config.models)

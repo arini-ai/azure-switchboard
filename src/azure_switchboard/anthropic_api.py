@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Literal, TypeVar, cast, overload
+from typing import Any, Literal, TypeVar, cast, overload
 
 import wrapt
 from anthropic import (
@@ -12,12 +12,12 @@ from anthropic import (
     AsyncStream,
     RateLimitError,
 )
-from anthropic.types import Message, RawMessageStreamEvent
+from anthropic.types import Message, ParsedMessage, RawMessageStreamEvent
 from anthropic.types.message import Usage
 from loguru import logger
 from pydantic import BaseModel
 
-from .deployment import Api, DeploymentBase
+from .deployment import DeploymentBase
 from .exceptions import SwitchboardError
 from .model import Model
 
@@ -56,8 +56,6 @@ class AnthropicConfig:
 
 class AnthropicDeployment(DeploymentBase):
     """Runtime state of a deployment speaking the Anthropic Messages API"""
-
-    api: ClassVar[Api] = "messages"
 
     def __init__(self, config: AnthropicConfig) -> None:
         super().__init__(config.name, config.models)
@@ -135,7 +133,7 @@ class AnthropicDeployment(DeploymentBase):
         model: str,
         output_format: type[_T],
         **kwargs,
-    ) -> Any:
+    ) -> ParsedMessage[_T]:
         """
         Send a structured output request to this client.
         Tracks usage metrics for load balancing.

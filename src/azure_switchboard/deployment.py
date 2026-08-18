@@ -1,13 +1,9 @@
 from __future__ import annotations
 
-from typing import ClassVar, Literal
-
 from opentelemetry import trace
 
 from .exceptions import SwitchboardError
 from .model import Model, UtilStats
-
-Api = Literal["chat", "messages"]
 
 
 class DeploymentBase:
@@ -17,10 +13,6 @@ class DeploymentBase:
     here is protocol-independent: subclasses add the calls that actually speak
     to an upstream API.
     """
-
-    # Which wire protocol this deployment speaks. Selection filters on it so a
-    # model name registered against one provider can never be routed to the other.
-    api: ClassVar[Api]
 
     def __init__(self, name: str, models: list[Model]) -> None:
         self._name = name

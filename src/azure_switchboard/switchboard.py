@@ -13,6 +13,8 @@ from typing import (
     overload,
 )
 
+from anthropic import AsyncStream as AsyncAnthropicStream
+from anthropic.types import Message, ParsedMessage, RawMessageStreamEvent
 from loguru import logger
 from openai import AsyncStream
 from openai.types.chat import ChatCompletion, ChatCompletionChunk, ParsedChatCompletion
@@ -27,11 +29,12 @@ from tenacity import (
 from azure_switchboard.model import UtilStats
 
 from .openai_api import OpenAIConfig, OpenAIDeployment
-from .deployment import Api, DeploymentBase
+from .deployment import DeploymentBase
 from .exceptions import SwitchboardError
 from .anthropic_api import AnthropicConfig, AnthropicDeployment
 
 _T = TypeVar("_T", bound=BaseModel)
+_R = TypeVar("_R")
 
 DeploymentSpec = OpenAIConfig | AnthropicConfig
 
@@ -96,10 +99,25 @@ class Switchboard:
             raise SwitchboardError("No deployments provided")
 
         self.deployments: dict[str, DeploymentBase] = {}
-        for deployment in deployments:
-            if deployment.name in self.deployments:
-                raise SwitchboardError(f"Duplicate deployment name: {deployment.name}")
-            self.deployments[deployment.name] = _build_deployment(deployment)
+        # Routing is keyed on model name alone, so a name must belong to
+        # exactly one provider. Registering it on both would make the surface
+        # that serves it ambiguous, so reject it here rather than at call time.
+        owners: dict[str, tuple[str, str]] = {}
+        for config in deployments:
+            if config.name in self.deployments:
+                raise SwitchboardError(f"Duplicate deployment name: {config.name}")
+
+            provider = "anthropic" if isinstance(config, AnthropicConfig) else "openai"
+            for model in config.models:
+                owner = owners.setdefault(model.name, (provider, config.name))
+                if owner[0] != provider:
+                    raise SwitchboardError(
+                        f"{model.name} is registered on both {owner[0]} "
+                        f"({owner[1]}) and {provider} ({config.name}) deployments; "
+                        "a model name must belong to exactly one provider"
+                    )
+
+            self.deployments[config.name] = _build_deployment(config)
 
         self.selector = selector
         self.failover_policy = failover_policy
@@ -147,20 +165,16 @@ class Switchboard:
         }
 
     def select_deployment(
-        self, *, model: str, api: Api = "chat", session_id: str | None = None
+        self, *, model: str, session_id: str | None = None
     ) -> DeploymentBase:
         """
         Select a deployment using the power of two random choices algorithm.
         If session_id is provided, try to use that specific deployment first.
-
-        Only deployments speaking `api` are eligible, so a model name
-        registered against one provider is never routed to the other.
         """
         # Handle session-based routing first
         if session_id and session_id in self.sessions:
             deployment = self.sessions[session_id]
-            # A session may be shared across APIs; only reuse a matching one.
-            if deployment.api == api and deployment.is_healthy(model):
+            if deployment.is_healthy(model):
                 return deployment
 
             m = deployment.models.get(model)
@@ -168,10 +182,10 @@ class Switchboard:
                 f"{model} is unhealthy on {deployment.name}, falling back to selection"
             )
 
-        candidates = [d for d in self.deployments.values() if d.api == api]
-
         # Get eligible deployments for the requested model
-        eligible_deployments = [d for d in candidates if d.is_healthy(model)]
+        eligible_deployments = [
+            d for d in self.deployments.values() if d.is_healthy(model)
+        ]
 
         if not eligible_deployments:
             # No healthy deployments — fall back to any deployment that supports
@@ -179,7 +193,9 @@ class Switchboard:
             # This prevents cascade failures when a single deployment has a
             # transient error: without fallback, the 10s cooldown would reject
             # every request, turning one failure into dozens.
-            fallback_deployments = [d for d in candidates if model in d.models]
+            fallback_deployments = [
+                d for d in self.deployments.values() if model in d.models
+            ]
             if not fallback_deployments:
                 raise SwitchboardError(f"No deployments available for {model}")
             logger.warning(
@@ -206,10 +222,9 @@ class Switchboard:
         self,
         *,
         model: str,
-        api: Api,
         session_id: str | None,
-        call: Callable[[Any], Awaitable[Any]],
-    ) -> Any:
+        call: Callable[[Any], Awaitable[_R]],
+    ) -> _R:  # pyright: ignore[reportReturnType]
         """Select a deployment and issue `call` against it, with failover.
 
         The failover policy is copied per call so concurrent requests don't
@@ -219,14 +234,13 @@ class Switchboard:
             async for attempt in self.failover_policy.copy():
                 with attempt:
                     deployment = self.select_deployment(
-                        model=model, api=api, session_id=session_id
+                        model=model, session_id=session_id
                     )
                     with logger.contextualize(deployment=deployment.name):
                         logger.trace("Sending request")
                         response = await call(deployment)
                     request_counter.add(
-                        1,
-                        {"model": model, "deployment": deployment.name, "api": api},
+                        1, {"model": model, "deployment": deployment.name}
                     )
                     return response
 
@@ -253,7 +267,6 @@ class Switchboard:
         """
         return await self._dispatch(
             model=model,
-            api="chat",
             session_id=session_id,
             call=lambda d: d.create(model=model, stream=stream, **kwargs),
         )
@@ -271,12 +284,19 @@ class Switchboard:
         """
         return await self._dispatch(
             model=model,
-            api="chat",
             session_id=session_id,
             call=lambda d: d.parse(
                 model=model, response_format=response_format, **kwargs
             ),
         )
+
+    @overload
+    async def messages(
+        self, *, session_id: str | None = None, stream: Literal[True], **kwargs
+    ) -> AsyncAnthropicStream[RawMessageStreamEvent]: ...
+
+    @overload
+    async def messages(self, *, session_id: str | None = None, **kwargs) -> Message: ...
 
     async def messages(
         self,
@@ -285,7 +305,7 @@ class Switchboard:
         session_id: str | None = None,
         stream: bool = False,
         **kwargs,
-    ) -> Any:
+    ) -> Message | AsyncAnthropicStream[RawMessageStreamEvent]:
         """
         Send a Messages API request to the selected deployment, with automatic failover.
 
@@ -294,7 +314,6 @@ class Switchboard:
         """
         return await self._dispatch(
             model=model,
-            api="messages",
             session_id=session_id,
             call=lambda d: d.messages(model=model, stream=stream, **kwargs),
         )
@@ -306,14 +325,13 @@ class Switchboard:
         output_format: type[_T],
         session_id: str | None = None,
         **kwargs,
-    ) -> Any:
+    ) -> ParsedMessage[_T]:
         """
         Send a Messages API structured output request to the selected
         deployment, with automatic failover.
         """
         return await self._dispatch(
             model=model,
-            api="messages",
             session_id=session_id,
             call=lambda d: d.parse(model=model, output_format=output_format, **kwargs),
         )
