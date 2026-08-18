@@ -528,14 +528,15 @@ class TestMixedPoolSelection:
     """A single Switchboard holding both OpenAI and Anthropic deployments."""
 
     def test_pools_by_api_not_by_foundry(self, mixed: Switchboard):
-        assert set(mixed._openai_pool) == {"gpt-4o-mini", "gpt-4o"}
-        assert set(mixed._anthropic_pool) == {"claude-sonnet-5", "claude-haiku-4-5"}
+        assert set(mixed.chat.completions._pool) == {"gpt-4o-mini", "gpt-4o"}
+        assert set(mixed.messages._pool) == {"claude-sonnet-5", "claude-haiku-4-5"}
         assert all(
-            isinstance(d, OpenAIModel) for d in mixed._openai_pool["gpt-4o-mini"]
+            isinstance(d, OpenAIModel)
+            for d in mixed.chat.completions._pool["gpt-4o-mini"]
         )
         assert all(
             isinstance(d, AnthropicModel)
-            for d in mixed._anthropic_pool["claude-sonnet-5"]
+            for d in mixed.messages._pool["claude-sonnet-5"]
         )
 
     def test_model_name_routes_to_its_provider(self, mixed: Switchboard):
@@ -658,8 +659,8 @@ class TestMixedPoolConstruction:
             ]
         )
 
-        assert sb._openai_pool["claude-sonnet-5"][0].foundry.name == "compat"
-        assert sb._anthropic_pool["claude-sonnet-5"][0].foundry.name == "native"
+        assert sb.chat.completions._pool["claude-sonnet-5"][0].foundry.name == "compat"
+        assert sb.messages._pool["claude-sonnet-5"][0].foundry.name == "native"
 
     def test_same_model_on_many_foundries_is_fine(self):
         """Sharing a model across resources is the whole point of the pool."""
@@ -667,7 +668,7 @@ class TestMixedPoolConstruction:
             foundries=[openai_foundry("a"), openai_foundry("b"), openai_foundry("c")]
         )
         assert len(sb.foundries) == 3
-        assert len(sb._openai_pool["gpt-4o-mini"]) == 3
+        assert len(sb.chat.completions._pool["gpt-4o-mini"]) == 3
 
     def test_duplicate_foundry_names_rejected(self):
         with pytest.raises(SwitchboardError, match="Duplicate foundry name"):
@@ -704,8 +705,8 @@ class TestMixedPoolConstruction:
         )
         sb = Switchboard(foundries=[resource])
 
-        assert sb._openai_pool["gpt-4o-mini"][0].foundry is resource
-        assert sb._anthropic_pool["claude-sonnet-5"][0].foundry is resource
+        assert sb.chat.completions._pool["gpt-4o-mini"][0].foundry is resource
+        assert sb.messages._pool["claude-sonnet-5"][0].foundry is resource
         assert (
             resource.base_url(resource.models["gpt-4o-mini"])
             == "https://east.services.ai.azure.com/openai/v1/"

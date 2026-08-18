@@ -102,35 +102,22 @@ class Switchboard:
             raise SwitchboardError("No foundries provided")
 
         self.foundries: dict[str, Foundry] = {}
-        # Deployments are pooled by the API they speak, so the calling surface
-        # picks the pool and a model name never has to be disambiguated.
-        self._openai_pool: dict[str, list[OpenAIModel]] = {}
-        self._anthropic_pool: dict[str, list[AnthropicModel]] = {}
-
         for foundry in foundries:
             if foundry.name in self.foundries:
                 raise SwitchboardError(f"Duplicate foundry name: {foundry.name}")
             self.foundries[foundry.name] = foundry
 
+            # Each surface partitions these into its own pool; reject anything
+            # neither would claim here, rather than on first use.
             for model in foundry.models.values():
-                if isinstance(model, OpenAIModel):
-                    self._openai_pool.setdefault(model.name, []).append(model)
-                elif isinstance(model, AnthropicModel):
-                    self._anthropic_pool.setdefault(model.name, []).append(model)
-                else:
+                if not isinstance(model, (OpenAIModel, AnthropicModel)):
                     raise SwitchboardError(
                         f"{foundry.name}: {model.name} is not an OpenAIModel "
                         "or AnthropicModel"
                     )
 
-        # The vendors' own APIs are not part of a pool: they are what selection
-        # reaches for once a pool has nothing healthy left.
-        self._openai_first_party = FirstParty("openai") if openai_fallback else None
-        self._anthropic_first_party = (
-            FirstParty("anthropic") if anthropic_fallback else None
-        )
-        self._openai_fallbacks: dict[str, OpenAIModel] = {}
-        self._anthropic_fallbacks: dict[str, AnthropicModel] = {}
+        self._openai_fallback_enabled = openai_fallback
+        self._anthropic_fallback_enabled = anthropic_fallback
 
         self.selector = selector
         self.failover_policy = failover_policy
@@ -175,7 +162,12 @@ class Switchboard:
                 pass
 
     def _all_foundries(self) -> list[Foundry]:
-        first_party = [self._openai_first_party, self._anthropic_first_party]
+        # each surface owns its first-party resource, so usage against a
+        # fallback shows up in stats and resets on the same schedule
+        first_party = [
+            self.chat.completions._first_party,
+            self.messages._first_party,
+        ]
         return list(self.foundries.values()) + [f for f in first_party if f]
 
     def reset_usage(self) -> None:
@@ -228,24 +220,6 @@ class Switchboard:
 
         return selected
 
-    def _openai_fallback(self, model: str) -> OpenAIModel | None:
-        if self._openai_first_party is None:
-            return None
-        if model not in self._openai_fallbacks:
-            deployment = OpenAIModel(model)
-            self._openai_first_party.add(deployment)
-            self._openai_fallbacks[model] = deployment
-        return self._openai_fallbacks[model]
-
-    def _anthropic_fallback(self, model: str) -> AnthropicModel | None:
-        if self._anthropic_first_party is None:
-            return None
-        if model not in self._anthropic_fallbacks:
-            deployment = AnthropicModel(model)
-            self._anthropic_first_party.add(deployment)
-            self._anthropic_fallbacks[model] = deployment
-        return self._anthropic_fallbacks[model]
-
     async def _dispatch(
         self,
         pool: dict[str, list[_M]],
@@ -278,8 +252,38 @@ class Switchboard:
 
 class _Chat:
     class Completions:
+        """Everything specific to Chat Completions: the deployments that speak
+        it, and the fallback for when none of them is usable."""
+
         def __init__(self, sb: Switchboard) -> None:
             self.sb = sb
+
+            self._pool: dict[str, list[OpenAIModel]] = {}
+            for foundry in sb.foundries.values():
+                for model in foundry.models.values():
+                    if isinstance(model, OpenAIModel):
+                        self._pool.setdefault(model.name, []).append(model)
+
+            # Not part of the pool: it is what selection reaches for once the
+            # pool has nothing healthy left.
+            self._first_party = (
+                FirstParty("openai") if sb._openai_fallback_enabled else None
+            )
+            self._fallbacks: dict[str, OpenAIModel] = {}
+
+        def _fallback(self, model: str) -> OpenAIModel | None:
+            """The first-party deployment of a model, created on first need.
+
+            Any model name resolves, including one on no foundry at all — the
+            vendor's API is the authority on whether it exists.
+            """
+            if self._first_party is None:
+                return None
+            if model not in self._fallbacks:
+                deployment = OpenAIModel(model)
+                self._first_party.add(deployment)
+                self._fallbacks[model] = deployment
+            return self._fallbacks[model]
 
         @overload
         async def create(
@@ -300,10 +304,10 @@ class _Chat:
             **kwargs,
         ) -> ChatCompletion | AsyncStream[ChatCompletionChunk]:
             return await self.sb._dispatch(
-                self.sb._openai_pool,
+                self._pool,
                 model=model,
                 session_id=session_id,
-                fallback=lambda: self.sb._openai_fallback(model),
+                fallback=lambda: self._fallback(model),
                 call=lambda d: d.create(stream=stream, **kwargs),
             )
 
@@ -316,10 +320,10 @@ class _Chat:
             **kwargs,
         ) -> ParsedChatCompletion[_T]:
             return await self.sb._dispatch(
-                self.sb._openai_pool,
+                self._pool,
                 model=model,
                 session_id=session_id,
-                fallback=lambda: self.sb._openai_fallback(model),
+                fallback=lambda: self._fallback(model),
                 call=lambda d: d.parse(response_format=response_format, **kwargs),
             )
 
@@ -328,8 +332,31 @@ class _Chat:
 
 
 class _Messages:
+    """Everything specific to the Messages API: the deployments that speak it,
+    and the fallback for when none of them is usable."""
+
     def __init__(self, sb: Switchboard) -> None:
         self.sb = sb
+
+        self._pool: dict[str, list[AnthropicModel]] = {}
+        for foundry in sb.foundries.values():
+            for model in foundry.models.values():
+                if isinstance(model, AnthropicModel):
+                    self._pool.setdefault(model.name, []).append(model)
+
+        self._first_party = (
+            FirstParty("anthropic") if sb._anthropic_fallback_enabled else None
+        )
+        self._fallbacks: dict[str, AnthropicModel] = {}
+
+    def _fallback(self, model: str) -> AnthropicModel | None:
+        if self._first_party is None:
+            return None
+        if model not in self._fallbacks:
+            deployment = AnthropicModel(model)
+            self._first_party.add(deployment)
+            self._fallbacks[model] = deployment
+        return self._fallbacks[model]
 
     @overload
     async def create(
@@ -354,10 +381,10 @@ class _Messages:
         unchanged; switchboard does not supply a default.
         """
         return await self.sb._dispatch(
-            self.sb._anthropic_pool,
+            self._pool,
             model=model,
             session_id=session_id,
-            fallback=lambda: self.sb._anthropic_fallback(model),
+            fallback=lambda: self._fallback(model),
             call=lambda d: d.create(stream=stream, **kwargs),
         )
 
@@ -370,10 +397,10 @@ class _Messages:
         **kwargs,
     ) -> ParsedMessage[_T]:
         return await self.sb._dispatch(
-            self.sb._anthropic_pool,
+            self._pool,
             model=model,
             session_id=session_id,
-            fallback=lambda: self.sb._anthropic_fallback(model),
+            fallback=lambda: self._fallback(model),
             call=lambda d: d.parse(output_format=output_format, **kwargs),
         )
 

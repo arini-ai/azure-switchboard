@@ -48,11 +48,12 @@ def select_openai(
     their SDKs, and neither SDK has one. Tests reach for the internals rather
     than the package carrying a method for their benefit.
     """
+    surface = sb.chat.completions
     return sb._select(
-        sb._openai_pool,
+        surface._pool,
         model=model,
         session_id=session_id,
-        fallback=lambda: sb._openai_fallback(model),
+        fallback=lambda: surface._fallback(model),
     )
 
 
@@ -60,11 +61,12 @@ def select_anthropic(
     sb: Switchboard, *, model: str, session_id: str | None = None
 ) -> AnthropicModel:
     """Resolve a model the way a messages request would."""
+    surface = sb.messages
     return sb._select(
-        sb._anthropic_pool,
+        surface._pool,
         model=model,
         session_id=session_id,
-        fallback=lambda: sb._anthropic_fallback(model),
+        fallback=lambda: surface._fallback(model),
     )
 
 
