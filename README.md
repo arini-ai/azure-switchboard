@@ -12,7 +12,7 @@ uv add azure-switchboard
 
 ## Overview
 
-`azure-switchboard` is a Python 3 asyncio library that spreads Chat Completions and Anthropic Messages traffic across the deployments you already have, with no coordination between client instances. You ask for a model; it picks a healthy deployment of that model using [power of two random choices](https://www.eecs.harvard.edu/~michaelm/postscripts/handbook2001.pdf), tracks what each one is carrying, and routes around the ones that start refusing.
+`azure-switchboard` is a Python 3 library that implements a client-only, coordination-free loadbalancer for OpenAI/Anthropic models hosted on Azure Foundry. It can be used as a drop-in replacement for the openai or anthropic SDKs and lets you spread inference traffic across model deployments in multiple Azure Foundry resources. Coordination-freedom is achieved via the [power of two random choices](https://www.eecs.harvard.edu/~michaelm/postscripts/handbook2001.pdf) algorithm. See below for performance benchmarks.
 
 List the Azure resources you have and the models deployed on them:
 
@@ -47,12 +47,12 @@ async with sb:
     )
 ```
 
-You get the endpoint for free from the resource name, and a resource can host models of both kinds on one credential — so the thing you configure matches the thing you pay for.
+The endpoint is inferrable from the Foundry resource name or can be overriden explicitly on a per-deployment basis. Usage, ratelimiting, and cooldown status is tracked per-deployment (tpm/rpm) and per-resource (network-level errors) and overloaded models or resources can be configured to fall back to first-party providers if the appropriate API keys are available in the environment.
 
 ## Features
 
-- **Multi-Provider**: supports both the OpenAI Chat Completions API and the Anthropic Messages API.
-- **Coordination-Free**: The default Two Random Choices algorithm does not require coordination between client instances to achieve excellent load distribution characteristics.
+- **Multi-Provider**: supports both the OpenAI Chat Completions API and the Anthropic Messages API. Non-OpenAI models that support the OpenAI API spec can be used via the OpenAIDeployment class.
+- **Coordination-Free**: The default Two Random Choices algorithm does not require coordination between client instances to achieve excellent load distribution characteristics. See benchmarks for additional details.
 - **Utilization-Aware**: TPM/RPM utilization is tracked per deployment for use during selection.
 - **Batteries Included**:
   - **Session Affinity**: Provide a `session_id` to route requests in the same session to the same resource, so a session spanning several models keeps one prompt cache warm.
@@ -104,15 +104,12 @@ Requests per second: 4122.20
 Overhead per request: 0.24ms
 ```
 
-Every deployment lands within half a percent of the mean, and distributing a
-request costs about a quarter of a millisecond. Overhead scales ~linearly with
-the number of deployments.
+Distribution overhead scales ~linearly with the number of deployments.
 
 ## Development
 
 This project uses [uv](https://github.com/astral-sh/uv) for package management,
-and [just](https://github.com/casey/just) for task automation. See the [justfile](https://github.com/arini-ai/azure-switchboard/blob/master/justfile)
-for available commands.
+and [just](https://github.com/casey/just) for task automation. See the [justfile](https://github.com/arini-ai/azure-switchboard/blob/master/justfile) for available commands.
 
 ```bash
 git clone https://github.com/arini-ai/azure-switchboard
@@ -128,11 +125,6 @@ just test        # unit tests; every upstream is mocked
 just typecheck   # pyright over src/, as CI runs it
 ```
 
-`just smoke` drives real inference against a live Foundry resource, to check the
-wiring the mocks cannot. It needs `AZURE_FOUNDRY` and `AZURE_API_KEY`, and picks up
-`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` to exercise first-party fallback. The
-committed `.envrc` sources `.envrc.local`, which is gitignored — put your keys there.
-
 ### Release
 
 This library uses CalVer for versioning. On push to master, if tests pass, a package is automatically built, released, and uploaded to PyPI.
@@ -141,21 +133,6 @@ Locally, the package can be built with uv:
 
 ```bash
 uv build
-```
-
-### OpenTelemetry Integration
-
-`azure-switchboard` uses OpenTelemetry metrics via the meter `azure_switchboard.switchboard`.
-
-Metrics emitted on the request path include:
-
-- `healthy_deployments_count` (gauge)
-- `requests` (counter, with deployment + model attributes)
-
-To run with local OTEL instrumentation:
-
-```bash
-just otel-run
 ```
 
 ## Contributing
