@@ -44,41 +44,53 @@ class TestBinding:
         assert model.is_healthy()
 
 
+@pytest.fixture
+def bound(model: OpenAIDeployment) -> OpenAIDeployment:
+    """Utilization reads the resource's cooldown, so it needs one."""
+    Foundry(name="east", api_key="k", models=[model])
+    return model
+
+
 class TestModel:
     """Model functionality tests."""
 
-    async def test_init(self, model: OpenAIDeployment):
-        assert str(model).startswith("OpenAIDeployment<gpt-4o-mini>(util=0.0")
+    async def test_init(self, bound: OpenAIDeployment):
+        assert str(bound).startswith("OpenAIDeployment<gpt-4o-mini>(util=0.0")
 
-    async def test_util(self, model: OpenAIDeployment):
-        assert model.is_healthy()
+    async def test_util(self, bound: OpenAIDeployment):
+        assert bound.is_healthy()
 
-        model.tpm_usage = 2000
-        assert not model.is_healthy()
+        bound.tpm_usage = 2000
+        assert not bound.is_healthy()
 
-        model.tpm_usage = 500
-        assert model.is_healthy()
+        bound.tpm_usage = 500
+        assert bound.is_healthy()
 
-        model.rpm_usage = 10
-        assert not model.is_healthy()
+        bound.rpm_usage = 10
+        assert not bound.is_healthy()
 
-        model.rpm_usage = 5
-        assert model.is_healthy()
+        bound.rpm_usage = 5
+        assert bound.is_healthy()
 
-    async def test_markdown(self, model: OpenAIDeployment):
-        assert model.is_healthy()
+    async def test_markdown(self, bound: OpenAIDeployment):
+        assert bound.is_healthy()
 
-        model.mark_down(1)
-        assert not model.is_healthy()
-
-        await asyncio.sleep(0.5)
-        assert not model.is_healthy()
+        bound.mark_down(1)
+        assert not bound.is_healthy()
 
         await asyncio.sleep(0.5)
-        assert model.is_healthy()
+        assert not bound.is_healthy()
 
-        model.mark_down(10)
-        assert not model.is_healthy()
+        await asyncio.sleep(0.5)
+        assert bound.is_healthy()
 
-        model.mark_up()
-        assert model.is_healthy()
+        bound.mark_down(10)
+        assert not bound.is_healthy()
+
+        bound.mark_up()
+        assert bound.is_healthy()
+
+    async def test_repr_survives_an_unbound_deployment(self, model: OpenAIDeployment):
+        """util needs a resource, but repr has to work regardless — a raising
+        repr breaks debuggers and hides the error being formatted."""
+        assert repr(model) == "OpenAIDeployment<gpt-4o-mini>(unbound)"

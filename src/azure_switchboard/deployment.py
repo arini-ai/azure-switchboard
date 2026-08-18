@@ -109,9 +109,7 @@ class ModelDeployment(Cooldown):
         # full utilization while cooling down keeps us out of selection. A
         # cooling resource takes every model on it out with it: a connection
         # error means the host is unreachable, not that one model is busy.
-        if self.is_cooling() or (
-            self._resource is not None and self._resource.is_cooling()
-        ):
+        if self.is_cooling() or self.resource.is_cooling():
             return 1
 
         # Azure buckets tokens on a non-sliding 60 second window
@@ -159,6 +157,11 @@ class ModelDeployment(Cooldown):
             span.set_attribute("gen_ai.usage.reasoning_tokens", reasoning)
 
     def __repr__(self) -> str:
+        # util reads the resource's cooldown, which an unregistered deployment
+        # has no way to reach. repr has to describe one anyway: raising here
+        # would break debuggers and swallow whatever error was being formatted.
+        if self._resource is None:
+            return f"{type(self).__name__}<{self.name}>(unbound)"
         stats = self.stats()
         return (
             f"{type(self).__name__}<{self.name}>"
