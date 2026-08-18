@@ -68,7 +68,7 @@ dev = [
 # Scoped to the shipped package. The suite leans on patching internals and
 # carries errors of its own; checking it would drown the signal from src.
 include = ["src"]
-pythonVersion = "3.10"
+pythonVersion = "3.14"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -82,19 +82,20 @@ async def basic_functionality(switchboard: Switchboard):
 async def session_affinity(switchboard: Switchboard):
     session_id = "anything"
 
-    # First message will select a random healthy
-    # deployment and associate it with the session_id
+    # First message will select a random healthy deployment
+    # and pin the session_id to the foundry hosting it
     r = await switchboard.chat.completions.create(
         session_id=session_id,
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Who won the World Series in 2020?"}],
     )
 
-    d1 = switchboard.select_deployment(model="gpt-4o-mini", session_id=session_id)
-    print("deployment 1:", d1)
+    # the session is now pinned to whichever foundry served it
+    f1 = switchboard.sessions[session_id]
+    print("foundry 1:", f1.name)
     print("response 1:", r.choices[0].message.content)
 
-    # Follow-up requests with the same session_id will route to the same deployment
+    # Follow-up requests with the same session_id will route to the same foundry
     r2 = await switchboard.chat.completions.create(
         session_id=session_id,
         model="gpt-4o-mini",
@@ -107,20 +108,20 @@ async def session_affinity(switchboard: Switchboard):
 
     print("response 2:", r2.choices[0].message.content)
 
-    # Simulate a failure by marking down the deployment
-    d1.mark_down()
+    # Simulate a failure by marking down the deployment that served us
+    f1.models["gpt-4o-mini"].mark_down()
 
-    # A new deployment will be selected for this session_id
+    # A new foundry will be selected for this session_id
     r3 = await switchboard.chat.completions.create(
         session_id=session_id,
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Who won the World Series in 2021?"}],
     )
 
-    d2 = switchboard.select_deployment(model="gpt-4o-mini", session_id=session_id)
-    print("deployment 2:", d2)
+    f2 = switchboard.sessions[session_id]
+    print("foundry 2:", f2.name)
     print("response 3:", r3.choices[0].message.content)
-    assert d2 != d1
+    assert f2 is not f1
 
 
 if __name__ == "__main__":

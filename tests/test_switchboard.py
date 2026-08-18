@@ -20,6 +20,8 @@ from .conftest import (
     collect_chunks,
     message_mock,
     openai_foundry,
+    select_anthropic,
+    select_openai,
 )
 
 
@@ -67,7 +69,7 @@ class TestSwitchboard:
         self, switchboard: Switchboard, mock_client: respx.MockRouter
     ):
         """Test basic selection invariants"""
-        client = switchboard.select_deployment(model="gpt-4o-mini")
+        client = select_openai(switchboard, model="gpt-4o-mini")
         assert client.foundry.name in switchboard.foundries
 
         deployments = list(switchboard.foundries.values())
@@ -113,17 +115,17 @@ class TestSwitchboard:
         """Test session stickiness and failover."""
 
         # Test consistent deployment selection for session
-        client_1 = switchboard.select_deployment(session_id="test", model="gpt-4o-mini")
-        client_2 = switchboard.select_deployment(session_id="test", model="gpt-4o-mini")
+        client_1 = select_openai(switchboard, session_id="test", model="gpt-4o-mini")
+        client_2 = select_openai(switchboard, session_id="test", model="gpt-4o-mini")
         assert client_1.foundry.name == client_2.foundry.name
 
         # Test failover when selected deployment is unhealthy
         client_1.mark_down()
-        client_3 = switchboard.select_deployment(session_id="test", model="gpt-4o-mini")
+        client_3 = select_openai(switchboard, session_id="test", model="gpt-4o-mini")
         assert client_3.foundry.name != client_1.foundry.name
 
         # Test session maintains failover assignment
-        client_4 = switchboard.select_deployment(session_id="test", model="gpt-4o-mini")
+        client_4 = select_openai(switchboard, session_id="test", model="gpt-4o-mini")
         assert client_4.foundry.name == client_3.foundry.name
 
     async def test_session_cached_deployment_missing_model_does_not_keyerror(self):
@@ -147,7 +149,7 @@ class TestSwitchboard:
         # Session is pinned to a foundry that does not host gpt-4o.
         switchboard.sessions["test"] = switchboard.foundries["mini-only"]
 
-        selection = switchboard.select_deployment(session_id="test", model="gpt-4o")
+        selection = select_openai(switchboard, session_id="test", model="gpt-4o")
         assert selection.foundry.name == "full-only"
         assert switchboard.sessions["test"].name == "full-only"
 
@@ -218,7 +220,7 @@ class TestSwitchboard:
         switchboard = Switchboard(
             foundries=[openai_foundry("test1")], openai_fallback=True
         )
-        selection = switchboard.select_deployment(model="gpt-5.4")
+        selection = select_openai(switchboard, model="gpt-5.4")
         assert selection.foundry.name == "first-party-openai"
 
     async def test_first_party_fallback_can_itself_be_marked_down(self):
@@ -228,18 +230,18 @@ class TestSwitchboard:
         )
         switchboard.foundries["test1"].models["gpt-4o-mini"].mark_down()
 
-        fallback = switchboard.select_deployment(model="gpt-4o-mini")
+        fallback = select_openai(switchboard, model="gpt-4o-mini")
         fallback.mark_down()
 
         with pytest.raises(SwitchboardError, match="No deployments available"):
-            switchboard.select_deployment(model="gpt-4o-mini")
+            select_openai(switchboard, model="gpt-4o-mini")
 
     async def test_no_fallback_configured_raises(self):
         switchboard = Switchboard(foundries=[openai_foundry("test1")])
         switchboard.foundries["test1"].models["gpt-4o-mini"].mark_down()
 
         with pytest.raises(SwitchboardError, match="No deployments available"):
-            switchboard.select_deployment(model="gpt-4o-mini")
+            select_openai(switchboard, model="gpt-4o-mini")
 
     async def test_anthropic_first_party_fallback(self):
         switchboard = Switchboard(
@@ -247,7 +249,7 @@ class TestSwitchboard:
         )
         switchboard.foundries["ant1"].models["claude-sonnet-5"].mark_down()
 
-        selection = switchboard.select_deployment(model="claude-sonnet-5")
+        selection = select_anthropic(switchboard, model="claude-sonnet-5")
         assert isinstance(selection, AnthropicModel)
         assert selection.foundry.name == "first-party-anthropic"
 
@@ -263,8 +265,8 @@ class TestSwitchboard:
             for deployment in foundry.models.values():
                 deployment.mark_down()
 
-        openai_fb = switchboard.select_deployment(model="gpt-4o-mini")
-        anthropic_fb = switchboard.select_deployment(model="claude-sonnet-5")
+        openai_fb = select_openai(switchboard, model="gpt-4o-mini")
+        anthropic_fb = select_anthropic(switchboard, model="claude-sonnet-5")
         assert openai_fb.foundry is not anthropic_fb.foundry
 
         openai_fb.foundry.mark_down()
@@ -348,7 +350,7 @@ class TestSwitchboard:
             await switchboard.chat.completions.create(**COMPLETION_PARAMS)
 
         # reset utilization of one deployment
-        client = switchboard.select_deployment(model="gpt-4o-mini")
+        client = select_openai(switchboard, model="gpt-4o-mini")
         client.reset_usage()
 
         # make another 100 requests
@@ -449,12 +451,11 @@ class TestSwitchboard:
         assert len(switchboard.foundries) == 1
 
         only = switchboard.foundries["solo"].models["gpt-4o-mini"]
-        assert switchboard.select_deployment(model="gpt-4o-mini") is only
+        assert select_openai(switchboard, model="gpt-4o-mini") is only
 
         # Verify with session_id
         assert (
-            switchboard.select_deployment(model="gpt-4o-mini", session_id="test")
-            is only
+            select_openai(switchboard, model="gpt-4o-mini", session_id="test") is only
         )
         assert switchboard.sessions["test"] is switchboard.foundries["solo"]
 
@@ -499,11 +500,11 @@ class TestSwitchboard:
                 await switchboard.chat.completions.create(**COMPLETION_PARAMS)
 
         # Verify that the deployment is still selected as expected after cancellation
-        deployment = switchboard.select_deployment(model="gpt-4o-mini")
+        deployment = select_openai(switchboard, model="gpt-4o-mini")
         assert deployment.foundry is switchboard.foundries["test1"]
 
-        deployment_with_session = switchboard.select_deployment(
-            model="gpt-4o-mini", session_id="test"
+        deployment_with_session = select_openai(
+            switchboard, model="gpt-4o-mini", session_id="test"
         )
         assert deployment_with_session.foundry is switchboard.foundries["test1"]
         assert switchboard.sessions["test"] is switchboard.foundries["test1"]
@@ -540,9 +541,13 @@ class TestMixedPoolSelection:
     def test_model_name_routes_to_its_provider(self, mixed: Switchboard):
         """Model names are unique to a provider, so the name alone routes."""
         for _ in range(20):
-            assert isinstance(mixed.select_deployment(model="gpt-4o-mini"), OpenAIModel)
             assert isinstance(
-                mixed.select_deployment(model="claude-sonnet-5"), AnthropicModel
+                select_openai(mixed, model="gpt-4o-mini"),
+                OpenAIModel,
+            )
+            assert isinstance(
+                select_anthropic(mixed, model="claude-sonnet-5"),
+                AnthropicModel,
             )
 
     def test_stats_span_both_providers(self, mixed: Switchboard):
@@ -562,17 +567,15 @@ class TestMixedPoolSelection:
 
 class TestMixedPoolSessionAffinity:
     def test_session_is_sticky_within_an_api(self, mixed: Switchboard):
-        first = mixed.select_deployment(model="gpt-4o-mini", session_id="s1")
+        first = select_openai(mixed, model="gpt-4o-mini", session_id="s1")
         for _ in range(10):
-            assert (
-                mixed.select_deployment(model="gpt-4o-mini", session_id="s1") is first
-            )
+            assert select_openai(mixed, model="gpt-4o-mini", session_id="s1") is first
 
     def test_shared_session_id_does_not_cross_providers(self, mixed: Switchboard):
         """A cached session deployment is only reused when it serves the
         requested model, so one session_id spanning both APIs is safe."""
-        chat = mixed.select_deployment(model="gpt-4o-mini", session_id="shared")
-        msgs = mixed.select_deployment(model="claude-sonnet-5", session_id="shared")
+        chat = select_openai(mixed, model="gpt-4o-mini", session_id="shared")
+        msgs = select_anthropic(mixed, model="claude-sonnet-5", session_id="shared")
         assert isinstance(chat, OpenAIModel)
         assert isinstance(msgs, AnthropicModel)
 

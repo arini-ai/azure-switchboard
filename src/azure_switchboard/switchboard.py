@@ -5,14 +5,13 @@ import random
 from collections import OrderedDict
 from functools import cached_property
 from typing import (
-    Awaitable,
-    Callable,
     Literal,
     Protocol,
-    Sequence,
     TypeVar,
     overload,
 )
+
+from collections.abc import Awaitable, Callable, Sequence
 
 from anthropic import AsyncStream as AsyncAnthropicStream
 from anthropic.types import Message, ParsedMessage, RawMessageStreamEvent
@@ -61,20 +60,21 @@ request_counter = meter.create_counter(
 
 
 class Selector(Protocol):
-    """Picks one deployment for a model out of the healthy candidates.
+    """Picks one of the healthy deployments of a model.
 
-    Generic in the deployment type so a selector composes with either pool
-    without widening it.
+    A Protocol rather than a Callable alias so the type variable is scoped to
+    the call: one selector serves both pools without widening either.
     """
 
-    def __call__(self, model: str, options: list[_M], /) -> _M: ...
+    def __call__(self, options: list[_M], /) -> _M: ...
 
 
-def two_random_choices(model: str, options: list[_M], /) -> _M:
+def two_random_choices(options: list[_M], /) -> _M:
     """Power of two random choices algorithm.
 
-    Randomly select 2 deployments and return the one
-    with lower util for the given model.
+    Randomly select 2 deployments and return the one with lower util. Every
+    option is a deployment of the same model, so the model name is not an
+    input to the choice.
     """
     selected = random.sample(options, min(2, len(options)))
     return min(selected, key=lambda d: d.util)
@@ -185,33 +185,6 @@ class Switchboard:
     def stats(self) -> dict[str, dict[str, UtilStats]]:
         return {f.name: f.stats() for f in self._all_foundries()}
 
-    def select_deployment(
-        self, *, model: str, session_id: str | None = None
-    ) -> ModelBase:
-        """Select a deployment for a model, for introspection.
-
-        Searches both pools, so a name registered on both providers resolves to
-        whichever pool holds it. The calling surfaces select against their own
-        pool instead, which is what makes that ambiguity impossible in a
-        request path.
-        """
-        anthropic = model in self._anthropic_pool or (
-            model not in self._openai_pool and self._openai_first_party is None
-        )
-        if anthropic:
-            return self._select(
-                self._anthropic_pool,
-                model=model,
-                session_id=session_id,
-                fallback=lambda: self._anthropic_fallback(model),
-            )
-        return self._select(
-            self._openai_pool,
-            model=model,
-            session_id=session_id,
-            fallback=lambda: self._openai_fallback(model),
-        )
-
     def _select(
         self,
         pool: dict[str, list[_M]],
@@ -234,7 +207,7 @@ class Switchboard:
                 m for m in candidates if m.foundry is pinned and m.is_healthy()
             ]
             if preferred:
-                return self.selector(model, preferred)
+                return self.selector(preferred)
             logger.warning(f"{model} is unhealthy on {pinned.name}, reselecting")
 
         eligible = [m for m in candidates if m.is_healthy()]
@@ -247,7 +220,7 @@ class Switchboard:
 
         healthy_deployments_gauge.set(len(eligible), {"model": model})
 
-        selected = eligible[0] if len(eligible) == 1 else self.selector(model, eligible)
+        selected = eligible[0] if len(eligible) == 1 else self.selector(eligible)
         logger.trace(f"Selected deployment: {selected.foundry.name}/{selected.name}")
 
         if session_id:

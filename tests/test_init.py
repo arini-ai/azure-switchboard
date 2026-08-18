@@ -3,6 +3,8 @@ from loguru import logger as _logger
 
 from azure_switchboard import Foundry, OpenAIModel, Switchboard
 
+from .conftest import select_openai
+
 
 class TestInit:
     def test_public_exports_do_not_include_logging_helpers(self):
@@ -30,12 +32,12 @@ class TestInit:
         try:
             _logger.disable("azure_switchboard")
             switchboard.sessions["test"] = switchboard.foundries["mini-only"]
-            _ = switchboard.select_deployment(session_id="test", model="gpt-4o")
+            _ = select_openai(switchboard, session_id="test", model="gpt-4o")
             assert not records
 
             _logger.enable("azure_switchboard")
             switchboard.sessions["test"] = switchboard.foundries["mini-only"]
-            _ = switchboard.select_deployment(session_id="test", model="gpt-4o")
+            _ = select_openai(switchboard, session_id="test", model="gpt-4o")
             assert any(
                 "is unhealthy on mini-only, reselecting" in r["message"]
                 for r in records

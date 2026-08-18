@@ -12,7 +12,7 @@ class TestAdvanced:
 
     @pytest.mark.mock_models("gpt-4o-mini")
     async def test_round_robin_selector(self, switchboard: Switchboard):
-        switchboard.selector = lambda _, options: random.choice(options)
+        switchboard.selector = lambda options: random.choice(options)
 
         for _ in range(100):
             await switchboard.chat.completions.create(**COMPLETION_PARAMS)

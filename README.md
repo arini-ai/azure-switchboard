@@ -163,19 +163,20 @@ async def basic_functionality(switchboard: Switchboard):
 async def session_affinity(switchboard: Switchboard):
     session_id = "anything"
 
-    # First message will select a random healthy
-    # deployment and associate it with the session_id
+    # First message will select a random healthy deployment
+    # and pin the session_id to the foundry hosting it
     r = await switchboard.chat.completions.create(
         session_id=session_id,
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Who won the World Series in 2020?"}],
     )
 
-    d1 = switchboard.select_deployment(model="gpt-4o-mini", session_id=session_id)
-    print("deployment 1:", d1)
+    # the session is now pinned to whichever foundry served it
+    f1 = switchboard.sessions[session_id]
+    print("foundry 1:", f1.name)
     print("response 1:", r.choices[0].message.content)
 
-    # Follow-up requests with the same session_id will route to the same deployment
+    # Follow-up requests with the same session_id will route to the same foundry
     r2 = await switchboard.chat.completions.create(
         session_id=session_id,
         model="gpt-4o-mini",
@@ -188,20 +189,20 @@ async def session_affinity(switchboard: Switchboard):
 
     print("response 2:", r2.choices[0].message.content)
 
-    # Simulate a failure by marking down the deployment
-    d1.mark_down()
+    # Simulate a failure by marking down the deployment that served us
+    f1.models["gpt-4o-mini"].mark_down()
 
-    # A new deployment will be selected for this session_id
+    # A new foundry will be selected for this session_id
     r3 = await switchboard.chat.completions.create(
         session_id=session_id,
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Who won the World Series in 2021?"}],
     )
 
-    d2 = switchboard.select_deployment(model="gpt-4o-mini", session_id=session_id)
-    print("deployment 2:", d2)
+    f2 = switchboard.sessions[session_id]
+    print("foundry 2:", f2.name)
     print("response 3:", r3.choices[0].message.content)
-    assert d2 != d1
+    assert f2 is not f1
 
 
 if __name__ == "__main__":
@@ -288,15 +289,19 @@ Distribution overhead scales ~linearly with the number of deployments.
 
 ### switchboard.Switchboard Parameters
 
-| Parameter            | Description                                                    | Default              |
-| -------------------- | -------------------------------------------------------------- | -------------------- |
-| `foundries`          | Resources to balance across                                    | Required             |
-| `selector`           | Selection algorithm                                            | `two_random_choices` |
-| `failover_policy`    | tenacity `AsyncRetrying` policy, copied per call               | 2 attempts           |
-| `ratelimit_window`   | Seconds between usage-counter resets                           | 60.0                 |
-| `max_sessions`       | LRU capacity for session affinity pins                         | 1024                 |
-| `openai_fallback`    | Fall back to the OpenAI API, keyed from `OPENAI_API_KEY`       | False                |
-| `anthropic_fallback` | Fall back to the Anthropic API, keyed from `ANTHROPIC_API_KEY` | False                |
+| Parameter            | Description                                                                           | Default              |
+| -------------------- | ------------------------------------------------------------------------------------- | -------------------- |
+| `foundries`          | Resources to balance across. May be empty if a fallback is configured.                | Required             |
+| `selector`           | Deployment selection function, `(eligible_deployments) -> deployment`                 | `two_random_choices` |
+| `failover_policy`    | tenacity `AsyncRetrying` policy, copied per call so requests do not share retry state | 2 attempts           |
+| `ratelimit_window`   | How often usage counters reset (seconds). Set `0` to disable periodic reset.          | 60.0                 |
+| `max_sessions`       | LRU capacity for session affinity pins                                                | 1024                 |
+| `openai_fallback`    | Fall back to the OpenAI API, keyed from `OPENAI_API_KEY`                              | False                |
+| `anthropic_fallback` | Fall back to the Anthropic API, keyed from `ANTHROPIC_API_KEY`                        | False                |
+
+Every candidate passed to a selector is a deployment of the requested model, so the model name is not an input to the choice.
+
+There is no public entry point for selecting a deployment without calling one. Selection happens inside `create`/`parse`, and each surface mirrors its SDK, which has no such method. To see which resource a session is pinned to, read `sb.sessions[session_id]`.
 
 `max_tokens` is required by the Messages API and is passed through unchanged — switchboard does not supply a default.
 
@@ -321,16 +326,6 @@ An error's cooldown is scoped to what that error actually implicates. Both provi
 A cooling resource reports full utilization for every deployment on it, which also releases any session pinned to it back to normal selection.
 
 If your workload has a longer latency budget (e.g. batch structured-output jobs), set `timeout` on the relevant `Foundry` rather than relying on the default.
-
-### switchboard.Switchboard Parameters
-
-| Parameter          | Description                                                                  | Default                                                                                                        |
-| ------------------ | ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `deployments`      | List of deployment configs                                                   | Required                                                                                                       |
-| `selector`         | Deployment selection function `(model, eligible_deployments) -> deployment`  | `two_random_choices`                                                                                           |
-| `failover_policy`  | Tenacity `AsyncRetrying` policy used around each `create` call               | `AsyncRetrying(stop=stop_after_attempt(2), retry=retry_if_not_exception_type(SwitchboardError), reraise=True)` |
-| `ratelimit_window` | How often usage counters reset (seconds). Set `0` to disable periodic reset. | 60.0                                                                                                           |
-| `max_sessions`     | LRU capacity for session affinity map                                        | 1024                                                                                                           |
 
 ## Development
 

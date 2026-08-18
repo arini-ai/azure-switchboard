@@ -39,6 +39,35 @@ from azure_switchboard import (
 )
 
 
+def select_openai(
+    sb: Switchboard, *, model: str, session_id: str | None = None
+) -> OpenAIModel:
+    """Resolve a model the way a chat request would, for selection assertions.
+
+    Switchboard exposes no public selection entry point: the surfaces mirror
+    their SDKs, and neither SDK has one. Tests reach for the internals rather
+    than the package carrying a method for their benefit.
+    """
+    return sb._select(
+        sb._openai_pool,
+        model=model,
+        session_id=session_id,
+        fallback=lambda: sb._openai_fallback(model),
+    )
+
+
+def select_anthropic(
+    sb: Switchboard, *, model: str, session_id: str | None = None
+) -> AnthropicModel:
+    """Resolve a model the way a messages request would."""
+    return sb._select(
+        sb._anthropic_pool,
+        model=model,
+        session_id=session_id,
+        fallback=lambda: sb._anthropic_fallback(model),
+    )
+
+
 async def collect_chunks(
     stream: AsyncStream[ChatCompletionChunk],
 ) -> tuple[list[ChatCompletionChunk], str]:
