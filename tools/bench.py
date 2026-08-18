@@ -19,21 +19,27 @@ import time
 
 from rich import print
 
-from azure_switchboard import Model, OpenAIConfig, Switchboard
+from azure_switchboard import Foundry, OpenAIModel, Switchboard
 
 
 async def bench(args: argparse.Namespace) -> None:
-    deployments = [
-        OpenAIConfig(
+    foundries = [
+        Foundry(
             name=f"bench_{n}",
-            base_url=f"{os.environ['AZURE_OPENAI_ENDPOINT']}/openai/v1/",
             api_key=os.environ["AZURE_OPENAI_API_KEY"],
-            models=[Model(name="gpt-4o-mini", tpm=30000, rpm=300)],
+            models=[
+                OpenAIModel(
+                    name="gpt-4o-mini",
+                    tpm=30000,
+                    rpm=300,
+                    endpoint=f"{os.environ['AZURE_OPENAI_ENDPOINT']}/openai/v1/",
+                )
+            ],
         )
         for n in range(args.deployments)
     ]
 
-    async with Switchboard(deployments) as switchboard:
+    async with Switchboard(foundries) as switchboard:
         print(
             f"Distributing {args.requests} requests across {args.deployments} deployments"
         )

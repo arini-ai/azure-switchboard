@@ -8,9 +8,9 @@ from typing import (
     Awaitable,
     Callable,
     Literal,
+    Protocol,
     Sequence,
     TypeVar,
-    cast,
     overload,
 )
 
@@ -27,17 +27,15 @@ from tenacity import (
     stop_after_attempt,
 )
 
-from azure_switchboard.model import UtilStats
-
-from .openai_api import OpenAIConfig, OpenAIDeployment
-from .deployment import DeploymentBase
+from .anthropic_model import AnthropicModel
 from .exceptions import SwitchboardError
-from .anthropic_api import AnthropicConfig, AnthropicDeployment
+from .foundry import FirstParty, Foundry
+from .model import ModelBase, UtilStats
+from .openai_model import OpenAIModel
 
 _T = TypeVar("_T", bound=BaseModel)
 _R = TypeVar("_R")
-
-DeploymentSpec = OpenAIConfig | AnthropicConfig
+_M = TypeVar("_M", bound=ModelBase)
 
 meter = metrics.get_meter("azure_switchboard.switchboard")
 deployment_util = meter.create_gauge(
@@ -62,14 +60,24 @@ request_counter = meter.create_counter(
 )
 
 
-def two_random_choices(model: str, options: list[DeploymentBase]) -> DeploymentBase:
+class Selector(Protocol):
+    """Picks one deployment for a model out of the healthy candidates.
+
+    Generic in the deployment type so a selector composes with either pool
+    without widening it.
+    """
+
+    def __call__(self, model: str, options: list[_M], /) -> _M: ...
+
+
+def two_random_choices(model: str, options: list[_M], /) -> _M:
     """Power of two random choices algorithm.
 
     Randomly select 2 deployments and return the one
     with lower util for the given model.
     """
     selected = random.sample(options, min(2, len(options)))
-    return min(selected, key=lambda d: d.util(model))
+    return min(selected, key=lambda d: d.util)
 
 
 DEFAULT_FAILOVER_POLICY = AsyncRetrying(
@@ -79,50 +87,55 @@ DEFAULT_FAILOVER_POLICY = AsyncRetrying(
 )
 
 
-def _build_deployment(config: DeploymentSpec) -> DeploymentBase:
-    if isinstance(config, AnthropicConfig):
-        return AnthropicDeployment(config)
-    return OpenAIDeployment(config)
-
-
 class Switchboard:
     def __init__(
         self,
-        deployments: Sequence[DeploymentSpec],
-        selector: Callable[
-            [str, list[DeploymentBase]], DeploymentBase
-        ] = two_random_choices,
+        foundries: Sequence[Foundry],
+        selector: Selector = two_random_choices,
         failover_policy: AsyncRetrying = DEFAULT_FAILOVER_POLICY,
         ratelimit_window: float = 60.0,
         max_sessions: int = 1024,
+        openai_fallback: bool = False,
+        anthropic_fallback: bool = False,
     ) -> None:
-        if not deployments:
-            raise SwitchboardError("No deployments provided")
+        if not foundries and not (openai_fallback or anthropic_fallback):
+            raise SwitchboardError("No foundries provided")
 
-        self.deployments: dict[str, DeploymentBase] = {}
-        # Routing is by model name alone, so a name on both providers would
-        # make the serving surface ambiguous.
-        owners: dict[str, tuple[str, str]] = {}
-        for config in deployments:
-            if config.name in self.deployments:
-                raise SwitchboardError(f"Duplicate deployment name: {config.name}")
+        self.foundries: dict[str, Foundry] = {}
+        # Deployments are pooled by the API they speak, so the calling surface
+        # picks the pool and a model name never has to be disambiguated.
+        self._openai_pool: dict[str, list[OpenAIModel]] = {}
+        self._anthropic_pool: dict[str, list[AnthropicModel]] = {}
 
-            provider = "anthropic" if isinstance(config, AnthropicConfig) else "openai"
-            for model in config.models:
-                owner = owners.setdefault(model.name, (provider, config.name))
-                if owner[0] != provider:
+        for foundry in foundries:
+            if foundry.name in self.foundries:
+                raise SwitchboardError(f"Duplicate foundry name: {foundry.name}")
+            self.foundries[foundry.name] = foundry
+
+            for model in foundry.models.values():
+                if isinstance(model, OpenAIModel):
+                    self._openai_pool.setdefault(model.name, []).append(model)
+                elif isinstance(model, AnthropicModel):
+                    self._anthropic_pool.setdefault(model.name, []).append(model)
+                else:
                     raise SwitchboardError(
-                        f"{model.name} is registered on both {owner[0]} "
-                        f"({owner[1]}) and {provider} ({config.name}) deployments; "
-                        "a model name must belong to exactly one provider"
+                        f"{foundry.name}: {model.name} is not an OpenAIModel "
+                        "or AnthropicModel"
                     )
 
-            self.deployments[config.name] = _build_deployment(config)
+        # The vendors' own APIs are not part of a pool: they are what selection
+        # reaches for once a pool has nothing healthy left.
+        self._openai_first_party = FirstParty("openai") if openai_fallback else None
+        self._anthropic_first_party = (
+            FirstParty("anthropic") if anthropic_fallback else None
+        )
+        self._openai_fallbacks: dict[str, OpenAIModel] = {}
+        self._anthropic_fallbacks: dict[str, AnthropicModel] = {}
 
         self.selector = selector
         self.failover_policy = failover_policy
 
-        self.sessions = _LRUDict(max_size=max_sessions)
+        self.sessions: _LRUDict = _LRUDict(max_size=max_sessions)
         self.ratelimit_reset_task: asyncio.Task | None = None
 
         self.ratelimit_window = ratelimit_window
@@ -161,100 +174,139 @@ class Switchboard:
             except asyncio.CancelledError:
                 pass
 
+    def _all_foundries(self) -> list[Foundry]:
+        first_party = [self._openai_first_party, self._anthropic_first_party]
+        return list(self.foundries.values()) + [f for f in first_party if f]
+
     def reset_usage(self) -> None:
-        for deployment in self.deployments.values():
-            deployment.reset_usage()
+        for foundry in self._all_foundries():
+            foundry.reset_usage()
 
     def stats(self) -> dict[str, dict[str, UtilStats]]:
-        return {
-            name: deployment.stats() for name, deployment in self.deployments.items()
-        }
+        return {f.name: f.stats() for f in self._all_foundries()}
 
     def select_deployment(
         self, *, model: str, session_id: str | None = None
-    ) -> DeploymentBase:
-        """
-        Select a deployment using the configured selection algorithm.
-        If session_id is provided, try to use that specific deployment first.
-        """
-        if session_id and session_id in self.sessions:
-            deployment = self.sessions[session_id]
-            if deployment.is_healthy(model):
-                return deployment
+    ) -> ModelBase:
+        """Select a deployment for a model, for introspection.
 
-            m = deployment.models.get(model)
-            logger.bind(util=vars(m.stats()) if m else None).warning(
-                f"{model} is unhealthy on {deployment.name}, falling back to selection"
+        Searches both pools, so a name registered on both providers resolves to
+        whichever pool holds it. The calling surfaces select against their own
+        pool instead, which is what makes that ambiguity impossible in a
+        request path.
+        """
+        anthropic = model in self._anthropic_pool or (
+            model not in self._openai_pool and self._openai_first_party is None
+        )
+        if anthropic:
+            return self._select(
+                self._anthropic_pool,
+                model=model,
+                session_id=session_id,
+                fallback=lambda: self._anthropic_fallback(model),
             )
+        return self._select(
+            self._openai_pool,
+            model=model,
+            session_id=session_id,
+            fallback=lambda: self._openai_fallback(model),
+        )
 
-        eligible_deployments = [
-            d for d in self.deployments.values() if d.is_healthy(model)
-        ]
+    def _select(
+        self,
+        pool: dict[str, list[_M]],
+        *,
+        model: str,
+        session_id: str | None,
+        fallback: Callable[[], _M | None],
+    ) -> _M:
+        """Pick a deployment for a model out of one API's pool.
 
-        if not eligible_deployments:
-            # No healthy deployments — fall back to any deployment that supports
-            # this model (even if cooling down) rather than failing immediately.
-            # This prevents cascade failures when a single deployment has a
-            # transient error: without fallback, the 10s cooldown would reject
-            # every request, turning one failure into dozens.
-            fallback_deployments = [
-                d for d in self.deployments.values() if model in d.models
+        Generic over the pool, so both surfaces share this implementation while
+        each keeps its own concrete deployment type.
+        """
+        candidates = pool.get(model, [])
+
+        if session_id and (pinned := self.sessions.get(session_id)):
+            # Affinity is to the resource, so a session that uses several models
+            # keeps hitting the same one and its prompt cache stays warm.
+            preferred = [
+                m for m in candidates if m.foundry is pinned and m.is_healthy()
             ]
-            if not fallback_deployments:
-                raise SwitchboardError(f"No deployments available for {model}")
-            logger.warning(
-                f"No healthy deployments for {model}, using best-effort fallback"
-            )
-            eligible_deployments = fallback_deployments
+            if preferred:
+                return self.selector(model, preferred)
+            logger.warning(f"{model} is unhealthy on {pinned.name}, reselecting")
 
-        healthy_deployments_gauge.set(len(eligible_deployments), {"model": model})
+        eligible = [m for m in candidates if m.is_healthy()]
 
-        if len(eligible_deployments) == 1:
-            deployment = eligible_deployments[0]
-        else:
-            deployment = self.selector(model, eligible_deployments)
+        if not eligible:
+            if (first_party := fallback()) and first_party.is_healthy():
+                logger.warning(f"No healthy deployments for {model}, using first-party")
+                return first_party
+            raise SwitchboardError(f"No deployments available for {model}")
 
-        logger.trace(f"Selected deployment: {deployment.name}")
+        healthy_deployments_gauge.set(len(eligible), {"model": model})
+
+        selected = eligible[0] if len(eligible) == 1 else self.selector(model, eligible)
+        logger.trace(f"Selected deployment: {selected.foundry.name}/{selected.name}")
 
         if session_id:
-            self.sessions[session_id] = deployment
+            self.sessions[session_id] = selected.foundry
 
-        return deployment
+        return selected
+
+    def _openai_fallback(self, model: str) -> OpenAIModel | None:
+        if self._openai_first_party is None:
+            return None
+        if model not in self._openai_fallbacks:
+            deployment = OpenAIModel(model)
+            self._openai_first_party.add(deployment)
+            self._openai_fallbacks[model] = deployment
+        return self._openai_fallbacks[model]
+
+    def _anthropic_fallback(self, model: str) -> AnthropicModel | None:
+        if self._anthropic_first_party is None:
+            return None
+        if model not in self._anthropic_fallbacks:
+            deployment = AnthropicModel(model)
+            self._anthropic_first_party.add(deployment)
+            self._anthropic_fallbacks[model] = deployment
+        return self._anthropic_fallbacks[model]
+
+    async def _dispatch(
+        self,
+        pool: dict[str, list[_M]],
+        *,
+        model: str,
+        session_id: str | None,
+        fallback: Callable[[], _M | None],
+        call: Callable[[_M], Awaitable[_R]],
+    ) -> _R:  # pyright: ignore[reportReturnType]
+        with logger.contextualize(model=model, session_id=session_id):
+            # failover_policy is copied so concurrent requests
+            # dont share retry state
+            async for attempt in self.failover_policy.copy():
+                with attempt:
+                    deployment = self._select(
+                        pool, model=model, session_id=session_id, fallback=fallback
+                    )
+                    with logger.contextualize(foundry=deployment.foundry.name):
+                        logger.trace("Sending request")
+                        response = await call(deployment)
+                    request_counter.add(
+                        1,
+                        {"model": model, "foundry": deployment.foundry.name},
+                    )
+                    return response
 
     def __repr__(self) -> str:
-        return f"Switchboard({self.deployments})"
+        return f"Switchboard({self.foundries})"
 
 
 class _Chat:
     class Completions:
         def __init__(self, sb: Switchboard) -> None:
             self.sb = sb
-
-        async def _dispatch(
-            self,
-            *,
-            model: str,
-            session_id: str | None,
-            call: Callable[[OpenAIDeployment], Awaitable[_R]],
-        ) -> _R:  # pyright: ignore[reportReturnType]
-            with logger.contextualize(model=model, session_id=session_id):
-                # failover_policy is copied so concurrent requests
-                # dont share retry state
-                async for attempt in self.sb.failover_policy.copy():
-                    with attempt:
-                        deployment = cast(
-                            OpenAIDeployment,
-                            self.sb.select_deployment(
-                                model=model, session_id=session_id
-                            ),
-                        )
-                        with logger.contextualize(deployment=deployment.name):
-                            logger.trace("Sending request")
-                            response = await call(deployment)
-                        request_counter.add(
-                            1, {"model": model, "deployment": deployment.name}
-                        )
-                        return response
 
         @overload
         async def create(
@@ -274,10 +326,12 @@ class _Chat:
             stream: bool = False,
             **kwargs,
         ) -> ChatCompletion | AsyncStream[ChatCompletionChunk]:
-            return await self._dispatch(
+            return await self.sb._dispatch(
+                self.sb._openai_pool,
                 model=model,
                 session_id=session_id,
-                call=lambda d: d.create(model=model, stream=stream, **kwargs),
+                fallback=lambda: self.sb._openai_fallback(model),
+                call=lambda d: d.create(stream=stream, **kwargs),
             )
 
         async def parse(
@@ -288,12 +342,12 @@ class _Chat:
             session_id: str | None = None,
             **kwargs,
         ) -> ParsedChatCompletion[_T]:
-            return await self._dispatch(
+            return await self.sb._dispatch(
+                self.sb._openai_pool,
                 model=model,
                 session_id=session_id,
-                call=lambda d: d.parse(
-                    model=model, response_format=response_format, **kwargs
-                ),
+                fallback=lambda: self.sb._openai_fallback(model),
+                call=lambda d: d.parse(response_format=response_format, **kwargs),
             )
 
     def __init__(self, switchboard: Switchboard) -> None:
@@ -303,31 +357,6 @@ class _Chat:
 class _Messages:
     def __init__(self, sb: Switchboard) -> None:
         self.sb = sb
-
-    # duplicated with impl in _Chat to avoid fighting the type checker
-    async def _dispatch(
-        self,
-        *,
-        model: str,
-        session_id: str | None,
-        call: Callable[[AnthropicDeployment], Awaitable[_R]],
-    ) -> _R:  # pyright: ignore[reportReturnType]
-        with logger.contextualize(model=model, session_id=session_id):
-            # failover_policy is copied so concurrent requests
-            # dont share retry state
-            async for attempt in self.sb.failover_policy.copy():
-                with attempt:
-                    deployment = cast(
-                        AnthropicDeployment,
-                        self.sb.select_deployment(model=model, session_id=session_id),
-                    )
-                    with logger.contextualize(deployment=deployment.name):
-                        logger.trace("Sending request")
-                        response = await call(deployment)
-                    request_counter.add(
-                        1, {"model": model, "deployment": deployment.name}
-                    )
-                    return response
 
     @overload
     async def create(
@@ -351,10 +380,12 @@ class _Messages:
         `max_tokens` is required by the Messages API and is passed through
         unchanged; switchboard does not supply a default.
         """
-        return await self._dispatch(
+        return await self.sb._dispatch(
+            self.sb._anthropic_pool,
             model=model,
             session_id=session_id,
-            call=lambda d: d.messages(model=model, stream=stream, **kwargs),
+            fallback=lambda: self.sb._anthropic_fallback(model),
+            call=lambda d: d.create(stream=stream, **kwargs),
         )
 
     async def parse(
@@ -365,10 +396,12 @@ class _Messages:
         session_id: str | None = None,
         **kwargs,
     ) -> ParsedMessage[_T]:
-        return await self._dispatch(
+        return await self.sb._dispatch(
+            self.sb._anthropic_pool,
             model=model,
             session_id=session_id,
-            call=lambda d: d.parse(model=model, output_format=output_format, **kwargs),
+            fallback=lambda: self.sb._anthropic_fallback(model),
+            call=lambda d: d.parse(output_format=output_format, **kwargs),
         )
 
 
@@ -380,7 +413,7 @@ class _LRUDict(OrderedDict):
 
         super().__init__(*args, **kwargs)
 
-    def __setitem__(self, key: str, value: DeploymentBase) -> None:
+    def __setitem__(self, key: str, value: Foundry) -> None:
         super().__setitem__(key, value)
         super().move_to_end(key)
 
@@ -388,7 +421,7 @@ class _LRUDict(OrderedDict):
             oldkey = next(iter(self))
             super().__delitem__(oldkey)
 
-    def __getitem__(self, key: str) -> DeploymentBase:
+    def __getitem__(self, key: str) -> Foundry:
         val = super().__getitem__(key)
         super().move_to_end(key)
 

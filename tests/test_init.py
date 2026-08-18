@@ -1,7 +1,7 @@
 import azure_switchboard
 from loguru import logger as _logger
 
-from azure_switchboard import OpenAIConfig, Model, Switchboard
+from azure_switchboard import Foundry, OpenAIModel, Switchboard
 
 
 class TestInit:
@@ -13,33 +13,31 @@ class TestInit:
         records: list[dict] = []
         sink_id = _logger.add(lambda m: records.append(m.record))
         switchboard = Switchboard(
-            deployments=[
-                OpenAIConfig(
+            foundries=[
+                Foundry(
                     name="mini-only",
-                    base_url="https://mini-only.openai.azure.com/openai/v1/",
                     api_key="mini-only",
-                    models=[Model(name="gpt-4o-mini", tpm=1000, rpm=6)],
+                    models=[OpenAIModel(name="gpt-4o-mini", tpm=1000, rpm=6)],
                 ),
-                OpenAIConfig(
+                Foundry(
                     name="full-only",
-                    base_url="https://full-only.openai.azure.com/openai/v1/",
                     api_key="full-only",
-                    models=[Model(name="gpt-4o", tpm=1000, rpm=6)],
+                    models=[OpenAIModel(name="gpt-4o", tpm=1000, rpm=6)],
                 ),
             ],
             ratelimit_window=0,
         )
         try:
             _logger.disable("azure_switchboard")
-            switchboard.sessions["test"] = switchboard.deployments["mini-only"]
+            switchboard.sessions["test"] = switchboard.foundries["mini-only"]
             _ = switchboard.select_deployment(session_id="test", model="gpt-4o")
             assert not records
 
             _logger.enable("azure_switchboard")
-            switchboard.sessions["test"] = switchboard.deployments["mini-only"]
+            switchboard.sessions["test"] = switchboard.foundries["mini-only"]
             _ = switchboard.select_deployment(session_id="test", model="gpt-4o")
             assert any(
-                "is unhealthy on mini-only, falling back to selection" in r["message"]
+                "is unhealthy on mini-only, reselecting" in r["message"]
                 for r in records
             )
         finally:
@@ -48,14 +46,15 @@ class TestInit:
 
     def test_public_export_surface(self):
         assert set(azure_switchboard.__all__) == {
-            "AnthropicConfig",
-            "Model",
-            "OpenAIConfig",
+            "AnthropicModel",
+            "Foundry",
+            "OpenAIModel",
             "ParsedChatCompletion",
             "SwitchboardError",
             "Switchboard",
         }
 
-    def test_deployment_config_was_renamed(self):
-        """Renamed to OpenAIConfig; no back-compat alias is exported."""
-        assert not hasattr(azure_switchboard, "DeploymentConfig")
+    def test_config_classes_were_replaced(self):
+        """Resources are Foundry, deployments are *Model; no back-compat aliases."""
+        for gone in ("DeploymentConfig", "OpenAIConfig", "AnthropicConfig", "Model"):
+            assert not hasattr(azure_switchboard, gone)

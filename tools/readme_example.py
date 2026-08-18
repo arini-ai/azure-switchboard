@@ -13,43 +13,41 @@
 import asyncio
 import os
 
-from azure_switchboard import OpenAIConfig, Model, Switchboard
+from azure_switchboard import Foundry, OpenAIModel, Switchboard
 
 azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
 azure_openai_api_key = os.getenv("AZURE_OPENAI_API_KEY")
 openai_api_key = os.getenv("OPENAI_API_KEY")
 
-deployments = []
+foundries = []
 if azure_openai_endpoint and azure_openai_api_key:
-    # create 3 deployments. reusing the endpoint
+    # create 3 foundries. reusing the endpoint
     # is fine for the purposes of this demo
     for name in ("east", "west", "south"):
-        deployments.append(
-            OpenAIConfig(
+        foundries.append(
+            Foundry(
                 name=name,
-                base_url=f"{azure_openai_endpoint}/openai/v1/",
                 api_key=azure_openai_api_key,
-                models=[Model(name="gpt-4o-mini")],
+                models=[
+                    OpenAIModel(
+                        name="gpt-4o-mini",
+                        endpoint=f"{azure_openai_endpoint}/openai/v1/",
+                    )
+                ],
             )
         )
 
-if openai_api_key:
-    deployments.append(
-        OpenAIConfig(
-            name="openai",
-            api_key=openai_api_key,
-            models=[Model(name="gpt-4o-mini")],
-        )
-    )
-
-if not deployments:
+if not foundries and not openai_api_key:
     raise RuntimeError(
         "Set AZURE_OPENAI_ENDPOINT/AZURE_OPENAI_API_KEY or OPENAI_API_KEY to run this example."
     )
 
 
 async def main():
-    async with Switchboard(deployments=deployments) as sb:
+    # OPENAI_API_KEY, if set, backs the pool as a last resort
+    async with Switchboard(
+        foundries=foundries, openai_fallback=bool(openai_api_key)
+    ) as sb:
         print("Basic functionality:")
         await basic_functionality(sb)
 
@@ -110,7 +108,7 @@ async def session_affinity(switchboard: Switchboard):
     print("response 2:", r2.choices[0].message.content)
 
     # Simulate a failure by marking down the deployment
-    d1.models["gpt-4o-mini"].mark_down()
+    d1.mark_down()
 
     # A new deployment will be selected for this session_id
     r3 = await switchboard.chat.completions.create(

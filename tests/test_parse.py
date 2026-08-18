@@ -5,9 +5,10 @@ from httpx import Request, Response
 from openai import APIConnectionError, APITimeoutError, RateLimitError
 
 from azure_switchboard import Switchboard, SwitchboardError
-from azure_switchboard.openai_api import OpenAIDeployment
+from azure_switchboard.openai_model import OpenAIModel
 
 from .conftest import (
+    PARSED_COMPLETION_BODY,
     PARSED_COMPLETION_PARAMS,
     PARSED_RESPONSE,
     WeatherResult,
@@ -15,16 +16,16 @@ from .conftest import (
 
 
 class TestDeploymentParse:
-    """Deployment.parse() tests — mirrors TestDeployment completion tests."""
+    """OpenAIModel.parse() tests — mirrors the completion tests."""
 
-    async def test_parse_returns_parsed_completion(self, deployment: OpenAIDeployment):
+    async def test_parse_returns_parsed_completion(self, deployment: OpenAIModel):
         """Test basic parse returns ParsedChatCompletion with correct parsed model."""
         with patch.object(
             deployment.client.chat.completions,
             "parse",
             new=AsyncMock(return_value=PARSED_RESPONSE),
         ) as mock:
-            response = await deployment.parse(**PARSED_COMPLETION_PARAMS)
+            response = await deployment.parse(**PARSED_COMPLETION_BODY)
 
             mock.assert_called_once()
             assert response == PARSED_RESPONSE
@@ -32,30 +33,21 @@ class TestDeploymentParse:
             assert isinstance(response.choices[0].message.parsed, WeatherResult)
             assert response.choices[0].message.parsed.city == "Paris"
 
-    async def test_parse_tracks_usage(self, deployment: OpenAIDeployment):
+    async def test_parse_tracks_usage(self, deployment: OpenAIModel):
         """Test that parse() updates TPM/RPM counters like create() does."""
         with patch.object(
             deployment.client.chat.completions,
             "parse",
             new=AsyncMock(return_value=PARSED_RESPONSE),
         ):
-            await deployment.parse(**PARSED_COMPLETION_PARAMS)
+            await deployment.parse(**PARSED_COMPLETION_BODY)
 
-            model = deployment.model("gpt-4o-mini")
+            model = deployment
             usage = model.stats()
             assert usage.tpm.startswith(str(PARSED_RESPONSE.usage.total_tokens))
             assert usage.rpm.startswith("1")
 
-    async def test_parse_invalid_model(self, deployment: OpenAIDeployment):
-        """Test that an unconfigured model raises SwitchboardError."""
-        with pytest.raises(SwitchboardError, match="gpt-fake not configured"):
-            await deployment.parse(
-                model="gpt-fake",
-                messages=[],
-                response_format=WeatherResult,
-            )
-
-    async def test_parse_rate_limit_marks_down(self, deployment: OpenAIDeployment):
+    async def test_parse_rate_limit_marks_down(self, deployment: OpenAIModel):
         """Test that RateLimitError marks model down and re-raises."""
         rate_limit_error = RateLimitError(
             "rate limited",
@@ -75,12 +67,12 @@ class TestDeploymentParse:
             new=AsyncMock(side_effect=rate_limit_error),
         ):
             with pytest.raises(RateLimitError):
-                await deployment.parse(**PARSED_COMPLETION_PARAMS)
+                await deployment.parse(**PARSED_COMPLETION_BODY)
 
-            assert not deployment.model("gpt-4o-mini").is_healthy()
+            assert not deployment.is_healthy()
 
     async def test_parse_generic_exception_does_not_mark_down(
-        self, deployment: OpenAIDeployment
+        self, deployment: OpenAIModel
     ):
         """Test that generic exceptions do NOT mark model down — only network/rate-limit errors do."""
         with patch.object(
@@ -89,13 +81,11 @@ class TestDeploymentParse:
             new=AsyncMock(side_effect=Exception("upstream error")),
         ):
             with pytest.raises(Exception, match="upstream error"):
-                await deployment.parse(**PARSED_COMPLETION_PARAMS)
+                await deployment.parse(**PARSED_COMPLETION_BODY)
 
-            assert deployment.model("gpt-4o-mini").is_healthy()
+            assert deployment.is_healthy()
 
-    async def test_parse_connection_error_marks_down(
-        self, deployment: OpenAIDeployment
-    ):
+    async def test_parse_connection_error_marks_down(self, deployment: OpenAIModel):
         """Test that APIConnectionError marks model down and re-raises."""
         connection_error = APIConnectionError(
             request=Request(
@@ -109,11 +99,11 @@ class TestDeploymentParse:
             new=AsyncMock(side_effect=connection_error),
         ):
             with pytest.raises(APIConnectionError):
-                await deployment.parse(**PARSED_COMPLETION_PARAMS)
+                await deployment.parse(**PARSED_COMPLETION_BODY)
 
-            assert not deployment.model("gpt-4o-mini").is_healthy()
+            assert not deployment.is_healthy()
 
-    async def test_parse_timeout_does_not_mark_down(self, deployment: OpenAIDeployment):
+    async def test_parse_timeout_does_not_mark_down(self, deployment: OpenAIModel):
         """Test that APITimeoutError does not mark model down on parse."""
         timeout_error = APITimeoutError(
             request=Request(
@@ -127,9 +117,9 @@ class TestDeploymentParse:
             new=AsyncMock(side_effect=timeout_error),
         ):
             with pytest.raises(APITimeoutError):
-                await deployment.parse(**PARSED_COMPLETION_PARAMS)
+                await deployment.parse(**PARSED_COMPLETION_BODY)
 
-            assert deployment.model("gpt-4o-mini").is_healthy()
+            assert deployment.is_healthy()
 
 
 class TestSwitchboardParse:
@@ -138,7 +128,7 @@ class TestSwitchboardParse:
     async def test_parse(self, switchboard: Switchboard):
         """Test parse through switchboard with load balancing."""
         with patch(
-            "azure_switchboard.openai_api.OpenAIDeployment.parse",
+            "azure_switchboard.openai_model.OpenAIModel.parse",
             new=AsyncMock(return_value=PARSED_RESPONSE),
         ) as mock:
             response = await switchboard.chat.completions.parse(
@@ -152,7 +142,7 @@ class TestSwitchboardParse:
     async def test_parse_session_affinity(self, switchboard: Switchboard):
         """Test that session_id routes to same deployment."""
         with patch(
-            "azure_switchboard.openai_api.OpenAIDeployment.parse",
+            "azure_switchboard.openai_model.OpenAIModel.parse",
             new=AsyncMock(return_value=PARSED_RESPONSE),
         ):
             await switchboard.chat.completions.parse(
@@ -179,7 +169,7 @@ class TestSwitchboardParse:
             return PARSED_RESPONSE
 
         with patch(
-            "azure_switchboard.openai_api.OpenAIDeployment.parse",
+            "azure_switchboard.openai_model.OpenAIModel.parse",
             new=AsyncMock(side_effect=failing_then_success),
         ):
             response = await switchboard.chat.completions.parse(

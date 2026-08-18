@@ -1,4 +1,4 @@
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -32,13 +32,11 @@ from anthropic.types import (
 from anthropic.types.raw_message_delta_event import Delta
 
 from azure_switchboard import (
-    AnthropicConfig,
-    Model,
-    OpenAIConfig,
+    AnthropicModel,
+    Foundry,
+    OpenAIModel,
     Switchboard,
 )
-from azure_switchboard.openai_api import OpenAIDeployment
-from azure_switchboard.anthropic_api import AnthropicDeployment
 
 
 async def collect_chunks(
@@ -54,19 +52,14 @@ async def collect_chunks(
     return received_chunks, content
 
 
-def openai_config(name: str, *, azure: bool = True) -> OpenAIConfig:
-    """An OpenAI deployment config.
-
-    `azure=False` drops base_url for the direct-OpenAI path, which
-    mock_client routes separately from Azure's.
-    """
-    return OpenAIConfig(
+def openai_foundry(name: str) -> Foundry:
+    """A Foundry resource hosting the Chat Completions models used in tests."""
+    return Foundry(
         name=name,
-        base_url=f"https://{name}.openai.azure.com/openai/v1/" if azure else None,
         api_key=name,
         models=[
-            Model(name="gpt-4o-mini", tpm=10000, rpm=60),
-            Model(name="gpt-4o", tpm=10000, rpm=60),
+            OpenAIModel(name="gpt-4o-mini", tpm=10000, rpm=60),
+            OpenAIModel(name="gpt-4o", tpm=10000, rpm=60),
         ],
     )
 
@@ -87,6 +80,13 @@ def chat_completion_mock():
 
 
 @pytest.fixture(autouse=True)
+def first_party_credentials(monkeypatch: pytest.MonkeyPatch):
+    """Both SDKs read their key from the environment when falling back."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+
+
+@pytest.fixture(autouse=True)
 def mock_client(request: pytest.FixtureRequest):
     with respx.mock(assert_all_called=False) as respx_mock:
         if request.node.get_closest_marker("mock_models"):
@@ -104,22 +104,28 @@ def mock_client(request: pytest.FixtureRequest):
 
 @pytest.fixture
 def model():
-    return Model(name="gpt-4o-mini", tpm=1000, rpm=6)
+    """An unbound deployment, for the utilization arithmetic on its own."""
+    return OpenAIModel(name="gpt-4o-mini", tpm=1000, rpm=6)
 
 
 @pytest.fixture
-def deployment():
-    return OpenAIDeployment(openai_config("test1"))
+def foundry():
+    return openai_foundry("test1")
+
+
+@pytest.fixture
+def deployment(foundry: Foundry) -> OpenAIModel:
+    return cast(OpenAIModel, foundry.models["gpt-4o-mini"])
 
 
 @pytest.fixture
 async def switchboard():
-    deployments = [
-        openai_config("test1"),
-        openai_config("test2"),
-        openai_config("test3"),
+    foundries = [
+        openai_foundry("test1"),
+        openai_foundry("test2"),
+        openai_foundry("test3"),
     ]
-    async with Switchboard(deployments=deployments, ratelimit_window=0) as sb:
+    async with Switchboard(foundries=foundries, ratelimit_window=0) as sb:
         yield sb
 
 
@@ -127,6 +133,9 @@ COMPLETION_PARAMS: dict[Literal["model", "messages"], Any] = {
     "model": "gpt-4o-mini",
     "messages": [{"role": "user", "content": "Hello, world!"}],
 }
+
+# A deployment is the model, so calls made directly against one carry no model=.
+COMPLETION_BODY: dict[str, Any] = {"messages": COMPLETION_PARAMS["messages"]}
 
 COMPLETION_STREAM_CHUNKS = [
     ChatCompletionChunk(
@@ -244,6 +253,11 @@ PARSED_COMPLETION_PARAMS = {
     "response_format": WeatherResult,
 }
 
+PARSED_COMPLETION_BODY = {
+    "messages": PARSED_COMPLETION_PARAMS["messages"],
+    "response_format": WeatherResult,
+}
+
 PARSED_RESPONSE = ParsedChatCompletion[WeatherResult](
     id="chatcmpl-parsed-test",
     choices=[
@@ -274,15 +288,14 @@ PARSED_RESPONSE = ParsedChatCompletion[WeatherResult](
 # --- Anthropic Messages API fixtures ------------------------------------
 
 
-def anthropic_config(name: str = "foundry") -> AnthropicConfig:
-    """Create an Anthropic Foundry deployment config for testing."""
-    return AnthropicConfig(
+def anthropic_foundry(name: str = "foundry") -> Foundry:
+    """A Foundry resource hosting the Messages API models used in tests."""
+    return Foundry(
         name=name,
-        resource=name,
         api_key=name,
         models=[
-            Model(name="claude-sonnet-5", tpm=10000, rpm=60),
-            Model(name="claude-haiku-4-5", tpm=10000, rpm=60),
+            AnthropicModel(name="claude-sonnet-5", tpm=10000, rpm=60),
+            AnthropicModel(name="claude-haiku-4-5", tpm=10000, rpm=60),
         ],
     )
 
@@ -303,18 +316,23 @@ def message_mock():
 
 
 @pytest.fixture
-def anthropic_deployment():
-    return AnthropicDeployment(anthropic_config("test1"))
+def anthropic_resource():
+    return anthropic_foundry("test1")
+
+
+@pytest.fixture
+def anthropic_deployment(anthropic_resource: Foundry) -> AnthropicModel:
+    return cast(AnthropicModel, anthropic_resource.models["claude-sonnet-5"])
 
 
 @pytest.fixture
 async def anthropic_switchboard():
-    deployments = [
-        anthropic_config("test1"),
-        anthropic_config("test2"),
-        anthropic_config("test3"),
+    foundries = [
+        anthropic_foundry("test1"),
+        anthropic_foundry("test2"),
+        anthropic_foundry("test3"),
     ]
-    async with Switchboard(deployments=deployments, ratelimit_window=0) as sb:
+    async with Switchboard(foundries=foundries, ratelimit_window=0) as sb:
         yield sb
 
 
@@ -322,6 +340,11 @@ MESSAGE_PARAMS: dict[str, Any] = {
     "model": "claude-sonnet-5",
     "max_tokens": 1024,
     "messages": [{"role": "user", "content": "Hello, world!"}],
+}
+
+MESSAGE_BODY: dict[str, Any] = {
+    "max_tokens": MESSAGE_PARAMS["max_tokens"],
+    "messages": MESSAGE_PARAMS["messages"],
 }
 
 MESSAGE_RESPONSE_JSON = {

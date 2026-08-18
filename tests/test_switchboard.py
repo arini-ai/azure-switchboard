@@ -7,19 +7,19 @@ from anthropic import APIConnectionError
 from httpx import Request
 from pydantic import BaseModel
 
-from azure_switchboard import Model, OpenAIConfig, Switchboard, SwitchboardError
-from azure_switchboard.anthropic_api import AnthropicDeployment
-from azure_switchboard.openai_api import OpenAIDeployment
+from azure_switchboard import Foundry, OpenAIModel, Switchboard, SwitchboardError
+from azure_switchboard.anthropic_model import AnthropicModel
+from azure_switchboard.model import ModelBase
 
 from .conftest import (
     COMPLETION_PARAMS,
     COMPLETION_RESPONSE,
     MESSAGE_PARAMS,
-    anthropic_config,
+    anthropic_foundry,
     chat_completion_mock,
     collect_chunks,
     message_mock,
-    openai_config,
+    openai_foundry,
 )
 
 
@@ -52,7 +52,7 @@ class TestSwitchboard:
     async def test_streaming(self, switchboard: Switchboard):
         """Test streaming through switchboard."""
 
-        with patch("azure_switchboard.openai_api.OpenAIDeployment.create") as mock:
+        with patch("azure_switchboard.openai_model.OpenAIModel.create") as mock:
             mock.side_effect = chat_completion_mock()
             stream = await switchboard.chat.completions.create(
                 stream=True, **COMPLETION_PARAMS
@@ -68,9 +68,9 @@ class TestSwitchboard:
     ):
         """Test basic selection invariants"""
         client = switchboard.select_deployment(model="gpt-4o-mini")
-        assert client.config.name in switchboard.deployments
+        assert client.foundry.name in switchboard.foundries
 
-        deployments = list(switchboard.deployments.values())
+        deployments = list(switchboard.foundries.values())
         assert len(deployments) == 3, "Need exactly 3 deployments for this test"
 
         # Initial request should work
@@ -93,18 +93,18 @@ class TestSwitchboard:
         assert mock_client["azure"].call_count == 3
         host_2 = mock_client["azure"].calls.last.request.url.host
 
-        # Mark last deployment as unhealthy — all three are now down.
-        # Switchboard falls back to an unhealthy deployment rather than failing.
+        # Mark last deployment as unhealthy — all three are now down, and with
+        # no fallback configured there is nothing left to select.
         deployments[2].models["gpt-4o-mini"].mark_down()
-        response = await switchboard.chat.completions.create(**COMPLETION_PARAMS)
-        assert response == COMPLETION_RESPONSE
-        assert mock_client["azure"].call_count == 4
+        with pytest.raises(SwitchboardError, match="No deployments available"):
+            await switchboard.chat.completions.create(**COMPLETION_PARAMS)
+        assert mock_client["azure"].call_count == 3
 
         # Restore first deployment
         deployments[0].models["gpt-4o-mini"].mark_up()
         response = await switchboard.chat.completions.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
-        assert mock_client["azure"].call_count == 5
+        assert mock_client["azure"].call_count == 4
         host_4 = mock_client["azure"].calls.last.request.url.host
 
         assert len(set([host_0, host_1, host_2, host_4])) > 1
@@ -115,42 +115,40 @@ class TestSwitchboard:
         # Test consistent deployment selection for session
         client_1 = switchboard.select_deployment(session_id="test", model="gpt-4o-mini")
         client_2 = switchboard.select_deployment(session_id="test", model="gpt-4o-mini")
-        assert client_1.config.name == client_2.config.name
+        assert client_1.foundry.name == client_2.foundry.name
 
         # Test failover when selected deployment is unhealthy
-        client_1.models["gpt-4o-mini"].mark_down()
+        client_1.mark_down()
         client_3 = switchboard.select_deployment(session_id="test", model="gpt-4o-mini")
-        assert client_3.config.name != client_1.config.name
+        assert client_3.foundry.name != client_1.foundry.name
 
         # Test session maintains failover assignment
         client_4 = switchboard.select_deployment(session_id="test", model="gpt-4o-mini")
-        assert client_4.config.name == client_3.config.name
+        assert client_4.foundry.name == client_3.foundry.name
 
     async def test_session_cached_deployment_missing_model_does_not_keyerror(self):
         """Session fallback should handle model-missing deployments without KeyError."""
         switchboard = Switchboard(
-            deployments=[
-                OpenAIConfig(
+            foundries=[
+                Foundry(
                     name="mini-only",
-                    base_url="https://mini-only.openai.azure.com/openai/v1/",
                     api_key="mini-only",
-                    models=[Model(name="gpt-4o-mini", tpm=1000, rpm=6)],
+                    models=[OpenAIModel(name="gpt-4o-mini", tpm=1000, rpm=6)],
                 ),
-                OpenAIConfig(
+                Foundry(
                     name="full-only",
-                    base_url="https://full-only.openai.azure.com/openai/v1/",
                     api_key="full-only",
-                    models=[Model(name="gpt-4o", tpm=1000, rpm=6)],
+                    models=[OpenAIModel(name="gpt-4o", tpm=1000, rpm=6)],
                 ),
             ],
             ratelimit_window=0,
         )
 
-        # Session points to a deployment that does not have gpt-4o.
-        switchboard.sessions["test"] = switchboard.deployments["mini-only"]
+        # Session is pinned to a foundry that does not host gpt-4o.
+        switchboard.sessions["test"] = switchboard.foundries["mini-only"]
 
         selection = switchboard.select_deployment(session_id="test", model="gpt-4o")
-        assert selection.name == "full-only"
+        assert selection.foundry.name == "full-only"
         assert switchboard.sessions["test"].name == "full-only"
 
     @pytest.mark.mock_models("gpt-4o-mini")
@@ -198,32 +196,92 @@ class TestSwitchboard:
         assert switchboard.sessions[session_id] == fallback_deployment
 
     @pytest.mark.mock_models("gpt-4o-mini", "openai")
-    async def test_multiple_deployment_types(self, mock_client: respx.MockRouter):
-        """Test that both Azure and OpenAI deployments work together."""
+    async def test_first_party_fallback(self, mock_client: respx.MockRouter):
+        """The vendor's own API is what selection reaches for once the pool
+        has nothing healthy left."""
         switchboard = Switchboard(
-            deployments=[openai_config("test1"), openai_config("openai", azure=False)]
+            foundries=[openai_foundry("test1")], openai_fallback=True
         )
 
-        assert len(switchboard.deployments) == 2
-        assert "test1" in switchboard.deployments
-        assert "openai" in switchboard.deployments
+        # healthy pool: the fallback is not touched
+        await switchboard.chat.completions.create(**COMPLETION_PARAMS)
+        assert mock_client["azure"].call_count == 1
+        assert mock_client["openai"].call_count == 0
 
-        # make azure deployment unhealthy, should route to openai
-        switchboard.deployments["test1"].models["gpt-4o-mini"].mark_down()
+        switchboard.foundries["test1"].models["gpt-4o-mini"].mark_down()
         response = await switchboard.chat.completions.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
         assert mock_client["openai"].call_count == 1
 
-        # bring azure back, should route to either
-        switchboard.deployments["test1"].models["gpt-4o-mini"].mark_up()
-        response = await switchboard.chat.completions.create(**COMPLETION_PARAMS)
-        assert response == COMPLETION_RESPONSE
+    async def test_first_party_fallback_serves_unconfigured_models(self):
+        """A model on no foundry at all still routes, when fallback is on."""
+        switchboard = Switchboard(
+            foundries=[openai_foundry("test1")], openai_fallback=True
+        )
+        selection = switchboard.select_deployment(model="gpt-5.4")
+        assert selection.foundry.name == "first-party-openai"
 
-        # make both unhealthy — switchboard falls back to an unhealthy deployment
-        switchboard.deployments["test1"].models["gpt-4o-mini"].mark_down()
-        switchboard.deployments["openai"].models["gpt-4o-mini"].mark_down()
-        response = await switchboard.chat.completions.create(**COMPLETION_PARAMS)
-        assert response == COMPLETION_RESPONSE
+    async def test_first_party_fallback_can_itself_be_marked_down(self):
+        """A rate-limited first-party API should not be hammered either."""
+        switchboard = Switchboard(
+            foundries=[openai_foundry("test1")], openai_fallback=True
+        )
+        switchboard.foundries["test1"].models["gpt-4o-mini"].mark_down()
+
+        fallback = switchboard.select_deployment(model="gpt-4o-mini")
+        fallback.mark_down()
+
+        with pytest.raises(SwitchboardError, match="No deployments available"):
+            switchboard.select_deployment(model="gpt-4o-mini")
+
+    async def test_no_fallback_configured_raises(self):
+        switchboard = Switchboard(foundries=[openai_foundry("test1")])
+        switchboard.foundries["test1"].models["gpt-4o-mini"].mark_down()
+
+        with pytest.raises(SwitchboardError, match="No deployments available"):
+            switchboard.select_deployment(model="gpt-4o-mini")
+
+    async def test_anthropic_first_party_fallback(self):
+        switchboard = Switchboard(
+            foundries=[anthropic_foundry("ant1")], anthropic_fallback=True
+        )
+        switchboard.foundries["ant1"].models["claude-sonnet-5"].mark_down()
+
+        selection = switchboard.select_deployment(model="claude-sonnet-5")
+        assert isinstance(selection, AnthropicModel)
+        assert selection.foundry.name == "first-party-anthropic"
+
+    async def test_each_fallback_is_scoped_to_its_own_api(self):
+        """The two vendors are separate hosts, so one going down must not take
+        the other with it."""
+        switchboard = Switchboard(
+            foundries=[openai_foundry("oai"), anthropic_foundry("ant")],
+            openai_fallback=True,
+            anthropic_fallback=True,
+        )
+        for foundry in switchboard.foundries.values():
+            for deployment in foundry.models.values():
+                deployment.mark_down()
+
+        openai_fb = switchboard.select_deployment(model="gpt-4o-mini")
+        anthropic_fb = switchboard.select_deployment(model="claude-sonnet-5")
+        assert openai_fb.foundry is not anthropic_fb.foundry
+
+        openai_fb.foundry.mark_down()
+        assert not openai_fb.is_healthy()
+        assert anthropic_fb.is_healthy()
+
+    async def test_fallback_deployments_appear_in_stats(self):
+        switchboard = Switchboard(
+            foundries=[openai_foundry("test1")], openai_fallback=True
+        )
+        assert "first-party-openai" in switchboard.stats()
+
+    async def test_foundry_must_hold_typed_deployments(self):
+        resource = Foundry(name="odd", api_key="k")
+        resource.models["mystery"] = ModelBase(name="mystery")
+        with pytest.raises(SwitchboardError, match="not an OpenAIModel"):
+            Switchboard(foundries=[resource])
 
     def _within_bounds(self, val, min, max, tolerance=0.05):
         """Check if a value is within bounds, accounting for tolerance."""
@@ -244,7 +302,7 @@ class TestSwitchboard:
         )
 
         # Verify all deployments were used
-        for deployment in switchboard.deployments.values():
+        for deployment in switchboard.foundries.values():
             assert self._within_bounds(
                 val=deployment.models["gpt-4o-mini"].rpm_usage,
                 min=25,
@@ -256,7 +314,7 @@ class TestSwitchboard:
         """Test load distribution when some deployments are unhealthy."""
 
         # Mark one deployment as unhealthy
-        switchboard.deployments["test2"].models["gpt-4o-mini"].mark_down()
+        switchboard.foundries["test2"].models["gpt-4o-mini"].mark_down()
 
         # Make 100 requests
         for _ in range(100):
@@ -264,17 +322,17 @@ class TestSwitchboard:
 
         # Verify distribution
         assert self._within_bounds(
-            val=switchboard.deployments["test1"].models["gpt-4o-mini"].rpm_usage,
+            val=switchboard.foundries["test1"].models["gpt-4o-mini"].rpm_usage,
             min=40,
             max=60,
         )
         assert self._within_bounds(
-            val=switchboard.deployments["test2"].models["gpt-4o-mini"].rpm_usage,
+            val=switchboard.foundries["test2"].models["gpt-4o-mini"].rpm_usage,
             min=0,
             max=0,
         )
         assert self._within_bounds(
-            val=switchboard.deployments["test3"].models["gpt-4o-mini"].rpm_usage,
+            val=switchboard.foundries["test3"].models["gpt-4o-mini"].rpm_usage,
             min=40,
             max=60,
         )
@@ -299,7 +357,7 @@ class TestSwitchboard:
 
         # verify the load distribution is still roughly even
         # (ie, we preferred to send requests to the underutilized deployment)
-        for client in switchboard.deployments.values():
+        for client in switchboard.foundries.values():
             assert self._within_bounds(
                 val=client.models["gpt-4o-mini"].rpm_usage,
                 min=60,
@@ -329,7 +387,7 @@ class TestSwitchboard:
         request_counts = sorted(
             [
                 client.models["gpt-4o-mini"].rpm_usage
-                for client in switchboard.deployments.values()
+                for client in switchboard.foundries.values()
             ]
         )
         assert sum(request_counts) == 100
@@ -348,11 +406,11 @@ class TestSwitchboard:
 
         # nonzero ratelimit_window so the reset task actually runs
         async with Switchboard(
-            deployments=[openai_config("test1")], ratelimit_window=0.5
+            foundries=[openai_foundry("test1")], ratelimit_window=0.5
         ) as switchboard:
             assert switchboard.ratelimit_reset_task
 
-            models = [d.models["gpt-4o-mini"] for d in switchboard.deployments.values()]
+            models = [d.models["gpt-4o-mini"] for d in switchboard.foundries.values()]
             for m in models:
                 m.spend_tokens(100)
                 m.spend_request()
@@ -370,8 +428,8 @@ class TestSwitchboard:
     async def test_no_deployments(self):
         """Test that the switchboard raises an error if no deployments are provided."""
 
-        with pytest.raises(SwitchboardError, match="No deployments provided"):
-            Switchboard(deployments=[])
+        with pytest.raises(SwitchboardError, match="No foundries provided"):
+            Switchboard(foundries=[])
 
     async def test_invalid_model(self, switchboard: Switchboard):
         """Test that an invalid model is not eligible on a deployment."""
@@ -384,55 +442,55 @@ class TestSwitchboard:
                 model="invalid-model", messages=[]
             )
 
-    @pytest.mark.mock_models("openai")
+    @pytest.mark.mock_models("gpt-4o-mini")
     async def test_single_deployment(self, mock_client: respx.MockRouter):
-        """Test the edge case where only a single deployment is configured."""
-        switchboard = Switchboard(deployments=[openai_config("openai", azure=False)])
-        assert len(switchboard.deployments) == 1
+        """Test the edge case where only a single foundry is configured."""
+        switchboard = Switchboard(foundries=[openai_foundry("solo")])
+        assert len(switchboard.foundries) == 1
 
-        # Verify that the deployment is selected
-        deployment = switchboard.select_deployment(model="gpt-4o-mini")
-        assert deployment == switchboard.deployments["openai"]
+        only = switchboard.foundries["solo"].models["gpt-4o-mini"]
+        assert switchboard.select_deployment(model="gpt-4o-mini") is only
 
         # Verify with session_id
-        deployment_with_session = switchboard.select_deployment(
-            model="gpt-4o-mini", session_id="test"
+        assert (
+            switchboard.select_deployment(model="gpt-4o-mini", session_id="test")
+            is only
         )
-        assert deployment_with_session == switchboard.deployments["openai"]
-        assert switchboard.sessions["test"] == switchboard.deployments["openai"]
+        assert switchboard.sessions["test"] is switchboard.foundries["solo"]
 
         # Verify that requests work correctly
         response = await switchboard.chat.completions.create(**COMPLETION_PARAMS)
         assert response == COMPLETION_RESPONSE
-        assert mock_client["openai"].call_count == 1
-
-    @pytest.mark.mock_models("gpt-4o-mini")
-    async def test_all_deployments_unhealthy_falls_back(
-        self, mock_client: respx.MockRouter
-    ):
-        """When all deployments are unhealthy, switchboard falls back rather than failing."""
-        switchboard = Switchboard(deployments=[openai_config("test1")])
-
-        # Mark the deployment as unhealthy
-        switchboard.deployments["test1"].models["gpt-4o-mini"].mark_down()
-
-        # Should fall back to the unhealthy deployment and succeed
-        response = await switchboard.chat.completions.create(**COMPLETION_PARAMS)
-        assert response == COMPLETION_RESPONSE
         assert mock_client["azure"].call_count == 1
 
-    async def test_duplicate_deployment_names(self):
-        """Test that duplicate deployment names raise an error."""
-        with pytest.raises(SwitchboardError, match="Duplicate deployment name: test1"):
-            Switchboard(deployments=[openai_config("test1"), openai_config("test1")])
+    @pytest.mark.mock_models("gpt-4o-mini")
+    async def test_all_deployments_unhealthy_raises(
+        self, mock_client: respx.MockRouter
+    ):
+        """Without a fallback there is no honest answer but to fail.
+
+        Pre-Foundry this handed back a cooling deployment, because failing was
+        worse. openai_fallback=True is the real alternative now.
+        """
+        switchboard = Switchboard(foundries=[openai_foundry("test1")])
+        switchboard.foundries["test1"].models["gpt-4o-mini"].mark_down()
+
+        with pytest.raises(SwitchboardError, match="No deployments available"):
+            await switchboard.chat.completions.create(**COMPLETION_PARAMS)
+        assert mock_client["azure"].call_count == 0
+
+    async def test_duplicate_foundry_names(self):
+        """Test that duplicate foundry names raise an error."""
+        with pytest.raises(SwitchboardError, match="Duplicate foundry name: test1"):
+            Switchboard(foundries=[openai_foundry("test1"), openai_foundry("test1")])
 
     async def test_handle_cancelled_error(self):
         """Test that Switchboard.create properly propagates asyncio.CancelledError."""
-        switchboard = Switchboard(deployments=[openai_config("test1")])
+        switchboard = Switchboard(foundries=[openai_foundry("test1")])
 
         # Patch the underlying deployment.create to raise CancelledError
         with patch.object(
-            switchboard.deployments["test1"],
+            switchboard.foundries["test1"].models["gpt-4o-mini"],
             "create",
             side_effect=asyncio.CancelledError,
         ):
@@ -442,23 +500,23 @@ class TestSwitchboard:
 
         # Verify that the deployment is still selected as expected after cancellation
         deployment = switchboard.select_deployment(model="gpt-4o-mini")
-        assert deployment == switchboard.deployments["test1"]
+        assert deployment.foundry is switchboard.foundries["test1"]
 
         deployment_with_session = switchboard.select_deployment(
             model="gpt-4o-mini", session_id="test"
         )
-        assert deployment_with_session == switchboard.deployments["test1"]
-        assert switchboard.sessions["test"] == switchboard.deployments["test1"]
+        assert deployment_with_session.foundry is switchboard.foundries["test1"]
+        assert switchboard.sessions["test"] is switchboard.foundries["test1"]
 
 
 @pytest.fixture
 async def mixed():
     async with Switchboard(
-        deployments=[
-            openai_config("oai1"),
-            openai_config("oai2"),
-            anthropic_config("ant1"),
-            anthropic_config("ant2"),
+        foundries=[
+            openai_foundry("oai1"),
+            openai_foundry("oai2"),
+            anthropic_foundry("ant1"),
+            anthropic_foundry("ant2"),
         ],
         ratelimit_window=0,
     ) as sb:
@@ -468,18 +526,23 @@ async def mixed():
 class TestMixedPoolSelection:
     """A single Switchboard holding both OpenAI and Anthropic deployments."""
 
-    def test_builds_the_right_runtime_per_config(self, mixed: Switchboard):
-        assert isinstance(mixed.deployments["oai1"], OpenAIDeployment)
-        assert isinstance(mixed.deployments["ant1"], AnthropicDeployment)
+    def test_pools_by_api_not_by_foundry(self, mixed: Switchboard):
+        assert set(mixed._openai_pool) == {"gpt-4o-mini", "gpt-4o"}
+        assert set(mixed._anthropic_pool) == {"claude-sonnet-5", "claude-haiku-4-5"}
+        assert all(
+            isinstance(d, OpenAIModel) for d in mixed._openai_pool["gpt-4o-mini"]
+        )
+        assert all(
+            isinstance(d, AnthropicModel)
+            for d in mixed._anthropic_pool["claude-sonnet-5"]
+        )
 
     def test_model_name_routes_to_its_provider(self, mixed: Switchboard):
         """Model names are unique to a provider, so the name alone routes."""
         for _ in range(20):
+            assert isinstance(mixed.select_deployment(model="gpt-4o-mini"), OpenAIModel)
             assert isinstance(
-                mixed.select_deployment(model="gpt-4o-mini"), OpenAIDeployment
-            )
-            assert isinstance(
-                mixed.select_deployment(model="claude-sonnet-5"), AnthropicDeployment
+                mixed.select_deployment(model="claude-sonnet-5"), AnthropicModel
             )
 
     def test_stats_span_both_providers(self, mixed: Switchboard):
@@ -488,11 +551,13 @@ class TestMixedPoolSelection:
         assert "claude-sonnet-5" in stats["ant1"]
 
     def test_reset_usage_spans_both_providers(self, mixed: Switchboard):
-        mixed.deployments["oai1"].model("gpt-4o-mini").spend_tokens(100)
-        mixed.deployments["ant1"].model("claude-sonnet-5").spend_tokens(100)
+        oai = mixed.foundries["oai1"].models["gpt-4o-mini"]
+        ant = mixed.foundries["ant1"].models["claude-sonnet-5"]
+        oai.spend_tokens(100)
+        ant.spend_tokens(100)
         mixed.reset_usage()
-        assert mixed.deployments["oai1"].model("gpt-4o-mini").tpm_usage == 0
-        assert mixed.deployments["ant1"].model("claude-sonnet-5").tpm_usage == 0
+        assert oai.tpm_usage == 0
+        assert ant.tpm_usage == 0
 
 
 class TestMixedPoolSessionAffinity:
@@ -508,19 +573,19 @@ class TestMixedPoolSessionAffinity:
         requested model, so one session_id spanning both APIs is safe."""
         chat = mixed.select_deployment(model="gpt-4o-mini", session_id="shared")
         msgs = mixed.select_deployment(model="claude-sonnet-5", session_id="shared")
-        assert isinstance(chat, OpenAIDeployment)
-        assert isinstance(msgs, AnthropicDeployment)
+        assert isinstance(chat, OpenAIModel)
+        assert isinstance(msgs, AnthropicModel)
 
 
 class TestMixedPoolDispatch:
     async def test_both_surfaces_route_correctly(self, mixed: Switchboard):
         with patch(
-            "azure_switchboard.openai_api.OpenAIDeployment.create",
+            "azure_switchboard.openai_model.OpenAIModel.create",
             side_effect=chat_completion_mock(),
         ) as chat_mock:
             await mixed.chat.completions.create(**COMPLETION_PARAMS)
         with patch(
-            "azure_switchboard.anthropic_api.AnthropicDeployment.messages",
+            "azure_switchboard.anthropic_model.AnthropicModel.create",
             side_effect=message_mock(),
         ) as msg_mock:
             await mixed.messages.create(**MESSAGE_PARAMS)
@@ -530,7 +595,7 @@ class TestMixedPoolDispatch:
 
     async def test_parse_messages_routes_to_the_messages_api(self, mixed: Switchboard):
         with patch(
-            "azure_switchboard.anthropic_api.AnthropicDeployment.parse",
+            "azure_switchboard.anthropic_model.AnthropicModel.parse",
             side_effect=message_mock(),
         ) as mock:
             await mixed.messages.parse(
@@ -549,15 +614,15 @@ class TestMixedPoolDispatch:
         is skipped on retry rather than failing the request."""
         calls = []
 
-        async def flaky(self, *, model, **kwargs):
-            calls.append(self.name)
+        async def flaky(self, **kwargs):
+            calls.append(self.foundry.name)
             if len(calls) == 1:
-                self.model(model).mark_down()
+                self.mark_down()
                 raise APIConnectionError(request=Request("POST", "https://x/"))
             return "ok"
 
         with patch(
-            "azure_switchboard.anthropic_api.AnthropicDeployment.messages", new=flaky
+            "azure_switchboard.anthropic_model.AnthropicModel.create", new=flaky
         ):
             assert await mixed.messages.create(**MESSAGE_PARAMS) == "ok"
 
@@ -573,36 +638,112 @@ class TestMixedPoolDispatch:
 
 
 class TestMixedPoolConstruction:
-    def test_model_registered_on_both_providers_rejected(self):
-        """Routing is by model name alone, so a name shared across providers
-        would make the serving surface ambiguous. Reject it up front."""
-        with pytest.raises(SwitchboardError, match="must belong to exactly one"):
-            Switchboard(
-                deployments=[
-                    OpenAIConfig(
-                        name="compat",
-                        base_url="https://r.services.ai.azure.com/openai/v1/",
-                        api_key="k",
-                        models=[Model(name="claude-sonnet-5")],
-                    ),
-                    anthropic_config("native"),
-                ]
-            )
+    def test_model_name_may_belong_to_both_providers(self):
+        """The calling surface picks the pool, so a shared name is unambiguous.
 
-    def test_same_model_on_many_deployments_of_one_provider_is_fine(self):
-        """Sharing a model across deployments is the whole point of the pool."""
+        Pre-Foundry this had to be rejected at construction: one flat pool keyed
+        by model name could not say which API a name spoke.
+        """
         sb = Switchboard(
-            deployments=[openai_config("a"), openai_config("b"), openai_config("c")]
+            foundries=[
+                Foundry(
+                    name="compat",
+                    api_key="k",
+                    models=[OpenAIModel(name="claude-sonnet-5")],
+                ),
+                anthropic_foundry("native"),
+            ]
         )
-        assert len(sb.deployments) == 3
 
-    def test_duplicate_names_across_providers_rejected(self):
-        with pytest.raises(SwitchboardError, match="Duplicate deployment name"):
+        assert sb._openai_pool["claude-sonnet-5"][0].foundry.name == "compat"
+        assert sb._anthropic_pool["claude-sonnet-5"][0].foundry.name == "native"
+
+    def test_same_model_on_many_foundries_is_fine(self):
+        """Sharing a model across resources is the whole point of the pool."""
+        sb = Switchboard(
+            foundries=[openai_foundry("a"), openai_foundry("b"), openai_foundry("c")]
+        )
+        assert len(sb.foundries) == 3
+        assert len(sb._openai_pool["gpt-4o-mini"]) == 3
+
+    def test_duplicate_foundry_names_rejected(self):
+        with pytest.raises(SwitchboardError, match="Duplicate foundry name"):
             Switchboard(
-                deployments=[
-                    OpenAIConfig(
-                        name="dup", api_key="k", models=[Model(name="gpt-4o")]
+                foundries=[
+                    Foundry(
+                        name="dup", api_key="k", models=[OpenAIModel(name="gpt-4o")]
                     ),
-                    anthropic_config("dup"),
+                    anthropic_foundry("dup"),
                 ]
             )
+
+    def test_duplicate_model_on_one_foundry_rejected(self):
+        with pytest.raises(SwitchboardError, match="duplicate model"):
+            Foundry(
+                name="r",
+                api_key="k",
+                models=[OpenAIModel(name="gpt-4o"), OpenAIModel(name="gpt-4o")],
+            )
+
+    def test_one_foundry_serves_both_apis(self):
+        """The case the pre-Foundry model could not express at all.
+
+        Both deployments share one resource, one credential, and one endpoint
+        host, but each gets the client for the API it speaks.
+        """
+        resource = Foundry(
+            name="east",
+            api_key="k",
+            models=[
+                OpenAIModel(name="gpt-4o-mini"),
+                AnthropicModel(name="claude-sonnet-5"),
+            ],
+        )
+        sb = Switchboard(foundries=[resource])
+
+        assert sb._openai_pool["gpt-4o-mini"][0].foundry is resource
+        assert sb._anthropic_pool["claude-sonnet-5"][0].foundry is resource
+        assert (
+            resource.base_url(resource.models["gpt-4o-mini"])
+            == "https://east.services.ai.azure.com/openai/v1/"
+        )
+        assert (
+            resource.base_url(resource.models["claude-sonnet-5"])
+            == "https://east.services.ai.azure.com/anthropic/"
+        )
+
+    def test_endpoint_override_wins(self):
+        """Legacy <resource>.openai.azure.com hosts stay reachable."""
+        resource = Foundry(
+            name="legacy",
+            api_key="k",
+            models=[
+                OpenAIModel(
+                    name="gpt-4o",
+                    endpoint="https://legacy.openai.azure.com/openai/v1/",
+                )
+            ],
+        )
+        assert (
+            resource.base_url(resource.models["gpt-4o"])
+            == "https://legacy.openai.azure.com/openai/v1/"
+        )
+
+    def test_one_client_per_api_per_foundry(self):
+        """Two deployments of the same API share a connection pool."""
+        resource = Foundry(
+            name="east",
+            api_key="k",
+            models=[OpenAIModel(name="gpt-4o-mini"), OpenAIModel(name="gpt-4o")],
+        )
+        a, b = resource.models["gpt-4o-mini"], resource.models["gpt-4o"]
+        assert a.client is b.client
+
+    def test_client_is_built_only_for_the_apis_in_use(self):
+        resource = Foundry(
+            name="east", api_key="k", models=[OpenAIModel(name="gpt-4o-mini")]
+        )
+        _ = resource.models["gpt-4o-mini"].client
+        assert list(resource._clients) == [
+            ("openai", "https://east.services.ai.azure.com/openai/v1/")
+        ]
