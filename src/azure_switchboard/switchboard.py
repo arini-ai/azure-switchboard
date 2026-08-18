@@ -174,7 +174,7 @@ class Switchboard:
         self, *, model: str, session_id: str | None = None
     ) -> DeploymentBase:
         """
-        Select a deployment using the power of two random choices algorithm.
+        Select a deployment using the configured selection algorithm.
         If session_id is provided, try to use that specific deployment first.
         """
         if session_id and session_id in self.sessions:
@@ -226,11 +226,7 @@ class Switchboard:
 
 
 class _Chat:
-    """Mirrors `openai.AsyncOpenAI.chat`."""
-
     class Completions:
-        """Mirrors `openai.AsyncOpenAI.chat.completions`."""
-
         def __init__(self, sb: Switchboard) -> None:
             self.sb = sb
 
@@ -241,17 +237,11 @@ class _Chat:
             session_id: str | None,
             call: Callable[[OpenAIDeployment], Awaitable[_R]],
         ) -> _R:  # pyright: ignore[reportReturnType]
-            """Select a deployment and issue `call` against it, with failover.
-
-            Duplicated in _Messages; keep them in step. `failover_policy.copy()`
-            must stay per-call so concurrent requests don't share retry state (#62).
-            """
             with logger.contextualize(model=model, session_id=session_id):
+                # failover_policy is copied so concurrent requests
+                # dont share retry state
                 async for attempt in self.sb.failover_policy.copy():
                     with attempt:
-                        # Sound because a model name maps to one provider,
-                        # enforced at construction. Unchecked, so a
-                        # wrong-surface call fails as an AttributeError.
                         deployment = cast(
                             OpenAIDeployment,
                             self.sb.select_deployment(
@@ -284,9 +274,6 @@ class _Chat:
             stream: bool = False,
             **kwargs,
         ) -> ChatCompletion | AsyncStream[ChatCompletionChunk]:
-            """
-            Send a chat completion request to the selected deployment, with automatic failover.
-            """
             return await self._dispatch(
                 model=model,
                 session_id=session_id,
@@ -301,10 +288,6 @@ class _Chat:
             session_id: str | None = None,
             **kwargs,
         ) -> ParsedChatCompletion[_T]:
-            """
-            Send a structured output parse request to the selected deployment, with
-            automatic failover.
-            """
             return await self._dispatch(
                 model=model,
                 session_id=session_id,
@@ -318,11 +301,10 @@ class _Chat:
 
 
 class _Messages:
-    """Mirrors `anthropic.AsyncAnthropic.messages`."""
-
     def __init__(self, sb: Switchboard) -> None:
         self.sb = sb
 
+    # duplicated with impl in _Chat to avoid fighting the type checker
     async def _dispatch(
         self,
         *,
@@ -330,17 +312,11 @@ class _Messages:
         session_id: str | None,
         call: Callable[[AnthropicDeployment], Awaitable[_R]],
     ) -> _R:  # pyright: ignore[reportReturnType]
-        """Select a deployment and issue `call` against it, with failover.
-
-        Duplicated in _Chat.Completions; keep them in step. `failover_policy.copy()`
-        must stay per-call so concurrent requests don't share retry state (#62).
-        """
         with logger.contextualize(model=model, session_id=session_id):
+            # failover_policy is copied so concurrent requests
+            # dont share retry state
             async for attempt in self.sb.failover_policy.copy():
                 with attempt:
-                    # Sound because a model name maps to one provider, enforced
-                    # at construction. Unchecked, so a wrong-surface call fails
-                    # as an AttributeError.
                     deployment = cast(
                         AnthropicDeployment,
                         self.sb.select_deployment(model=model, session_id=session_id),
@@ -389,10 +365,6 @@ class _Messages:
         session_id: str | None = None,
         **kwargs,
     ) -> ParsedMessage[_T]:
-        """
-        Send a Messages API structured output request to the selected
-        deployment, with automatic failover.
-        """
         return await self._dispatch(
             model=model,
             session_id=session_id,
