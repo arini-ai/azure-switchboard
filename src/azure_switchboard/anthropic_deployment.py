@@ -33,7 +33,7 @@ class AnthropicDeployment(ModelDeployment):
         if self.endpoint:
             return self.endpoint
         base = self.resource.base
-        return f"{base}anthropic/" if base else None
+        return f"{base}/anthropic/" if base else None
 
     def new_client(self) -> AsyncAnthropic:
         # AsyncAnthropicFoundry overrides auth to send Azure's api-key header,

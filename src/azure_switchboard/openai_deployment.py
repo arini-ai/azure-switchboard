@@ -36,7 +36,7 @@ class OpenAIDeployment(ModelDeployment):
         if self.endpoint:
             return self.endpoint
         base = self.resource.base
-        return f"{base}openai/v1/" if base else None
+        return f"{base}/openai/v1/" if base else None
 
     def new_client(self) -> AsyncOpenAI:
         return AsyncOpenAI(

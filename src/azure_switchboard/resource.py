@@ -20,7 +20,8 @@ class Resource(Cooldown):
     """Somewhere deployments live: a credential, a timeout, and the clients
     they share.
 
-    `base` is the URL prefix a deployment appends its API path to. Without one,
+    `base` is the origin a deployment appends its API path to, with no trailing
+    slash, so a deployment writes f"{base}/openai/v1/". Without one,
     each SDK falls back to its vendor default — which is how the vendors' own
     APIs are reached.
     """
@@ -90,7 +91,7 @@ class Foundry(Resource):
     deployments it hosts.
 
     `name` is the Azure resource name and resolves to
-    `https://{name}.services.ai.azure.com/`, onto which each model appends the
+    `https://{name}.services.ai.azure.com`, onto which each model appends the
     path for the API it speaks. A model can override the whole URL with
     `endpoint=`, which covers legacy `<resource>.openai.azure.com` resources
     and non-Azure hosts.
@@ -109,7 +110,7 @@ class Foundry(Resource):
         # before any deployment is added and builds its client against it
         super().__init__(
             name,
-            base=f"https://{name}.services.ai.azure.com/",
+            base=f"https://{name}.services.ai.azure.com",
             api_key=api_key,
             timeout=timeout,
             models=models,
