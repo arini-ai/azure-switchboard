@@ -24,10 +24,6 @@ from .model import ModelBase
 
 _T = TypeVar("_T", bound=BaseModel)
 
-# Azure OpenAI is reached through the same client as OpenAI, via base_url, so
-# AsyncAzureOpenAI never appears here. It subclasses AsyncOpenAI in any case.
-OpenAIClient = AsyncOpenAI
-
 
 class OpenAIDeployment(ModelBase):
     """A model deployment speaking the Chat Completions API."""
@@ -40,7 +36,7 @@ class OpenAIDeployment(ModelBase):
         return f"{base}openai/v1/" if base else None
 
     @property
-    def client(self) -> OpenAIClient:
+    def client(self) -> AsyncOpenAI:
         foundry, url = self.foundry, self.url
         return foundry.openai_client(
             url,

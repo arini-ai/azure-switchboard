@@ -3,10 +3,13 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Iterable
 
-from .anthropic_deployment import AnthropicClient, AnthropicDeployment
+from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI
+
+from .anthropic_deployment import AnthropicDeployment
 from .exceptions import SwitchboardError
 from .model import UtilStats
-from .openai_deployment import OpenAIClient, OpenAIDeployment
+from .openai_deployment import OpenAIDeployment
 
 # Every deployment speaks one of the APIs switchboard serves. ModelBase carries
 # the quota and cooldown machinery they share and bounds the generic selection
@@ -44,8 +47,10 @@ class Foundry:
         self.base: str | None = f"https://{name}.services.ai.azure.com/"
 
         # Keyed by URL: within one API, that is what distinguishes a client.
-        self._openai_clients: dict[str | None, OpenAIClient] = {}
-        self._anthropic_clients: dict[str | None, AnthropicClient] = {}
+        # AsyncAnthropicFoundry subclasses AsyncAnthropic, and AsyncAzureOpenAI
+        # subclasses AsyncOpenAI, so the base types cover every variant.
+        self._openai_clients: dict[str | None, AsyncOpenAI] = {}
+        self._anthropic_clients: dict[str | None, AsyncAnthropic] = {}
 
         self.models: dict[str, Deployment] = {}
         for model in models:
@@ -58,8 +63,8 @@ class Foundry:
         self.models[model.name] = model
 
     def openai_client(
-        self, url: str | None, build: Callable[[], OpenAIClient]
-    ) -> OpenAIClient:
+        self, url: str | None, build: Callable[[], AsyncOpenAI]
+    ) -> AsyncOpenAI:
         """Share one client across the deployments served from the same URL.
 
         Two deployments of this API on this resource share a connection pool;
@@ -70,8 +75,8 @@ class Foundry:
         return self._openai_clients[url]
 
     def anthropic_client(
-        self, url: str | None, build: Callable[[], AnthropicClient]
-    ) -> AnthropicClient:
+        self, url: str | None, build: Callable[[], AsyncAnthropic]
+    ) -> AsyncAnthropic:
         if url not in self._anthropic_clients:
             self._anthropic_clients[url] = build()
         return self._anthropic_clients[url]

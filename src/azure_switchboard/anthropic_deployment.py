@@ -21,10 +21,6 @@ from .model import ModelBase
 
 _T = TypeVar("_T", bound=BaseModel)
 
-# AsyncAnthropicFoundry subclasses AsyncAnthropic, so the base type covers both
-# the Foundry client and the first-party one.
-AnthropicClient = AsyncAnthropic
-
 
 class AnthropicDeployment(ModelBase):
     """A model deployment speaking the Anthropic Messages API."""
@@ -37,7 +33,7 @@ class AnthropicDeployment(ModelBase):
         return f"{base}anthropic/" if base else None
 
     @property
-    def client(self) -> AnthropicClient:
+    def client(self) -> AsyncAnthropic:
         # AsyncAnthropicFoundry overrides auth to send Azure's api-key header,
         # so it is not interchangeable with the first-party client. No URL
         # means we are not on Foundry at all.
