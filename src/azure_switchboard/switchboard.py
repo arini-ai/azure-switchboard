@@ -35,7 +35,6 @@ from .anthropic_api import AnthropicConfig, AnthropicDeployment
 
 _T = TypeVar("_T", bound=BaseModel)
 _R = TypeVar("_R")
-_D = TypeVar("_D", bound=DeploymentBase)
 
 DeploymentSpec = OpenAIConfig | AnthropicConfig
 
@@ -235,42 +234,6 @@ class Switchboard:
         return f"Switchboard({self.deployments})"
 
 
-async def _dispatch(
-    sb: Switchboard,
-    deployment_type: type[_D],
-    *,
-    model: str,
-    session_id: str | None,
-    call: Callable[[_D], Awaitable[_R]],
-) -> _R:  # pyright: ignore[reportReturnType]
-    """Select a deployment and issue `call` against it, with failover.
-
-    `deployment_type` is the provider class whose surface `call` uses. The
-    isinstance check narrows the selection -- which routes on model name alone
-    and so doesn't know which surface asked -- to that class, which is both
-    what types the callable and what turns a wrong-surface call into a
-    SwitchboardError rather than an AttributeError.
-
-    Shared by both surfaces rather than copied into each: the per-call
-    `failover_policy.copy()` (#62) gets exactly one place to be correct.
-    """
-    with logger.contextualize(model=model, session_id=session_id):
-        async for attempt in sb.failover_policy.copy():
-            with attempt:
-                deployment = sb.select_deployment(model=model, session_id=session_id)
-                if not isinstance(deployment, deployment_type):
-                    raise SwitchboardError(
-                        f"{model} is served by {deployment.name} over the "
-                        f"{type(deployment).__name__} API, not "
-                        f"{deployment_type.__name__}"
-                    )
-                with logger.contextualize(deployment=deployment.name):
-                    logger.trace("Sending request")
-                    response = await call(deployment)
-                request_counter.add(1, {"model": model, "deployment": deployment.name})
-                return response
-
-
 class _Chat:
     """Mirrors `openai.AsyncOpenAI.chat`, whose sole member is `.completions`.
 
@@ -283,6 +246,43 @@ class _Chat:
 
         def __init__(self, sb: Switchboard) -> None:
             self.sb = sb
+
+        async def _dispatch(
+            self,
+            *,
+            model: str,
+            session_id: str | None,
+            call: Callable[[OpenAIDeployment], Awaitable[_R]],
+        ) -> _R:  # pyright: ignore[reportReturnType]
+            """Select a deployment and issue `call` against it, with failover.
+
+            Deliberately duplicated per surface rather than shared and made
+            generic: the concrete type reads plainly here, at the cost of this
+            loop existing twice. If you edit it, edit the _Messages copy too --
+            in particular `failover_policy.copy()`, which must stay per-call so
+            concurrent requests don't share retry state (#62).
+            """
+            with logger.contextualize(model=model, session_id=session_id):
+                async for attempt in self.sb.failover_policy.copy():
+                    with attempt:
+                        deployment = self.sb.select_deployment(
+                            model=model, session_id=session_id
+                        )
+                        # Selection routes on model name and doesn't know which
+                        # surface asked, so this both narrows the type and turns a
+                        # wrong-surface call into a readable error.
+                        if not isinstance(deployment, OpenAIDeployment):
+                            raise SwitchboardError(
+                                f"{model} is served by {deployment.name} over the "
+                                f"{type(deployment).__name__} API, not OpenAIDeployment"
+                            )
+                        with logger.contextualize(deployment=deployment.name):
+                            logger.trace("Sending request")
+                            response = await call(deployment)
+                        request_counter.add(
+                            1, {"model": model, "deployment": deployment.name}
+                        )
+                        return response
 
         @overload
         async def create(
@@ -305,9 +305,7 @@ class _Chat:
             """
             Send a chat completion request to the selected deployment, with automatic failover.
             """
-            return await _dispatch(
-                self.sb,
-                OpenAIDeployment,
+            return await self._dispatch(
                 model=model,
                 session_id=session_id,
                 call=lambda d: d.create(model=model, stream=stream, **kwargs),
@@ -325,9 +323,7 @@ class _Chat:
             Send a structured output parse request to the selected deployment, with
             automatic failover.
             """
-            return await _dispatch(
-                self.sb,
-                OpenAIDeployment,
+            return await self._dispatch(
                 model=model,
                 session_id=session_id,
                 call=lambda d: d.parse(
@@ -344,6 +340,43 @@ class _Messages:
 
     def __init__(self, sb: Switchboard) -> None:
         self.sb = sb
+
+    async def _dispatch(
+        self,
+        *,
+        model: str,
+        session_id: str | None,
+        call: Callable[[AnthropicDeployment], Awaitable[_R]],
+    ) -> _R:  # pyright: ignore[reportReturnType]
+        """Select a deployment and issue `call` against it, with failover.
+
+        Deliberately duplicated per surface rather than shared and made
+        generic: the concrete type reads plainly here, at the cost of this
+        loop existing twice. If you edit it, edit the _Chat.Completions copy too --
+        in particular `failover_policy.copy()`, which must stay per-call so
+        concurrent requests don't share retry state (#62).
+        """
+        with logger.contextualize(model=model, session_id=session_id):
+            async for attempt in self.sb.failover_policy.copy():
+                with attempt:
+                    deployment = self.sb.select_deployment(
+                        model=model, session_id=session_id
+                    )
+                    # Selection routes on model name and doesn't know which
+                    # surface asked, so this both narrows the type and turns a
+                    # wrong-surface call into a readable error.
+                    if not isinstance(deployment, AnthropicDeployment):
+                        raise SwitchboardError(
+                            f"{model} is served by {deployment.name} over the "
+                            f"{type(deployment).__name__} API, not AnthropicDeployment"
+                        )
+                    with logger.contextualize(deployment=deployment.name):
+                        logger.trace("Sending request")
+                        response = await call(deployment)
+                    request_counter.add(
+                        1, {"model": model, "deployment": deployment.name}
+                    )
+                    return response
 
     @overload
     async def create(
@@ -367,9 +400,7 @@ class _Messages:
         `max_tokens` is required by the Messages API and is passed through
         unchanged; switchboard does not supply a default.
         """
-        return await _dispatch(
-            self.sb,
-            AnthropicDeployment,
+        return await self._dispatch(
             model=model,
             session_id=session_id,
             call=lambda d: d.messages(model=model, stream=stream, **kwargs),
@@ -387,9 +418,7 @@ class _Messages:
         Send a Messages API structured output request to the selected
         deployment, with automatic failover.
         """
-        return await _dispatch(
-            self.sb,
-            AnthropicDeployment,
+        return await self._dispatch(
             model=model,
             session_id=session_id,
             call=lambda d: d.parse(model=model, output_format=output_format, **kwargs),
