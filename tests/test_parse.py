@@ -5,7 +5,7 @@ from httpx import Request, Response
 from openai import APIConnectionError, APITimeoutError, RateLimitError
 
 from azure_switchboard import Switchboard, SwitchboardError
-from azure_switchboard.chat import OpenAIDeployment
+from azure_switchboard.openai_api import OpenAIDeployment
 
 from .conftest import (
     PARSED_COMPLETION_PARAMS,
@@ -138,7 +138,7 @@ class TestSwitchboardParse:
     async def test_parse(self, switchboard: Switchboard):
         """Test parse through switchboard with load balancing."""
         with patch(
-            "azure_switchboard.chat.OpenAIDeployment.parse",
+            "azure_switchboard.openai_api.OpenAIDeployment.parse",
             new=AsyncMock(return_value=PARSED_RESPONSE),
         ) as mock:
             response = await switchboard.parse(**PARSED_COMPLETION_PARAMS)
@@ -150,7 +150,7 @@ class TestSwitchboardParse:
     async def test_parse_session_affinity(self, switchboard: Switchboard):
         """Test that session_id routes to same deployment."""
         with patch(
-            "azure_switchboard.chat.OpenAIDeployment.parse",
+            "azure_switchboard.openai_api.OpenAIDeployment.parse",
             new=AsyncMock(return_value=PARSED_RESPONSE),
         ):
             await switchboard.parse(
@@ -177,7 +177,7 @@ class TestSwitchboardParse:
             return PARSED_RESPONSE
 
         with patch(
-            "azure_switchboard.chat.OpenAIDeployment.parse",
+            "azure_switchboard.openai_api.OpenAIDeployment.parse",
             new=AsyncMock(side_effect=failing_then_success),
         ):
             response = await switchboard.parse(**PARSED_COMPLETION_PARAMS)

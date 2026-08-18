@@ -7,6 +7,7 @@ license = { text = "MIT" }
 authors = [{ name = "Abizer Lokhandwala", email = "abizer@abizer.me" }]
 requires-python = ">=3.10"
 dependencies = [
+  "anthropic>=0.122.0",
   "loguru>=0.7.3",
   "openai>=1.62.0",
   "opentelemetry-api>=1.30.0",
@@ -31,9 +32,6 @@ keywords = [
   "ai",
 ]
 
-[project.optional-dependencies]
-anthropic = ["anthropic>=0.122.0"]
-
 [project.urls]
 Homepage = "https://github.com/arini-ai/azure-switchboard"
 
@@ -43,7 +41,6 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
-  "anthropic>=0.122.0",
   "bumpver>=2024.1130",
   "ipykernel>=6.29.5",
   "ipython>=8.0.0,!=9.0.0",

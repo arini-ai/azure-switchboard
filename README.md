@@ -17,7 +17,7 @@ uv add azure-switchboard
 Two deployment kinds can be mixed in a single `Switchboard`:
 
 - `OpenAIConfig` — Azure OpenAI (`base_url=.../openai/v1/`) or OpenAI (`base_url=None`), reached via `create()` / `parse()`.
-- `AnthropicConfig` — Claude on Azure AI Foundry, reached via `messages()` / `parse_messages()`. Requires the `anthropic` extra.
+- `AnthropicConfig` — Claude on Azure AI Foundry, reached via `messages()` / `parse_messages()`.
 
 Utilization tracking, session affinity, failover, and selection are shared across both.
 
@@ -62,7 +62,7 @@ async with sb:
   - **Automatic Failover**: Retries are controlled by a tenacity `AsyncRetrying` policy (`failover_policy`).
   - **Pluggable Selection**: Custom selection algorithms can be provided by passing a callable to the `selector` parameter on the Switchboard constructor.
   - **OpenTelemetry Integration**: Built-in metrics for request routing and healthy deployment counts.
-- **Lightweight**: Small codebase with minimal dependencies: `openai`, `loguru`, `tenacity`, `wrapt`, and `opentelemetry-api`. The `anthropic` SDK is an optional extra, so OpenAI-only users don't pay for it.
+- **Lightweight**: Small codebase with minimal dependencies: `openai`, `anthropic`, `loguru`, `tenacity`, `wrapt`, and `opentelemetry-api`.
 
 ## Runnable Example
 
@@ -274,8 +274,6 @@ Distribution overhead scales ~linearly with the number of deployments.
 | `models`   | Models available on this deployment                                                                  | Built-in model name defaults |
 
 ### switchboard.AnthropicConfig Parameters
-
-Install with `pip install 'azure-switchboard[anthropic]'`. Constructing an `AnthropicConfig` without the extra raises a `SwitchboardError` explaining how to install it.
 
 | Parameter  | Description                                                                                        | Default  |
 | ---------- | -------------------------------------------------------------------------------------------------- | -------- |

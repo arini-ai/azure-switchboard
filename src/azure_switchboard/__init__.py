@@ -1,9 +1,9 @@
 from loguru import logger as _logger
 from openai.types.chat import ParsedChatCompletion
 
-from .chat import OpenAIConfig
+from .openai_api import OpenAIConfig
 from .exceptions import SwitchboardError
-from .messages import AnthropicConfig
+from .anthropic_api import AnthropicConfig
 from .model import Model
 from .switchboard import Switchboard
 

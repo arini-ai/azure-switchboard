@@ -88,6 +88,7 @@ name = "azure-switchboard"
 version = "2026.4.0"
 source = { editable = "." }
 dependencies = [
+    { name = "anthropic" },
     { name = "loguru" },
     { name = "openai" },
     { name = "opentelemetry-api" },
@@ -95,14 +96,8 @@ dependencies = [
     { name = "wrapt" },
 ]
 
-[package.optional-dependencies]
-anthropic = [
-    { name = "anthropic" },
-]
-
 [package.dev-dependencies]
 dev = [
-    { name = "anthropic" },
     { name = "bumpver" },
     { name = "ipykernel" },
     { name = "ipython", version = "8.38.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -129,18 +124,16 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=0.122.0" },
+    { name = "anthropic", specifier = ">=0.122.0" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "openai", specifier = ">=1.62.0" },
     { name = "opentelemetry-api", specifier = ">=1.30.0" },
     { name = "tenacity", specifier = ">=9.0.0" },
     { name = "wrapt", specifier = ">=1.17.2" },
 ]
-provides-extras = ["anthropic"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "anthropic", specifier = ">=0.122.0" },
     { name = "bumpver", specifier = ">=2024.1130" },
     { name = "ipykernel", specifier = ">=6.29.5" },
     { name = "ipython", specifier = ">=8.0.0,!=9.0.0" },

@@ -45,7 +45,7 @@
 - opentelemetry-api>=1.30.0
 - tenacity>=9.0.0
 - wrapt>=1.17.2
-- anthropic>=0.122.0 (optional extra: `azure-switchboard[anthropic]`)
+- anthropic>=0.122.0
 
 ### Development
 
@@ -62,8 +62,8 @@
 - `src/azure_switchboard/`: Core implementation
   - `switchboard.py`: Main client implementation with load balancing logic
   - `deployment.py`: `DeploymentBase`, the provider-agnostic utilization surface
-  - `chat.py`: OpenAI / Chat Completions deployments (`OpenAIConfig`)
-  - `messages.py`: Anthropic / Messages API deployments (`AnthropicConfig`)
+  - `openai_api.py`: OpenAI / Chat Completions deployments (`OpenAIConfig`)
+  - `anthropic_api.py`: Anthropic / Messages API deployments (`AnthropicConfig`)
   - `model.py`: Per-model utilization and cooldown state
 - `tests/`: Comprehensive test suite
 - `tools/`: Demo and benchmark utilities
@@ -77,4 +77,4 @@
 - Session affinity for efficient prompt caching
 - Automatic failover with customizable retry policies
 - OpenTelemetry integration for monitoring
-- Lightweight implementation (~1k LOC) with minimal dependencies; the `anthropic` SDK is an optional extra
+- Lightweight implementation (~1k LOC) with minimal dependencies

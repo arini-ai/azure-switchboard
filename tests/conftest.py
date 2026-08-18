@@ -37,8 +37,8 @@ from azure_switchboard import (
     OpenAIConfig,
     Switchboard,
 )
-from azure_switchboard.chat import OpenAIDeployment
-from azure_switchboard.messages import AnthropicDeployment
+from azure_switchboard.openai_api import OpenAIDeployment
+from azure_switchboard.anthropic_api import AnthropicDeployment
 
 
 async def collect_chunks(

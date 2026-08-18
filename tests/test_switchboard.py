@@ -40,7 +40,7 @@ class TestSwitchboard:
     async def test_streaming(self, switchboard: Switchboard):
         """Test streaming through switchboard."""
 
-        with patch("azure_switchboard.chat.OpenAIDeployment.create") as mock:
+        with patch("azure_switchboard.openai_api.OpenAIDeployment.create") as mock:
             mock.side_effect = chat_completion_mock()
             stream = await switchboard.create(stream=True, **COMPLETION_PARAMS)
             _, content = await collect_chunks(stream)

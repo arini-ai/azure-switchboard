@@ -7,7 +7,7 @@ from httpx import Request, Response, TimeoutException
 from openai import APIConnectionError, APITimeoutError, RateLimitError
 
 from azure_switchboard import SwitchboardError
-from azure_switchboard.chat import OpenAIConfig, OpenAIDeployment
+from azure_switchboard.openai_api import OpenAIConfig, OpenAIDeployment
 
 from .conftest import (
     COMPLETION_PARAMS,

@@ -87,12 +87,12 @@ class TestSessionAffinity:
 class TestDispatch:
     async def test_both_surfaces_route_correctly(self, mixed: Switchboard):
         with patch(
-            "azure_switchboard.chat.OpenAIDeployment.create",
+            "azure_switchboard.openai_api.OpenAIDeployment.create",
             side_effect=chat_completion_mock(),
         ) as chat_mock:
             await mixed.create(**COMPLETION_PARAMS)
         with patch(
-            "azure_switchboard.messages.AnthropicDeployment.messages",
+            "azure_switchboard.anthropic_api.AnthropicDeployment.messages",
             side_effect=message_mock(),
         ) as msg_mock:
             await mixed.messages(**MESSAGE_PARAMS)
@@ -107,7 +107,7 @@ class TestDispatch:
             city: str
 
         with patch(
-            "azure_switchboard.messages.AnthropicDeployment.parse",
+            "azure_switchboard.anthropic_api.AnthropicDeployment.parse",
             side_effect=message_mock(),
         ) as mock:
             await mixed.parse_messages(
@@ -137,7 +137,7 @@ class TestDispatch:
             return "ok"
 
         with patch(
-            "azure_switchboard.messages.AnthropicDeployment.messages", new=flaky
+            "azure_switchboard.anthropic_api.AnthropicDeployment.messages", new=flaky
         ):
             assert await mixed.messages(**MESSAGE_PARAMS) == "ok"
 

@@ -2,9 +2,18 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeVar, cast, overload
+from typing import Any, ClassVar, Literal, TypeVar, cast, overload
 
 import wrapt
+from anthropic import (
+    APIConnectionError,
+    APITimeoutError,
+    AsyncAnthropicFoundry,
+    AsyncStream,
+    RateLimitError,
+)
+from anthropic.types import Message, RawMessageStreamEvent
+from anthropic.types.message import Usage
 from loguru import logger
 from pydantic import BaseModel
 
@@ -12,28 +21,7 @@ from .deployment import Api, DeploymentBase
 from .exceptions import SwitchboardError
 from .model import Model
 
-if TYPE_CHECKING:
-    from anthropic import AsyncAnthropicFoundry, AsyncStream
-    from anthropic.types import Message, RawMessageStreamEvent
-
 _T = TypeVar("_T", bound=BaseModel)
-
-_INSTALL_HINT = (
-    "The anthropic SDK is required for Messages API deployments. "
-    "Install it with: pip install 'azure-switchboard[anthropic]'"
-)
-
-
-def _anthropic():
-    """Import the anthropic SDK, or explain how to get it.
-
-    Kept optional so OpenAI-only users don't pay for a second SDK.
-    """
-    try:
-        import anthropic
-    except ImportError as e:  # pragma: no cover - exercised via monkeypatch
-        raise SwitchboardError(_INSTALL_HINT) from e
-    return anthropic
 
 
 @dataclass
@@ -54,12 +42,11 @@ class AnthropicConfig:
     models: list[Model] = field(default_factory=list)
 
     def get_client(self) -> AsyncAnthropicFoundry:
-        anthropic = _anthropic()
         if not self.resource and not self.base_url:
             raise SwitchboardError(
                 f"{self.name}: one of resource or base_url is required"
             )
-        return anthropic.AsyncAnthropicFoundry(
+        return AsyncAnthropicFoundry(
             resource=self.resource,
             base_url=self.base_url,
             api_key=self.api_key,
@@ -76,9 +63,6 @@ class AnthropicDeployment(DeploymentBase):
         super().__init__(config.name, config.models)
         self.config = config
         self.client = config.get_client()
-        # Bind once so error handlers can reference the SDK's exception classes.
-        # These share names with the openai ones but are distinct classes.
-        self._errors = _anthropic()
 
     @overload
     async def messages(
@@ -125,22 +109,22 @@ class AnthropicDeployment(DeploymentBase):
 
             logger.trace("Creating message")
             response = cast(
-                "Message",
+                Message,
                 await self.client.messages.create(model=model, **kwargs),
             )
             self._reconcile_usage(model, response.usage, _preflight_estimate)
             return response
 
-        except self._errors.RateLimitError:
+        except RateLimitError:
             logger.exception("Marking down model for rate limit")
             self.models[model].mark_down()
             raise
-        except self._errors.APITimeoutError:
+        except APITimeoutError:
             # Timeouts during upstream-wide slowdowns are uncorrelated with
             # which deployment was chosen — marking it down wastes capacity.
             logger.warning("Upstream timeout on message; not marking down")
             raise
-        except self._errors.APIConnectionError:
+        except APIConnectionError:
             logger.exception("Marking down model for connection error")
             self.models[model].mark_down()
             raise
@@ -170,19 +154,19 @@ class AnthropicDeployment(DeploymentBase):
             )
             self._reconcile_usage(model, response.usage, _preflight_estimate)
             return response
-        except self._errors.RateLimitError:
+        except RateLimitError:
             logger.exception("Marking down model for rate limit on parse")
             self.models[model].mark_down()
             raise
-        except self._errors.APITimeoutError:
+        except APITimeoutError:
             logger.warning("Upstream timeout on parse; not marking down")
             raise
-        except self._errors.APIConnectionError:
+        except APIConnectionError:
             logger.exception("Marking down model for connection error on parse")
             self.models[model].mark_down()
             raise
 
-    def _reconcile_usage(self, model: str, usage, offset: int) -> None:
+    def _reconcile_usage(self, model: str, usage: Usage | None, offset: int) -> None:
         """Charge real usage against the preflight estimate.
 
         The Messages API reports input and output separately; there is no
@@ -205,7 +189,7 @@ class AnthropicDeployment(DeploymentBase):
             chars += _content_len(m.get("content", ""))
         return chars // 4
 
-    def _set_span_attributes(self, usage) -> None:
+    def _set_span_attributes(self, usage: Usage) -> None:
         self._record_token_details(
             cached=getattr(usage, "cache_read_input_tokens", None),
             reasoning=getattr(
@@ -248,7 +232,6 @@ class _AsyncMessageStreamWrapper(wrapt.ObjectProxy):
         )
 
     async def __aiter__(self) -> AsyncIterator[RawMessageStreamEvent]:
-        errors = self._self_deployment._errors
         try:
             async for event in self.__wrapped__:
                 # Usage arrives in two places: message_start carries the input
@@ -267,14 +250,14 @@ class _AsyncMessageStreamWrapper(wrapt.ObjectProxy):
                     self._self_output_spent = output
 
                 yield event
-        except errors.RateLimitError:
+        except RateLimitError:
             self._self_logger.exception("Marking down model for rate limit on stream")
             self._self_model.mark_down()
             raise
-        except errors.APITimeoutError:
+        except APITimeoutError:
             self._self_logger.warning("Upstream timeout on stream; not marking down")
             raise
-        except errors.APIConnectionError:
+        except APIConnectionError:
             self._self_logger.exception(
                 "Marking down model for connection error on stream"
             )

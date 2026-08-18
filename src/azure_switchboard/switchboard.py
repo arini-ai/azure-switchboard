@@ -26,10 +26,10 @@ from tenacity import (
 
 from azure_switchboard.model import UtilStats
 
-from .chat import OpenAIConfig, OpenAIDeployment
+from .openai_api import OpenAIConfig, OpenAIDeployment
 from .deployment import Api, DeploymentBase
 from .exceptions import SwitchboardError
-from .messages import AnthropicConfig, AnthropicDeployment
+from .anthropic_api import AnthropicConfig, AnthropicDeployment
 
 _T = TypeVar("_T", bound=BaseModel)
 

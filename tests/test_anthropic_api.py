@@ -5,7 +5,7 @@ from anthropic import APIConnectionError, APITimeoutError, RateLimitError
 from httpx import Request, Response
 
 from azure_switchboard import AnthropicConfig, Model, SwitchboardError
-from azure_switchboard.messages import AnthropicDeployment, _content_len
+from azure_switchboard.anthropic_api import AnthropicDeployment, _content_len
 
 from .conftest import (
     MESSAGE_PARAMS,
@@ -44,16 +44,6 @@ class TestAnthropicConfig:
     def test_requires_an_endpoint(self):
         with pytest.raises(SwitchboardError, match="resource or base_url"):
             AnthropicConfig(name="d", api_key="k").get_client()
-
-    def test_missing_sdk_explains_how_to_install(self, monkeypatch):
-        import azure_switchboard.messages as m
-
-        def _boom():
-            raise SwitchboardError(m._INSTALL_HINT)
-
-        monkeypatch.setattr(m, "_anthropic", _boom)
-        with pytest.raises(SwitchboardError, match=r"azure-switchboard\[anthropic\]"):
-            AnthropicConfig(name="d", resource="r").get_client()
 
 
 class TestAnthropicDeployment:
