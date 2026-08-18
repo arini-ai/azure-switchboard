@@ -329,34 +329,33 @@ class TestSwitchboard:
             "5 sessions into 3 deployments should create 1:2:2 or occasionally 0:4:6 distribution"
         )
 
-    @pytest.mark.mock_models("gpt-4o-mini")
     async def test_ratelimit_reset(self):
-        """Test that the ratelimit is reset correctly."""
+        """The periodic task zeroes usage once the window elapses.
 
-        # create an switchboard with nonzero ratelimit_window to verify reset behavior
+        Usage is seeded synchronously rather than via requests: with an await
+        between spending and asserting, a slow runner can let the reset fire
+        first and the assertion races. Accumulation from real requests is
+        covered in test_openai_api.py / test_anthropic_api.py.
+        """
+
+        # nonzero ratelimit_window so the reset task actually runs
         async with Switchboard(
             deployments=[azure_config("test1")], ratelimit_window=0.5
         ) as switchboard:
             assert switchboard.ratelimit_reset_task
 
-            # make some requests to add usage
-            await asyncio.gather(
-                *[
-                    switchboard.chat.completions.create(**COMPLETION_PARAMS)
-                    for _ in range(10)
-                ]
-            )
-
-            for d in switchboard.deployments.values():
-                m = d.models["gpt-4o-mini"]
+            models = [d.models["gpt-4o-mini"] for d in switchboard.deployments.values()]
+            for m in models:
+                m.spend_tokens(100)
+                m.spend_request()
+                # no await between spending and asserting, so this cannot race
                 assert m.tpm_usage > 0
                 assert m.rpm_usage > 0
 
             # wait for the ratelimit to reset
             await asyncio.sleep(1)
 
-            for d in switchboard.deployments.values():
-                m = d.models["gpt-4o-mini"]
+            for m in models:
                 assert m.tpm_usage == 0
                 assert m.rpm_usage == 0
 
