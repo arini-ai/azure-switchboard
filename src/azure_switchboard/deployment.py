@@ -20,7 +20,30 @@ class UtilStats:
     rpm: str
 
 
-class ModelDeployment:
+class Cooldown:
+    """Timed removal from selection.
+
+    Both a deployment and the resource hosting it can be taken out, and the
+    mechanics are the same either way. What differs is what a cooldown
+    implicates: one deployment's quota, or every deployment on an unreachable
+    host.
+    """
+
+    def __init__(self, default_cooldown: float = 10.0) -> None:
+        self.default_cooldown = default_cooldown
+        self.cooldown_until: float = 0
+
+    def mark_down(self, seconds: float = 0.0) -> None:
+        self.cooldown_until = time.time() + (seconds or self.default_cooldown)
+
+    def mark_up(self) -> None:
+        self.cooldown_until = 0
+
+    def is_cooling(self) -> bool:
+        return time.time() < self.cooldown_until
+
+
+class ModelDeployment(Cooldown):
     """A model deployment: its quota, its live utilization, and its cooldown.
 
     Subclasses bind an API spec to it, supplying the calls that speak to an
@@ -37,15 +60,14 @@ class ModelDeployment:
         endpoint: str | None = None,
         default_cooldown: float = 10.0,
     ):
+        super().__init__(default_cooldown)
         self.name = name
         self.tpm_limit = tpm
         self.rpm_limit = rpm
         self.endpoint = endpoint
-        self.default_cooldown = default_cooldown
 
         self.tpm_usage: int = 0
         self.rpm_usage: int = 0
-        self.cooldown_until: float = 0
         self.last_reset: float = 0
 
         self._foundry: Resource | None = None
@@ -75,17 +97,8 @@ class ModelDeployment:
         """
         raise NotImplementedError
 
-    def mark_down(self, seconds: float = 0.0) -> None:
-        self.cooldown_until = time.time() + (seconds or self.default_cooldown)
-
-    def mark_up(self) -> None:
-        self.cooldown_until = 0
-
     def is_healthy(self) -> bool:
         return self.util < 1
-
-    def is_cooling(self) -> bool:
-        return time.time() < self.cooldown_until
 
     @property
     def util(self) -> float:

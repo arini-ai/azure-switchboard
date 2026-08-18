@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from collections.abc import Iterable
 
 from anthropic import AsyncAnthropic
@@ -8,16 +7,16 @@ from openai import AsyncOpenAI
 
 from .anthropic_deployment import AnthropicDeployment
 from .exceptions import SwitchboardError
-from .deployment import UtilStats
+from .deployment import Cooldown, UtilStats
 from .openai_deployment import OpenAIDeployment
 
-# Every deployment speaks one of the APIs switchboard serves. ModelDeployment carries
-# the quota and cooldown machinery they share and bounds the generic selection
-# code, but nothing is ever only a ModelDeployment, so a resource says so.
+# Every deployment speaks one of the APIs switchboard serves. ModelDeployment
+# carries the quota machinery they share and bounds the generic selection code,
+# but nothing is ever only a ModelDeployment, so a resource says so.
 Deployment = OpenAIDeployment | AnthropicDeployment
 
 
-class Resource:
+class Resource(Cooldown):
     """Somewhere deployments live: a credential, a timeout, and the clients
     they share.
 
@@ -36,12 +35,11 @@ class Resource:
         models: Iterable[Deployment] = (),
         default_cooldown: float = 10.0,
     ) -> None:
+        super().__init__(default_cooldown)
         self.name = name
         self.base = base
         self.api_key = api_key
         self.timeout = timeout
-        self.default_cooldown = default_cooldown
-        self.cooldown_until: float = 0
 
         # Keyed by URL: within one API, that is what distinguishes a client.
         # AsyncAnthropicFoundry subclasses AsyncAnthropic, and AsyncAzureOpenAI
@@ -74,20 +72,6 @@ class Resource:
             if url not in self._anthropic_clients:
                 self._anthropic_clients[url] = model.new_client()
             model.client = self._anthropic_clients[url]
-
-    def mark_down(self, seconds: float = 0.0) -> None:
-        """Take the whole resource out of selection.
-
-        Reserved for errors that are properties of the host rather than of one
-        model's quota — see AnthropicDeployment/OpenAIDeployment error handling.
-        """
-        self.cooldown_until = time.time() + (seconds or self.default_cooldown)
-
-    def mark_up(self) -> None:
-        self.cooldown_until = 0
-
-    def is_cooling(self) -> bool:
-        return time.time() < self.cooldown_until
 
     def reset_usage(self) -> None:
         for model in self.models.values():
