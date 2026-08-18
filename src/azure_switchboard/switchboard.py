@@ -10,6 +10,7 @@ from typing import (
     Literal,
     Sequence,
     TypeVar,
+    cast,
     overload,
 )
 
@@ -265,17 +266,17 @@ class _Chat:
             with logger.contextualize(model=model, session_id=session_id):
                 async for attempt in self.sb.failover_policy.copy():
                     with attempt:
-                        deployment = self.sb.select_deployment(
-                            model=model, session_id=session_id
+                        # A model name belongs to exactly one provider,
+                        # enforced at construction, so selection by name yields
+                        # this surface's deployment. Unchecked: reaching for a
+                        # model through the wrong surface fails as an
+                        # AttributeError.
+                        deployment = cast(
+                            OpenAIDeployment,
+                            self.sb.select_deployment(
+                                model=model, session_id=session_id
+                            ),
                         )
-                        # Selection routes on model name and doesn't know which
-                        # surface asked, so this both narrows the type and turns a
-                        # wrong-surface call into a readable error.
-                        if not isinstance(deployment, OpenAIDeployment):
-                            raise SwitchboardError(
-                                f"{model} is served by {deployment.name} over the "
-                                f"{type(deployment).__name__} API, not OpenAIDeployment"
-                            )
                         with logger.contextualize(deployment=deployment.name):
                             logger.trace("Sending request")
                             response = await call(deployment)
@@ -359,17 +360,14 @@ class _Messages:
         with logger.contextualize(model=model, session_id=session_id):
             async for attempt in self.sb.failover_policy.copy():
                 with attempt:
-                    deployment = self.sb.select_deployment(
-                        model=model, session_id=session_id
+                    # A model name belongs to exactly one provider, enforced
+                    # at construction, so selection by name yields this
+                    # surface's deployment. Unchecked: reaching for a model
+                    # through the wrong surface fails as an AttributeError.
+                    deployment = cast(
+                        AnthropicDeployment,
+                        self.sb.select_deployment(model=model, session_id=session_id),
                     )
-                    # Selection routes on model name and doesn't know which
-                    # surface asked, so this both narrows the type and turns a
-                    # wrong-surface call into a readable error.
-                    if not isinstance(deployment, AnthropicDeployment):
-                        raise SwitchboardError(
-                            f"{model} is served by {deployment.name} over the "
-                            f"{type(deployment).__name__} API, not AnthropicDeployment"
-                        )
                     with logger.contextualize(deployment=deployment.name):
                         logger.trace("Sending request")
                         response = await call(deployment)
