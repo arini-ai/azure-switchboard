@@ -51,3 +51,6 @@ coverage.xml
 .uv/
 notebooks/
 .ipynb_checkpoints/
+
+# direnv: .envrc is committed and loads this if present
+.envrc.local

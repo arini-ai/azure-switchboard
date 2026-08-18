@@ -33,6 +33,10 @@ run *what:
 bench *args='-v -r 1000 -d 10 -e 500':
   just run tools/bench.py {{args}}
 
+# live wiring check against a real Foundry; needs AZURE_FOUNDRY + AZURE_API_KEY
+smoke:
+  uv run tools/smoke.py
+
 demo:
   @grep -q "AZURE_OPENAI_ENDPOINT" .env || echo "please set AZURE_OPENAI_ENDPOINT in .env"
   @grep -q "AZURE_OPENAI_API_KEY" .env || echo "please set AZURE_OPENAI_API_KEY in .env"
