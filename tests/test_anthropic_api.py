@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from anthropic import APIConnectionError, APITimeoutError, RateLimitError
 from httpx import Request, Response
+from pydantic import BaseModel
 
 from azure_switchboard import AnthropicConfig, Model, SwitchboardError
 from azure_switchboard.anthropic_api import AnthropicDeployment, _content_len
@@ -14,6 +15,10 @@ from .conftest import (
     collect_events,
     message_mock,
 )
+
+
+class Weather(BaseModel):
+    city: str
 
 
 def _request() -> Request:
@@ -91,11 +96,6 @@ class TestAnthropicDeployment:
         assert usage.rpm.startswith("1/")
 
     async def test_parse(self, anthropic_deployment: AnthropicDeployment):
-        from pydantic import BaseModel
-
-        class Weather(BaseModel):
-            city: str
-
         with patch.object(
             anthropic_deployment.client.messages, "parse", side_effect=message_mock()
         ) as mock:
@@ -211,11 +211,6 @@ class TestParseErrorHandling:
     async def test_cooldown_policy_on_parse(
         self, anthropic_deployment: AnthropicDeployment, error, should_mark_down
     ):
-        from pydantic import BaseModel
-
-        class Weather(BaseModel):
-            city: str
-
         model = anthropic_deployment.model("claude-sonnet-5")
         with patch.object(
             anthropic_deployment.client.messages, "parse", side_effect=error

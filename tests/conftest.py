@@ -54,19 +54,17 @@ async def collect_chunks(
     return received_chunks, content
 
 
-def openai_config(name: str = "openai") -> OpenAIConfig:
-    """Create an OpenAI deployment config for testing."""
+def openai_config(name: str, *, azure: bool = True) -> OpenAIConfig:
+    """An OpenAI deployment config.
+
+    `azure=True` targets Azure OpenAI, whose requests go to
+    /openai/v1/chat/completions. `azure=False` is the direct-OpenAI path,
+    where base_url is None and requests go to /v1/chat/completions instead.
+    The mock_client fixture has a route for each, so both shapes stay covered.
+    """
     return OpenAIConfig(
         name=name,
-        api_key="test",
-        models=[Model(name="gpt-4o-mini"), Model(name="gpt-4o")],
-    )
-
-
-def azure_config(name: str) -> OpenAIConfig:
-    return OpenAIConfig(
-        name=name,
-        base_url=f"https://{name}.openai.azure.com/openai/v1/",
+        base_url=f"https://{name}.openai.azure.com/openai/v1/" if azure else None,
         api_key=name,
         models=[
             Model(name="gpt-4o-mini", tpm=10000, rpm=60),
@@ -113,15 +111,15 @@ def model():
 
 @pytest.fixture
 def deployment():
-    return OpenAIDeployment(azure_config("test1"))
+    return OpenAIDeployment(openai_config("test1"))
 
 
 @pytest.fixture
 async def switchboard():
     deployments = [
-        azure_config("test1"),
-        azure_config("test2"),
-        azure_config("test3"),
+        openai_config("test1"),
+        openai_config("test2"),
+        openai_config("test3"),
     ]
     async with Switchboard(deployments=deployments, ratelimit_window=0) as sb:
         yield sb
