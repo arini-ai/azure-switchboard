@@ -62,8 +62,8 @@
 
 - `src/azure_switchboard/`: Core implementation
   - `switchboard.py`: Main client implementation with load balancing logic
-  - `foundry.py`: `Foundry`, an Azure resource: endpoint, credential, clients, deployments
-  - `deployment.py`: `ModelDeployment`, the provider-agnostic deployment: quota, utilization, cooldown
+  - `resource.py`: `Resource`, somewhere deployments live (credential, clients, cooldown), and `Foundry`, the Azure specialization that derives an endpoint from its name
+  - `deployment.py`: `ModelDeployment`, the provider-agnostic deployment: quota, utilization, cooldown; plus `Cooldown`, shared with `Resource`
   - `openai_deployment.py`: `OpenAIDeployment`, a deployment speaking Chat Completions
   - `anthropic_deployment.py`: `AnthropicDeployment`, a deployment speaking the Messages API
 - `tests/`: Comprehensive test suite

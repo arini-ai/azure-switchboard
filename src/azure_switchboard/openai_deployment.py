@@ -35,14 +35,14 @@ class OpenAIDeployment(ModelDeployment):
     def url(self) -> str | None:
         if self.endpoint:
             return self.endpoint
-        base = self.foundry.base
+        base = self.resource.base
         return f"{base}openai/v1/" if base else None
 
     def new_client(self) -> AsyncOpenAI:
         return AsyncOpenAI(
-            api_key=self.foundry.api_key,
+            api_key=self.resource.api_key,
             base_url=self.url,
-            timeout=self.foundry.timeout,
+            timeout=self.resource.timeout,
         )
 
     @overload
@@ -142,8 +142,8 @@ class OpenAIDeployment(ModelDeployment):
         elif isinstance(exc, APITimeoutError):
             log.warning(f"Upstream timeout on {op}; not marking down")
         elif isinstance(exc, APIConnectionError):
-            log.exception(f"Marking down foundry for connection error on {op}")
-            self.foundry.mark_down()
+            log.exception(f"Marking down resource for connection error on {op}")
+            self.resource.mark_down()
 
     def _estimate_token_usage(self, kwargs: dict) -> int:
         # ~4 chars per token, input only.
@@ -174,7 +174,7 @@ class _AsyncStreamWrapper(wrapt.ObjectProxy):
         # Chunks are consumed after create() returns, once its contextualize
         # scope is gone, so bind the context for mid-stream error logs.
         self._self_logger = logger.bind(
-            foundry=model.foundry.name,
+            resource=model.resource.name,
             model=model.name,
         )
 

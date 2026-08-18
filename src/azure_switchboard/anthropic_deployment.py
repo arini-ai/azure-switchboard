@@ -32,7 +32,7 @@ class AnthropicDeployment(ModelDeployment):
     def url(self) -> str | None:
         if self.endpoint:
             return self.endpoint
-        base = self.foundry.base
+        base = self.resource.base
         return f"{base}anthropic/" if base else None
 
     def new_client(self) -> AsyncAnthropic:
@@ -41,12 +41,12 @@ class AnthropicDeployment(ModelDeployment):
         # means we are not on Foundry at all.
         if self.url is None:
             return AsyncAnthropic(
-                api_key=self.foundry.api_key, timeout=self.foundry.timeout
+                api_key=self.resource.api_key, timeout=self.resource.timeout
             )
         return AsyncAnthropicFoundry(
             base_url=self.url,
-            api_key=self.foundry.api_key,
-            timeout=self.foundry.timeout,
+            api_key=self.resource.api_key,
+            timeout=self.resource.timeout,
         )
 
     @overload
@@ -130,8 +130,8 @@ class AnthropicDeployment(ModelDeployment):
         elif isinstance(exc, APITimeoutError):
             log.warning(f"Upstream timeout on {op}; not marking down")
         elif isinstance(exc, APIConnectionError):
-            log.exception(f"Marking down foundry for connection error on {op}")
-            self.foundry.mark_down()
+            log.exception(f"Marking down resource for connection error on {op}")
+            self.resource.mark_down()
 
     def _reconcile_usage(self, usage: Usage | None, offset: int) -> None:
         """Charge real usage against the preflight estimate.
@@ -187,7 +187,7 @@ class _AsyncMessageStreamWrapper(wrapt.ObjectProxy):
         # Events are consumed after create() returns, once its contextualize
         # scope is gone, so bind the context for mid-stream error logs.
         self._self_logger = logger.bind(
-            foundry=model.foundry.name,
+            resource=model.resource.name,
             model=model.name,
         )
 

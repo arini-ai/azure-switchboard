@@ -8,9 +8,9 @@ from azure_switchboard import Foundry, OpenAIDeployment, SwitchboardError
 class TestBinding:
     """A deployment is declared standalone and bound when it is registered."""
 
-    def test_unbound_deployment_has_no_foundry(self, model: OpenAIDeployment):
-        with pytest.raises(SwitchboardError, match="not bound to a foundry"):
-            _ = model.foundry
+    def test_unbound_deployment_has_no_resource(self, model: OpenAIDeployment):
+        with pytest.raises(SwitchboardError, match="not bound to a resource"):
+            _ = model.resource
 
     def test_unbound_deployment_has_no_client(self, model: OpenAIDeployment):
         """The client is assigned at registration, so there is nothing to read
@@ -18,18 +18,18 @@ class TestBinding:
         with pytest.raises(AttributeError):
             _ = model.client
 
-    def test_rebinding_to_another_foundry_is_rejected(self, model: OpenAIDeployment):
+    def test_rebinding_to_another_resource_is_rejected(self, model: OpenAIDeployment):
         Foundry(name="first", api_key="k", models=[model])
         with pytest.raises(SwitchboardError, match="already bound to first"):
             Foundry(name="second", api_key="k", models=[model])
 
-    def test_rebinding_to_the_same_foundry_is_a_no_op(self, model: OpenAIDeployment):
+    def test_rebinding_to_the_same_resource_is_a_no_op(self, model: OpenAIDeployment):
         resource = Foundry(name="only", api_key="k")
         resource.add(model)
         model.bind(resource)
-        assert model.foundry is resource
+        assert model.resource is resource
 
-    def test_foundry_cooldown_takes_its_deployments_out(self, model: OpenAIDeployment):
+    def test_resource_cooldown_takes_its_deployments_out(self, model: OpenAIDeployment):
         """A connection error means the host is unreachable, so every
         deployment on it is unreachable too."""
         resource = Foundry(name="east", api_key="k", models=[model])

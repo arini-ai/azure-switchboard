@@ -6,7 +6,7 @@ from httpx import Request, Response
 from pydantic import BaseModel
 
 from azure_switchboard import AnthropicDeployment, Foundry
-from azure_switchboard.foundry import Resource
+from azure_switchboard.resource import Resource
 from azure_switchboard.anthropic_deployment import _content_len
 
 from .conftest import (
@@ -38,13 +38,13 @@ def _rate_limit() -> RateLimitError:
 def _assert_cooldown_scope(deployment: AnthropicDeployment, scope: str | None) -> None:
     """A 429 is one deployment's quota; a connection error is the whole host."""
     assert deployment.is_cooling() is (scope == "model")
-    assert deployment.foundry.is_cooling() is (scope == "foundry")
+    assert deployment.resource.is_cooling() is (scope == "resource")
     # either scope takes this deployment out of selection
     assert deployment.is_healthy() is (scope is None)
 
 
 class TestAnthropicEndpoint:
-    def test_foundry_name_builds_the_anthropic_url(self):
+    def test_resource_name_builds_the_anthropic_url(self):
         deployment = anthropic_foundry("my-res").models["claude-sonnet-5"]
         assert str(deployment.client.base_url).startswith(
             "https://my-res.services.ai.azure.com/anthropic"
@@ -63,7 +63,7 @@ class TestAnthropicEndpoint:
         client = resource.models["claude-sonnet-5"].client
         assert "custom.example" in str(client.base_url)
 
-    def test_foundry_client_is_the_azure_variant(self):
+    def test_resource_client_is_the_azure_variant(self):
         """AsyncAnthropicFoundry sends Azure's api-key header, so it is not
         interchangeable with the first-party client."""
         deployment = anthropic_foundry("my-res").models["claude-sonnet-5"]
@@ -86,7 +86,7 @@ class TestAnthropicDeployment:
         self, anthropic_deployment: AnthropicDeployment, anthropic_resource
     ):
         assert anthropic_deployment.name == "claude-sonnet-5"
-        assert anthropic_deployment.foundry is anthropic_resource
+        assert anthropic_deployment.resource is anthropic_resource
         assert anthropic_deployment.client is not None
 
     async def test_messages(self, anthropic_deployment: AnthropicDeployment):
@@ -143,7 +143,7 @@ class TestAnthropicErrorHandling:
         "error,scope",
         [
             (_rate_limit(), "model"),
-            (APIConnectionError(request=_request()), "foundry"),
+            (APIConnectionError(request=_request()), "resource"),
             (APITimeoutError(request=_request()), None),
         ],
         ids=["rate_limit", "connection", "timeout"],
@@ -162,7 +162,7 @@ class TestAnthropicErrorHandling:
         "error,scope",
         [
             (_rate_limit(), "model"),
-            (APIConnectionError(request=_request()), "foundry"),
+            (APIConnectionError(request=_request()), "resource"),
             (APITimeoutError(request=_request()), None),
         ],
         ids=["rate_limit", "connection", "timeout"],
@@ -218,7 +218,7 @@ class TestParseErrorHandling:
         "error,scope",
         [
             (_rate_limit(), "model"),
-            (APIConnectionError(request=_request()), "foundry"),
+            (APIConnectionError(request=_request()), "resource"),
             (APITimeoutError(request=_request()), None),
         ],
         ids=["rate_limit", "connection", "timeout"],

@@ -10,7 +10,7 @@ from opentelemetry import trace
 from .exceptions import SwitchboardError
 
 if TYPE_CHECKING:
-    from .foundry import Resource
+    from .resource import Resource
 
 
 @dataclass(frozen=True)
@@ -70,22 +70,22 @@ class ModelDeployment(Cooldown):
         self.rpm_usage: int = 0
         self.last_reset: float = 0
 
-        self._foundry: Resource | None = None
+        self._resource: Resource | None = None
 
-    def bind(self, foundry: Resource) -> None:
-        if self._foundry is not None and self._foundry is not foundry:
+    def bind(self, resource: Resource) -> None:
+        if self._resource is not None and self._resource is not resource:
             raise SwitchboardError(
-                f"{self.name} is already bound to {self._foundry.name}"
+                f"{self.name} is already bound to {self._resource.name}"
             )
-        self._foundry = foundry
+        self._resource = resource
 
     @property
-    def foundry(self) -> Resource:
-        if self._foundry is None:
+    def resource(self) -> Resource:
+        if self._resource is None:
             raise SwitchboardError(
-                f"{self.name} is not bound to a foundry; pass it to Foundry(models=[...])"
+                f"{self.name} is not bound to a resource; pass it to Foundry(models=[...])"
             )
-        return self._foundry
+        return self._resource
 
     @property
     def url(self) -> str | None:
@@ -107,10 +107,10 @@ class ModelDeployment(Cooldown):
         Lower weight means this model is a better choice for new requests.
         """
         # full utilization while cooling down keeps us out of selection. A
-        # cooling foundry takes every model on it out with it: a connection
+        # cooling resource takes every model on it out with it: a connection
         # error means the host is unreachable, not that one model is busy.
         if self.is_cooling() or (
-            self._foundry is not None and self._foundry.is_cooling()
+            self._resource is not None and self._resource.is_cooling()
         ):
             return 1
 

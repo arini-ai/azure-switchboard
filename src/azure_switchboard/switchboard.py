@@ -28,7 +28,7 @@ from tenacity import (
 
 from .anthropic_deployment import AnthropicDeployment
 from .exceptions import SwitchboardError
-from .foundry import Foundry, Resource
+from .resource import Foundry, Resource
 from .deployment import ModelDeployment, UtilStats
 from .openai_deployment import OpenAIDeployment
 
@@ -171,8 +171,8 @@ class Switchboard:
         return list(self.foundries.values()) + [f for f in first_party if f]
 
     def reset_usage(self) -> None:
-        for foundry in self._all_resources():
-            foundry.reset_usage()
+        for resource in self._all_resources():
+            resource.reset_usage()
 
     def stats(self) -> dict[str, dict[str, UtilStats]]:
         return {f.name: f.stats() for f in self._all_resources()}
@@ -196,7 +196,7 @@ class Switchboard:
             # Affinity is to the resource, so a session that uses several models
             # keeps hitting the same one and its prompt cache stays warm.
             preferred = [
-                m for m in candidates if m.foundry is pinned and m.is_healthy()
+                m for m in candidates if m.resource is pinned and m.is_healthy()
             ]
             if preferred:
                 return self.selector(preferred)
@@ -213,10 +213,10 @@ class Switchboard:
         healthy_deployments_gauge.set(len(eligible), {"model": model})
 
         selected = eligible[0] if len(eligible) == 1 else self.selector(eligible)
-        logger.trace(f"Selected deployment: {selected.foundry.name}/{selected.name}")
+        logger.trace(f"Selected deployment: {selected.resource.name}/{selected.name}")
 
         if session_id:
-            self.sessions[session_id] = selected.foundry
+            self.sessions[session_id] = selected.resource
 
         return selected
 
@@ -237,12 +237,12 @@ class Switchboard:
                     deployment = self._select(
                         pool, model=model, session_id=session_id, fallback=fallback
                     )
-                    with logger.contextualize(foundry=deployment.foundry.name):
+                    with logger.contextualize(resource=deployment.resource.name):
                         logger.trace("Sending request")
                         response = await call(deployment)
                     request_counter.add(
                         1,
-                        {"model": model, "foundry": deployment.foundry.name},
+                        {"model": model, "resource": deployment.resource.name},
                     )
                     return response
 
@@ -276,7 +276,7 @@ class _Chat:
         def _fallback(self, model: str) -> OpenAIDeployment | None:
             """The first-party deployment of a model, created on first need.
 
-            Any model name resolves, including one on no foundry at all — the
+            Any model name resolves, including one on no resource at all — the
             vendor's API is the authority on whether it exists.
             """
             if self._first_party is None:

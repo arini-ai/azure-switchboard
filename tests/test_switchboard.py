@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from azure_switchboard import Foundry, OpenAIDeployment, Switchboard, SwitchboardError
 from azure_switchboard.anthropic_deployment import AnthropicDeployment
 from azure_switchboard.deployment import ModelDeployment
-from azure_switchboard.foundry import Resource
+from azure_switchboard.resource import Resource
 
 from .conftest import (
     COMPLETION_PARAMS,
@@ -73,7 +73,7 @@ class TestSwitchboard:
     ):
         """Test basic selection invariants"""
         client = select_openai(switchboard, model="gpt-4o-mini")
-        assert client.foundry.name in switchboard.foundries
+        assert client.resource.name in switchboard.foundries
 
         deployments = list(switchboard.foundries.values())
         assert len(deployments) == 3, "Need exactly 3 deployments for this test"
@@ -120,16 +120,16 @@ class TestSwitchboard:
         # Test consistent deployment selection for session
         client_1 = select_openai(switchboard, session_id="test", model="gpt-4o-mini")
         client_2 = select_openai(switchboard, session_id="test", model="gpt-4o-mini")
-        assert client_1.foundry.name == client_2.foundry.name
+        assert client_1.resource.name == client_2.resource.name
 
         # Test failover when selected deployment is unhealthy
         client_1.mark_down()
         client_3 = select_openai(switchboard, session_id="test", model="gpt-4o-mini")
-        assert client_3.foundry.name != client_1.foundry.name
+        assert client_3.resource.name != client_1.resource.name
 
         # Test session maintains failover assignment
         client_4 = select_openai(switchboard, session_id="test", model="gpt-4o-mini")
-        assert client_4.foundry.name == client_3.foundry.name
+        assert client_4.resource.name == client_3.resource.name
 
     async def test_session_cached_deployment_missing_model_does_not_keyerror(self):
         """Session fallback should handle model-missing deployments without KeyError."""
@@ -153,7 +153,7 @@ class TestSwitchboard:
         switchboard.sessions["test"] = switchboard.foundries["mini-only"]
 
         selection = select_openai(switchboard, session_id="test", model="gpt-4o")
-        assert selection.foundry.name == "full-only"
+        assert selection.resource.name == "full-only"
         assert switchboard.sessions["test"].name == "full-only"
 
     @pytest.mark.mock_models("gpt-4o-mini")
@@ -224,7 +224,7 @@ class TestSwitchboard:
             foundries=[openai_foundry("test1")], openai_fallback=True
         )
         selection = select_openai(switchboard, model="gpt-5.4")
-        assert selection.foundry.name == "first-party-openai"
+        assert selection.resource.name == "first-party-openai"
 
     async def test_first_party_fallback_can_itself_be_marked_down(self):
         """A rate-limited first-party API should not be hammered either."""
@@ -254,7 +254,7 @@ class TestSwitchboard:
 
         selection = select_anthropic(switchboard, model="claude-sonnet-5")
         assert isinstance(selection, AnthropicDeployment)
-        assert selection.foundry.name == "first-party-anthropic"
+        assert selection.resource.name == "first-party-anthropic"
 
     async def test_each_fallback_is_scoped_to_its_own_api(self):
         """The two vendors are separate hosts, so one going down must not take
@@ -270,9 +270,9 @@ class TestSwitchboard:
 
         openai_fb = select_openai(switchboard, model="gpt-4o-mini")
         anthropic_fb = select_anthropic(switchboard, model="claude-sonnet-5")
-        assert openai_fb.foundry is not anthropic_fb.foundry
+        assert openai_fb.resource is not anthropic_fb.resource
 
-        openai_fb.foundry.mark_down()
+        openai_fb.resource.mark_down()
         assert not openai_fb.is_healthy()
         assert anthropic_fb.is_healthy()
 
@@ -282,7 +282,7 @@ class TestSwitchboard:
         )
         assert "first-party-openai" in switchboard.stats()
 
-    async def test_foundry_must_hold_typed_deployments(self):
+    async def test_resource_must_hold_typed_deployments(self):
         resource = Foundry(name="odd", api_key="k")
         resource.models["mystery"] = ModelDeployment(name="mystery")
         with pytest.raises(SwitchboardError, match="not an OpenAIDeployment"):
@@ -483,7 +483,7 @@ class TestSwitchboard:
             await switchboard.chat.completions.create(**COMPLETION_PARAMS)
         assert mock_client["azure"].call_count == 0
 
-    async def test_duplicate_foundry_names(self):
+    async def test_duplicate_resource_names(self):
         """Test that duplicate foundry names raise an error."""
         with pytest.raises(SwitchboardError, match="Duplicate foundry name: test1"):
             Switchboard(foundries=[openai_foundry("test1"), openai_foundry("test1")])
@@ -504,12 +504,12 @@ class TestSwitchboard:
 
         # Verify that the deployment is still selected as expected after cancellation
         deployment = select_openai(switchboard, model="gpt-4o-mini")
-        assert deployment.foundry is switchboard.foundries["test1"]
+        assert deployment.resource is switchboard.foundries["test1"]
 
         deployment_with_session = select_openai(
             switchboard, model="gpt-4o-mini", session_id="test"
         )
-        assert deployment_with_session.foundry is switchboard.foundries["test1"]
+        assert deployment_with_session.resource is switchboard.foundries["test1"]
         assert switchboard.sessions["test"] is switchboard.foundries["test1"]
 
 
@@ -530,7 +530,7 @@ async def mixed():
 class TestMixedPoolSelection:
     """A single Switchboard holding both OpenAI and Anthropic deployments."""
 
-    def test_pools_by_api_not_by_foundry(self, mixed: Switchboard):
+    def test_pools_by_api_not_by_resource(self, mixed: Switchboard):
         assert set(mixed.chat.completions._pool) == {"gpt-4o-mini", "gpt-4o"}
         assert set(mixed.messages._pool) == {"claude-sonnet-5", "claude-haiku-4-5"}
         assert all(
@@ -622,7 +622,7 @@ class TestMixedPoolDispatch:
         calls = []
 
         async def flaky(self, **kwargs):
-            calls.append(self.foundry.name)
+            calls.append(self.resource.name)
             if len(calls) == 1:
                 self.mark_down()
                 raise APIConnectionError(request=Request("POST", "https://x/"))
@@ -663,8 +663,8 @@ class TestMixedPoolConstruction:
             ]
         )
 
-        assert sb.chat.completions._pool["claude-sonnet-5"][0].foundry.name == "compat"
-        assert sb.messages._pool["claude-sonnet-5"][0].foundry.name == "native"
+        assert sb.chat.completions._pool["claude-sonnet-5"][0].resource.name == "compat"
+        assert sb.messages._pool["claude-sonnet-5"][0].resource.name == "native"
 
     def test_same_model_on_many_foundries_is_fine(self):
         """Sharing a model across resources is the whole point of the pool."""
@@ -674,7 +674,7 @@ class TestMixedPoolConstruction:
         assert len(sb.foundries) == 3
         assert len(sb.chat.completions._pool["gpt-4o-mini"]) == 3
 
-    def test_duplicate_foundry_names_rejected(self):
+    def test_duplicate_resource_names_rejected(self):
         with pytest.raises(SwitchboardError, match="Duplicate foundry name"):
             Switchboard(
                 foundries=[
@@ -687,7 +687,7 @@ class TestMixedPoolConstruction:
                 ]
             )
 
-    def test_duplicate_model_on_one_foundry_rejected(self):
+    def test_duplicate_model_on_one_resource_rejected(self):
         with pytest.raises(SwitchboardError, match="duplicate model"):
             Foundry(
                 name="r",
@@ -698,7 +698,7 @@ class TestMixedPoolConstruction:
                 ],
             )
 
-    def test_one_foundry_serves_both_apis(self):
+    def test_one_resource_serves_both_apis(self):
         """The case the pre-Foundry model could not express at all.
 
         Both deployments share one resource, one credential, and one endpoint
@@ -714,8 +714,8 @@ class TestMixedPoolConstruction:
         )
         sb = Switchboard(foundries=[resource])
 
-        assert sb.chat.completions._pool["gpt-4o-mini"][0].foundry is resource
-        assert sb.messages._pool["claude-sonnet-5"][0].foundry is resource
+        assert sb.chat.completions._pool["gpt-4o-mini"][0].resource is resource
+        assert sb.messages._pool["claude-sonnet-5"][0].resource is resource
         assert (
             resource.models["gpt-4o-mini"].url
             == "https://east.services.ai.azure.com/openai/v1/"
@@ -760,7 +760,7 @@ class TestMixedPoolConstruction:
             == "https://east.services.ai.azure.com/openai/v1/"
         )
 
-    def test_one_client_per_api_per_foundry(self):
+    def test_one_client_per_api_per_resource(self):
         """Two deployments of the same API share a connection pool."""
         resource = Foundry(
             name="east",

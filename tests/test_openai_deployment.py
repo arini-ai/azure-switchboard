@@ -25,7 +25,7 @@ class TestOpenAIDeployment:
     async def test_init(self, deployment: OpenAIDeployment, foundry: Foundry):
         """A deployment knows its resource and borrows that resource's client."""
         assert deployment.name == "gpt-4o-mini"
-        assert deployment.foundry is foundry
+        assert deployment.resource is foundry
         assert deployment.client is not None
         assert set(foundry.models) == {"gpt-4o-mini", "gpt-4o"}
 
@@ -107,9 +107,9 @@ class TestOpenAIDeployment:
             assert "2/" in usage.rpm
 
         # A connection error cools the resource, not just this deployment
-        assert deployment.foundry.is_cooling()
+        assert deployment.resource.is_cooling()
         assert not deployment.is_cooling()
-        deployment.foundry.mark_up()
+        deployment.resource.mark_up()
 
         # Test midstream exception handling — generic exceptions do NOT mark down
         with patch.object(
