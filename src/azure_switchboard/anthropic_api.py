@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, Literal, TypeVar, cast, overload
+from typing import Literal, TypeVar, cast, overload
 
 import wrapt
 from anthropic import (
@@ -196,7 +196,7 @@ class AnthropicDeployment(DeploymentBase):
         )
 
 
-def _content_len(content: Any) -> int:
+def _content_len(content: object) -> int:
     """Character count of Messages API content, which may be blocks."""
     if isinstance(content, str):
         return len(content)

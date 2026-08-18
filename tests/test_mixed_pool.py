@@ -137,6 +137,15 @@ class TestDispatch:
         assert len(calls) == 2
         assert calls[0] != calls[1]
 
+    async def test_wrong_surface_for_model_raises_cleanly(self, mixed: Switchboard):
+        """A model belongs to one provider, so reaching for it through the
+        other surface is a caller bug. It should read as a SwitchboardError,
+        not an AttributeError from deep inside dispatch."""
+        with pytest.raises(SwitchboardError, match="not AnthropicDeployment"):
+            await mixed.messages.create(model="gpt-4o-mini", max_tokens=16, messages=[])
+        with pytest.raises(SwitchboardError, match="not OpenAIDeployment"):
+            await mixed.chat.completions.create(model="claude-sonnet-5", messages=[])
+
     async def test_unknown_model_raises_without_retrying(self, mixed: Switchboard):
         """SwitchboardError is excluded from the retry predicate."""
         with pytest.raises(SwitchboardError, match="No deployments available"):

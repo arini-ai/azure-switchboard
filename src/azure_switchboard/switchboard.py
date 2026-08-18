@@ -5,7 +5,6 @@ import random
 from collections import OrderedDict
 from functools import cached_property
 from typing import (
-    Any,
     Awaitable,
     Callable,
     Literal,
@@ -36,6 +35,7 @@ from .anthropic_api import AnthropicConfig, AnthropicDeployment
 
 _T = TypeVar("_T", bound=BaseModel)
 _R = TypeVar("_R")
+_D = TypeVar("_D", bound=DeploymentBase)
 
 DeploymentSpec = OpenAIConfig | AnthropicConfig
 
@@ -236,9 +236,15 @@ class Switchboard:
         *,
         model: str,
         session_id: str | None,
-        call: Callable[[Any], Awaitable[_R]],
+        deployment_type: type[_D],
+        call: Callable[[_D], Awaitable[_R]],
     ) -> _R:  # pyright: ignore[reportReturnType]
         """Select a deployment and issue `call` against it, with failover.
+
+        `deployment_type` narrows the selected deployment to the provider whose
+        surface `call` uses, so the callable is typed rather than Any. A model
+        name belongs to exactly one provider (enforced at construction), so a
+        mismatch here means the caller reached for the wrong surface.
 
         The failover policy is copied per call so concurrent requests don't
         share retry state.
@@ -249,6 +255,12 @@ class Switchboard:
                     deployment = self.select_deployment(
                         model=model, session_id=session_id
                     )
+                    if not isinstance(deployment, deployment_type):
+                        raise SwitchboardError(
+                            f"{model} is served by {deployment.name} over the "
+                            f"{type(deployment).__name__} API, not "
+                            f"{deployment_type.__name__}"
+                        )
                     with logger.contextualize(deployment=deployment.name):
                         logger.trace("Sending request")
                         response = await call(deployment)
@@ -298,6 +310,7 @@ class _Chat:
             return await self._switchboard._dispatch(
                 model=model,
                 session_id=session_id,
+                deployment_type=OpenAIDeployment,
                 call=lambda d: d.create(model=model, stream=stream, **kwargs),
             )
 
@@ -316,6 +329,7 @@ class _Chat:
             return await self._switchboard._dispatch(
                 model=model,
                 session_id=session_id,
+                deployment_type=OpenAIDeployment,
                 call=lambda d: d.parse(
                     model=model, response_format=response_format, **kwargs
                 ),
@@ -361,6 +375,7 @@ class _Messages:
         return await self._switchboard._dispatch(
             model=model,
             session_id=session_id,
+            deployment_type=AnthropicDeployment,
             call=lambda d: d.messages(model=model, stream=stream, **kwargs),
         )
 
@@ -379,6 +394,7 @@ class _Messages:
         return await self._switchboard._dispatch(
             model=model,
             session_id=session_id,
+            deployment_type=AnthropicDeployment,
             call=lambda d: d.parse(model=model, output_format=output_format, **kwargs),
         )
 
