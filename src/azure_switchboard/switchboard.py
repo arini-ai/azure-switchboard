@@ -39,19 +39,9 @@ _R = TypeVar("_R")
 _M = TypeVar("_M", bound=ModelDeployment)
 
 meter = metrics.get_meter("azure_switchboard.switchboard")
-deployment_util = meter.create_gauge(
-    name="switchboard.deployment.model.utilization",
-    description="Utilization of a model on a deployment",
-    unit="%",
-)
 healthy_deployments_gauge = meter.create_gauge(
     name="healthy_deployments_count",
     description="Number of healthy deployments available for a model",
-    unit="1",
-)
-deployment_failures_counter = meter.create_counter(
-    name="deployment_failures",
-    description="Number of deployment failures",
     unit="1",
 )
 request_counter = meter.create_counter(
@@ -108,15 +98,6 @@ class Switchboard:
             if foundry.name in self.foundries:
                 raise SwitchboardError(f"Duplicate foundry name: {foundry.name}")
             self.foundries[foundry.name] = foundry
-
-            # Each surface partitions these into its own pool; reject anything
-            # neither would claim here, rather than on first use.
-            for model in foundry.models.values():
-                if not isinstance(model, (OpenAIDeployment, AnthropicDeployment)):
-                    raise SwitchboardError(
-                        f"{foundry.name}: {model.name} is not an OpenAIDeployment "
-                        "or AnthropicDeployment"
-                    )
 
         self._openai_fallback_enabled = openai_fallback
         self._anthropic_fallback_enabled = anthropic_fallback
@@ -205,6 +186,8 @@ class Switchboard:
             logger.warning(f"{model} is unhealthy on {pinned.name}, reselecting")
 
         eligible = [m for m in candidates if m.is_healthy()]
+        # recorded before the early return, since zero is the value worth alerting on
+        healthy_deployments_gauge.set(len(eligible), {"model": model})
 
         if not eligible:
             if (first_party := fallback()) and first_party.is_healthy():
@@ -212,9 +195,7 @@ class Switchboard:
                 return first_party
             raise SwitchboardError(f"No deployments available for {model}")
 
-        healthy_deployments_gauge.set(len(eligible), {"model": model})
-
-        selected = eligible[0] if len(eligible) == 1 else self.selector(eligible)
+        selected = self.selector(eligible)
         logger.trace(f"Selected deployment: {selected.resource.name}/{selected.name}")
 
         if session_id:
@@ -230,7 +211,7 @@ class Switchboard:
         session_id: str | None,
         fallback: Callable[[], _M | None],
         call: Callable[[_M], Awaitable[_R]],
-    ) -> _R:  # pyright: ignore[reportReturnType]
+    ) -> _R:
         with logger.contextualize(model=model, session_id=session_id):
             # failover_policy is copied so concurrent requests
             # dont share retry state
@@ -247,6 +228,10 @@ class Switchboard:
                         {"model": model, "resource": deployment.resource.name},
                     )
                     return response
+
+        # unreachable while the policy reraises, which the default does; an
+        # explicit failure beats returning None if that is ever swapped out
+        raise SwitchboardError(f"Failover exhausted for {model}")
 
     def __repr__(self) -> str:
         return f"Switchboard({self.foundries})"

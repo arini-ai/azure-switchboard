@@ -61,6 +61,15 @@ class Resource(Cooldown):
         """
         if model.name in self.models:
             raise SwitchboardError(f"{self.name}: duplicate model {model.name}")
+        # checked before anything is mutated, and here rather than in Switchboard
+        # so a Resource used on its own cannot hold the wrong client either
+        if not isinstance(model, (OpenAIDeployment, AnthropicDeployment)):
+            raise SwitchboardError(
+                f"{self.name}: {model.name} is not an OpenAIDeployment "
+                "or AnthropicDeployment"
+            )
+
+        # url reads the resource's base, so binding comes first
         model.bind(self)
         self.models[model.name] = model
 

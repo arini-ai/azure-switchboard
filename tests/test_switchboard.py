@@ -284,10 +284,11 @@ class TestSwitchboard:
         assert "first-party-openai" in switchboard.stats()
 
     async def test_resource_must_hold_typed_deployments(self):
+        """Rejected where the client is assigned, so a Resource used on its own
+        cannot end up holding a deployment with the wrong client."""
         resource = Foundry(name="odd", api_key="k")
-        resource.models["mystery"] = ModelDeployment(name="mystery")
         with pytest.raises(SwitchboardError, match="not an OpenAIDeployment"):
-            Switchboard(foundries=[resource])
+            resource.add(ModelDeployment(name="mystery"))  # type: ignore[arg-type]
 
     def _within_bounds(self, val, min, max, tolerance=0.05):
         """Check if a value is within bounds, accounting for tolerance."""

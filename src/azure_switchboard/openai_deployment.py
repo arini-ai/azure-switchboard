@@ -165,6 +165,10 @@ class OpenAIDeployment(ModelDeployment):
         A 429 is one deployment's quota; a connection error is the whole
         resource. Timeouts during upstream-wide slowdowns are uncorrelated with
         which deployment was chosen, so they mark down nothing.
+
+        The timeout branch has to come before the connection one:
+        APITimeoutError subclasses APIConnectionError, so testing connection
+        first would cool the whole resource on every timeout.
         """
         if isinstance(exc, RateLimitError):
             log.exception(f"Marking down model for rate limit on {op}")
