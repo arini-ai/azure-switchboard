@@ -13,7 +13,7 @@ from anthropic import (
     RateLimitError,
 )
 from anthropic.types import Message, ParsedMessage, RawMessageStreamEvent
-from anthropic.types.message import Usage
+from anthropic.types.usage import Usage
 from loguru import logger
 from pydantic import BaseModel
 
@@ -42,16 +42,22 @@ class AnthropicConfig:
     models: list[Model] = field(default_factory=list)
 
     def get_client(self) -> AsyncAnthropicFoundry:
-        if not self.resource and not self.base_url:
-            raise SwitchboardError(
-                f"{self.name}: one of resource or base_url is required"
+        # The SDK declares these as mutually exclusive overloads: a `resource`
+        # to derive the Foundry URL from, or an explicit `base_url`. base_url
+        # wins when both are set.
+        if self.base_url:
+            return AsyncAnthropicFoundry(
+                base_url=self.base_url,
+                api_key=self.api_key,
+                timeout=self.timeout,
             )
-        return AsyncAnthropicFoundry(
-            resource=self.resource,
-            base_url=self.base_url,
-            api_key=self.api_key,
-            timeout=self.timeout,
-        )
+        if self.resource:
+            return AsyncAnthropicFoundry(
+                resource=self.resource,
+                api_key=self.api_key,
+                timeout=self.timeout,
+            )
+        raise SwitchboardError(f"{self.name}: one of resource or base_url is required")
 
 
 class AnthropicDeployment(DeploymentBase):
