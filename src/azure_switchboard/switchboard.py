@@ -28,7 +28,7 @@ from tenacity import (
 
 from .anthropic_deployment import AnthropicDeployment
 from .exceptions import SwitchboardError
-from .foundry import FirstParty, Foundry
+from .foundry import Foundry, Resource
 from .deployment import ModelDeployment, UtilStats
 from .openai_deployment import OpenAIDeployment
 
@@ -161,7 +161,7 @@ class Switchboard:
             except asyncio.CancelledError:
                 pass
 
-    def _all_foundries(self) -> list[Foundry]:
+    def _all_resources(self) -> list[Resource]:
         # each surface owns its first-party resource, so usage against a
         # fallback shows up in stats and resets on the same schedule
         first_party = [
@@ -171,11 +171,11 @@ class Switchboard:
         return list(self.foundries.values()) + [f for f in first_party if f]
 
     def reset_usage(self) -> None:
-        for foundry in self._all_foundries():
+        for foundry in self._all_resources():
             foundry.reset_usage()
 
     def stats(self) -> dict[str, dict[str, UtilStats]]:
-        return {f.name: f.stats() for f in self._all_foundries()}
+        return {f.name: f.stats() for f in self._all_resources()}
 
     def _select(
         self,
@@ -267,7 +267,9 @@ class _Chat:
             # Not part of the pool: it is what selection reaches for once the
             # pool has nothing healthy left.
             self._first_party = (
-                FirstParty("openai") if sb._openai_fallback_enabled else None
+                Resource(name="first-party-openai")
+                if sb._openai_fallback_enabled
+                else None
             )
             self._fallbacks: dict[str, OpenAIDeployment] = {}
 
@@ -345,7 +347,9 @@ class _Messages:
                     self._pool.setdefault(model.name, []).append(model)
 
         self._first_party = (
-            FirstParty("anthropic") if sb._anthropic_fallback_enabled else None
+            Resource(name="first-party-anthropic")
+            if sb._anthropic_fallback_enabled
+            else None
         )
         self._fallbacks: dict[str, AnthropicDeployment] = {}
 
@@ -413,7 +417,7 @@ class _LRUDict(OrderedDict):
 
         super().__init__(*args, **kwargs)
 
-    def __setitem__(self, key: str, value: Foundry) -> None:
+    def __setitem__(self, key: str, value: Resource) -> None:
         super().__setitem__(key, value)
         super().move_to_end(key)
 
@@ -421,7 +425,7 @@ class _LRUDict(OrderedDict):
             oldkey = next(iter(self))
             super().__delitem__(oldkey)
 
-    def __getitem__(self, key: str) -> Foundry:
+    def __getitem__(self, key: str) -> Resource:
         val = super().__getitem__(key)
         super().move_to_end(key)
 

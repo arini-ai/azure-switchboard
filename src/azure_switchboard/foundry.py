@@ -17,34 +17,31 @@ from .openai_deployment import OpenAIDeployment
 Deployment = OpenAIDeployment | AnthropicDeployment
 
 
-class Foundry:
-    """An Azure AI Foundry resource: an endpoint, a credential, and the model
-    deployments it hosts.
+class Resource:
+    """Somewhere deployments live: a credential, a timeout, and the clients
+    they share.
 
-    `name` is the Azure resource name and resolves to
-    `https://{name}.services.ai.azure.com/`, onto which each model appends the
-    path for the API it speaks. A model can override the whole URL with
-    `endpoint=`, which covers legacy `<resource>.openai.azure.com` resources
-    and non-Azure hosts.
+    `base` is the URL prefix a deployment appends its API path to. Without one,
+    each SDK falls back to its vendor default — which is how the vendors' own
+    APIs are reached.
     """
 
     def __init__(
         self,
         name: str,
         *,
+        base: str | None = None,
         api_key: str | None = None,
         timeout: float = 30.0,
         models: Iterable[Deployment] = (),
         default_cooldown: float = 10.0,
     ) -> None:
         self.name = name
+        self.base = base
         self.api_key = api_key
         self.timeout = timeout
         self.default_cooldown = default_cooldown
         self.cooldown_until: float = 0
-
-        # The prefix each deployment appends its API path to.
-        self.base: str | None = f"https://{name}.services.ai.azure.com/"
 
         # Keyed by URL: within one API, that is what distinguishes a client.
         # AsyncAnthropicFoundry subclasses AsyncAnthropic, and AsyncAzureOpenAI
@@ -104,20 +101,33 @@ class Foundry:
         return f"{type(self).__name__}<{self.name}>([{elems}])"
 
 
-class FirstParty(Foundry):
-    """The vendors' own APIs, used as a last-resort fallback.
+class Foundry(Resource):
+    """An Azure AI Foundry resource: an endpoint, a credential, and the model
+    deployments it hosts.
 
-    Not an Azure resource, so it derives no endpoint: each SDK is left to its
-    own default base URL and its own environment variable for credentials.
+    `name` is the Azure resource name and resolves to
+    `https://{name}.services.ai.azure.com/`, onto which each model appends the
+    path for the API it speaks. A model can override the whole URL with
+    `endpoint=`, which covers legacy `<resource>.openai.azure.com` resources
+    and non-Azure hosts.
     """
 
     def __init__(
-        self, api: str, *, timeout: float = 30.0, models: Iterable[Deployment] = ()
-    ):
-        # base has to be cleared before any deployment is added, since add()
-        # builds the client and a stale base would build the Foundry variant
-        super().__init__(name=f"first-party-{api}", timeout=timeout)
-        # no resource to derive from; each SDK falls back to its own default
-        self.base = None
-        for model in models:
-            self.add(model)
+        self,
+        name: str,
+        *,
+        api_key: str | None = None,
+        timeout: float = 30.0,
+        models: Iterable[Deployment] = (),
+        default_cooldown: float = 10.0,
+    ) -> None:
+        # base is passed down rather than assigned after, so it is in place
+        # before any deployment is added and builds its client against it
+        super().__init__(
+            name,
+            base=f"https://{name}.services.ai.azure.com/",
+            api_key=api_key,
+            timeout=timeout,
+            models=models,
+            default_cooldown=default_cooldown,
+        )

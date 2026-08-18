@@ -10,7 +10,7 @@ from opentelemetry import trace
 from .exceptions import SwitchboardError
 
 if TYPE_CHECKING:
-    from .foundry import Foundry
+    from .foundry import Resource
 
 
 @dataclass(frozen=True)
@@ -48,9 +48,9 @@ class ModelDeployment:
         self.cooldown_until: float = 0
         self.last_reset: float = 0
 
-        self._foundry: Foundry | None = None
+        self._foundry: Resource | None = None
 
-    def bind(self, foundry: Foundry) -> None:
+    def bind(self, foundry: Resource) -> None:
         if self._foundry is not None and self._foundry is not foundry:
             raise SwitchboardError(
                 f"{self.name} is already bound to {self._foundry.name}"
@@ -58,7 +58,7 @@ class ModelDeployment:
         self._foundry = foundry
 
     @property
-    def foundry(self) -> Foundry:
+    def foundry(self) -> Resource:
         if self._foundry is None:
             raise SwitchboardError(
                 f"{self.name} is not bound to a foundry; pass it to Foundry(models=[...])"

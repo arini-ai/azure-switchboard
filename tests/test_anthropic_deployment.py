@@ -6,7 +6,7 @@ from httpx import Request, Response
 from pydantic import BaseModel
 
 from azure_switchboard import AnthropicDeployment, Foundry
-from azure_switchboard.foundry import FirstParty
+from azure_switchboard.foundry import Resource
 from azure_switchboard.anthropic_deployment import _content_len
 
 from .conftest import (
@@ -70,9 +70,11 @@ class TestAnthropicEndpoint:
         assert type(deployment.client).__name__ == "AsyncAnthropicFoundry"
 
     def test_first_party_client_is_the_plain_variant(self, monkeypatch):
+        """A Resource with no base derives no URL, so the SDK falls back to its
+        vendor default and the plain client is the right one."""
         monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
-        resource = FirstParty(
-            "anthropic", models=[AnthropicDeployment("claude-sonnet-5")]
+        resource = Resource(
+            "first-party-anthropic", models=[AnthropicDeployment("claude-sonnet-5")]
         )
         deployment = resource.models["claude-sonnet-5"]
         assert deployment.url is None

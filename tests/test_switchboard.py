@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from azure_switchboard import Foundry, OpenAIDeployment, Switchboard, SwitchboardError
 from azure_switchboard.anthropic_deployment import AnthropicDeployment
 from azure_switchboard.deployment import ModelDeployment
+from azure_switchboard.foundry import Resource
 
 from .conftest import (
     COMPLETION_PARAMS,
@@ -739,6 +740,24 @@ class TestMixedPoolConstruction:
         assert (
             resource.models["gpt-4o"].url
             == "https://legacy.openai.azure.com/openai/v1/"
+        )
+
+    def test_base_is_in_place_before_deployments_are_added(self):
+        """Clients are built during add(), so base has to be settled first.
+
+        A Resource derives no base and its deployments reach the vendor
+        default; a Foundry hands one down through super().__init__ rather than
+        assigning it afterwards, when the models would already be bound.
+        """
+        assert (
+            Resource("plain", models=[OpenAIDeployment("gpt-4o")]).models["gpt-4o"].url
+            is None
+        )
+        assert (
+            Foundry("east", api_key="k", models=[OpenAIDeployment("gpt-4o")])
+            .models["gpt-4o"]
+            .url
+            == "https://east.services.ai.azure.com/openai/v1/"
         )
 
     def test_one_client_per_api_per_foundry(self):
