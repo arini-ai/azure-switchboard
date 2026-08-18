@@ -154,6 +154,11 @@ class OpenAIDeployment(DeploymentBase):
 
         try:
             logger.trace("Creating parsed completion")
+            # Deliberately the beta path: client.chat.completions.parse did not
+            # exist before openai ~1.93, and this package supports >=1.62. In
+            # current openai the two are the same object, so this is not legacy
+            # cruft -- switching to the non-beta spelling would break anyone on
+            # an older openai without raising the floor in pyproject.toml.
             response = await self.client.beta.chat.completions.parse(
                 model=model, response_format=response_format, **kwargs
             )

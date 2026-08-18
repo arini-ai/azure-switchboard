@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import random
 from collections import OrderedDict
+from functools import cached_property
 from typing import (
     Any,
     Awaitable,
@@ -129,10 +130,17 @@ class Switchboard:
         # reset usage every N seconds
         self.ratelimit_window = ratelimit_window
 
-        # Each provider's surface mirrors its SDK's own call path, so callers
-        # port from either by swapping the client and changing nothing else.
-        self.chat = _Chat(self)
-        self.messages = _Messages(self)
+    # Each provider's surface mirrors its SDK's own call path, so callers port
+    # from either by swapping the client and changing nothing else. Built
+    # lazily as cached properties so they're visible on the class rather than
+    # only on instances.
+    @cached_property
+    def chat(self) -> _Chat:
+        return _Chat(self)
+
+    @cached_property
+    def messages(self) -> _Messages:
+        return _Messages(self)
 
     async def __aenter__(self) -> Switchboard:
         self.start()
@@ -253,65 +261,68 @@ class Switchboard:
         return f"Switchboard({self.deployments})"
 
 
-class _Completions:
-    """Mirrors `openai.AsyncOpenAI.chat.completions`."""
-
-    def __init__(self, switchboard: Switchboard) -> None:
-        self._switchboard = switchboard
-
-    @overload
-    async def create(
-        self, *, session_id: str | None = None, stream: Literal[True], **kwargs
-    ) -> AsyncStream[ChatCompletionChunk]: ...
-
-    @overload
-    async def create(
-        self, *, session_id: str | None = None, **kwargs
-    ) -> ChatCompletion: ...
-
-    async def create(
-        self,
-        *,
-        model: str,
-        session_id: str | None = None,
-        stream: bool = False,
-        **kwargs,
-    ) -> ChatCompletion | AsyncStream[ChatCompletionChunk]:
-        """
-        Send a chat completion request to the selected deployment, with automatic failover.
-        """
-        return await self._switchboard._dispatch(
-            model=model,
-            session_id=session_id,
-            call=lambda d: d.create(model=model, stream=stream, **kwargs),
-        )
-
-    async def parse(
-        self,
-        *,
-        model: str,
-        response_format: type[_T],
-        session_id: str | None = None,
-        **kwargs,
-    ) -> ParsedChatCompletion[_T]:
-        """
-        Send a structured output parse request to the selected deployment, with
-        automatic failover.
-        """
-        return await self._switchboard._dispatch(
-            model=model,
-            session_id=session_id,
-            call=lambda d: d.parse(
-                model=model, response_format=response_format, **kwargs
-            ),
-        )
-
-
 class _Chat:
-    """Mirrors `openai.AsyncOpenAI.chat`."""
+    """Mirrors `openai.AsyncOpenAI.chat`, whose sole member is `.completions`.
+
+    Thin by design: the shape exists to match the SDK's call path, not to
+    carry behavior.
+    """
+
+    class Completions:
+        """Mirrors `openai.AsyncOpenAI.chat.completions`."""
+
+        def __init__(self, switchboard: Switchboard) -> None:
+            self._switchboard = switchboard
+
+        @overload
+        async def create(
+            self, *, session_id: str | None = None, stream: Literal[True], **kwargs
+        ) -> AsyncStream[ChatCompletionChunk]: ...
+
+        @overload
+        async def create(
+            self, *, session_id: str | None = None, **kwargs
+        ) -> ChatCompletion: ...
+
+        async def create(
+            self,
+            *,
+            model: str,
+            session_id: str | None = None,
+            stream: bool = False,
+            **kwargs,
+        ) -> ChatCompletion | AsyncStream[ChatCompletionChunk]:
+            """
+            Send a chat completion request to the selected deployment, with automatic failover.
+            """
+            return await self._switchboard._dispatch(
+                model=model,
+                session_id=session_id,
+                call=lambda d: d.create(model=model, stream=stream, **kwargs),
+            )
+
+        async def parse(
+            self,
+            *,
+            model: str,
+            response_format: type[_T],
+            session_id: str | None = None,
+            **kwargs,
+        ) -> ParsedChatCompletion[_T]:
+            """
+            Send a structured output parse request to the selected deployment, with
+            automatic failover.
+            """
+            return await self._switchboard._dispatch(
+                model=model,
+                session_id=session_id,
+                call=lambda d: d.parse(
+                    model=model, response_format=response_format, **kwargs
+                ),
+            )
 
     def __init__(self, switchboard: Switchboard) -> None:
-        self.completions = _Completions(switchboard)
+        self.completions = _Chat.Completions(switchboard)
 
 
 class _Messages:
