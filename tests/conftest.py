@@ -57,10 +57,8 @@ async def collect_chunks(
 def openai_config(name: str, *, azure: bool = True) -> OpenAIConfig:
     """An OpenAI deployment config.
 
-    `azure=True` targets Azure OpenAI, whose requests go to
-    /openai/v1/chat/completions. `azure=False` is the direct-OpenAI path,
-    where base_url is None and requests go to /v1/chat/completions instead.
-    The mock_client fixture has a route for each, so both shapes stay covered.
+    `azure=False` drops base_url for the direct-OpenAI path, which
+    mock_client routes separately from Azure's.
     """
     return OpenAIConfig(
         name=name,

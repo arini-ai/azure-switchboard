@@ -342,10 +342,8 @@ class TestSwitchboard:
     async def test_ratelimit_reset(self):
         """The periodic task zeroes usage once the window elapses.
 
-        Usage is seeded synchronously rather than via requests: with an await
-        between spending and asserting, a slow runner can let the reset fire
-        first and the assertion races. Accumulation from real requests is
-        covered in test_openai_api.py / test_anthropic_api.py.
+        Usage is seeded synchronously: an await between spending and
+        asserting lets the reset fire first and the assertion races.
         """
 
         # nonzero ratelimit_window so the reset task actually runs

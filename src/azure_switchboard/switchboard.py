@@ -100,9 +100,8 @@ class Switchboard:
             raise SwitchboardError("No deployments provided")
 
         self.deployments: dict[str, DeploymentBase] = {}
-        # Routing is keyed on model name alone, so a name must belong to
-        # exactly one provider. Registering it on both would make the surface
-        # that serves it ambiguous, so reject it here rather than at call time.
+        # Routing is by model name alone, so a name on both providers would
+        # make the serving surface ambiguous.
         owners: dict[str, tuple[str, str]] = {}
         for config in deployments:
             if config.name in self.deployments:
@@ -123,17 +122,11 @@ class Switchboard:
         self.selector = selector
         self.failover_policy = failover_policy
 
-        # LRUDict to expire old sessions
         self.sessions = _LRUDict(max_size=max_sessions)
         self.ratelimit_reset_task: asyncio.Task | None = None
 
-        # reset usage every N seconds
         self.ratelimit_window = ratelimit_window
 
-    # Each provider's surface mirrors its SDK's own call path, so callers port
-    # from either by swapping the client and changing nothing else. Built
-    # lazily as cached properties so they're visible on the class rather than
-    # only on instances.
     @cached_property
     def chat(self) -> _Chat:
         return _Chat(self)
@@ -184,7 +177,6 @@ class Switchboard:
         Select a deployment using the power of two random choices algorithm.
         If session_id is provided, try to use that specific deployment first.
         """
-        # Handle session-based routing first
         if session_id and session_id in self.sessions:
             deployment = self.sessions[session_id]
             if deployment.is_healthy(model):
@@ -195,7 +187,6 @@ class Switchboard:
                 f"{model} is unhealthy on {deployment.name}, falling back to selection"
             )
 
-        # Get eligible deployments for the requested model
         eligible_deployments = [
             d for d in self.deployments.values() if d.is_healthy(model)
         ]
@@ -216,7 +207,6 @@ class Switchboard:
             )
             eligible_deployments = fallback_deployments
 
-        # Record healthy deployments count metric
         healthy_deployments_gauge.set(len(eligible_deployments), {"model": model})
 
         if len(eligible_deployments) == 1:
@@ -236,11 +226,7 @@ class Switchboard:
 
 
 class _Chat:
-    """Mirrors `openai.AsyncOpenAI.chat`, whose sole member is `.completions`.
-
-    Thin by design: the shape exists to match the SDK's call path, not to
-    carry behavior.
-    """
+    """Mirrors `openai.AsyncOpenAI.chat`."""
 
     class Completions:
         """Mirrors `openai.AsyncOpenAI.chat.completions`."""
@@ -257,20 +243,15 @@ class _Chat:
         ) -> _R:  # pyright: ignore[reportReturnType]
             """Select a deployment and issue `call` against it, with failover.
 
-            Deliberately duplicated per surface rather than shared and made
-            generic: the concrete type reads plainly here, at the cost of this
-            loop existing twice. If you edit it, edit the _Messages copy too --
-            in particular `failover_policy.copy()`, which must stay per-call so
-            concurrent requests don't share retry state (#62).
+            Duplicated in _Messages; keep them in step. `failover_policy.copy()`
+            must stay per-call so concurrent requests don't share retry state (#62).
             """
             with logger.contextualize(model=model, session_id=session_id):
                 async for attempt in self.sb.failover_policy.copy():
                     with attempt:
-                        # A model name belongs to exactly one provider,
-                        # enforced at construction, so selection by name yields
-                        # this surface's deployment. Unchecked: reaching for a
-                        # model through the wrong surface fails as an
-                        # AttributeError.
+                        # Sound because a model name maps to one provider,
+                        # enforced at construction. Unchecked, so a
+                        # wrong-surface call fails as an AttributeError.
                         deployment = cast(
                             OpenAIDeployment,
                             self.sb.select_deployment(
@@ -351,19 +332,15 @@ class _Messages:
     ) -> _R:  # pyright: ignore[reportReturnType]
         """Select a deployment and issue `call` against it, with failover.
 
-        Deliberately duplicated per surface rather than shared and made
-        generic: the concrete type reads plainly here, at the cost of this
-        loop existing twice. If you edit it, edit the _Chat.Completions copy too --
-        in particular `failover_policy.copy()`, which must stay per-call so
-        concurrent requests don't share retry state (#62).
+        Duplicated in _Chat.Completions; keep them in step. `failover_policy.copy()`
+        must stay per-call so concurrent requests don't share retry state (#62).
         """
         with logger.contextualize(model=model, session_id=session_id):
             async for attempt in self.sb.failover_policy.copy():
                 with attempt:
-                    # A model name belongs to exactly one provider, enforced
-                    # at construction, so selection by name yields this
-                    # surface's deployment. Unchecked: reaching for a model
-                    # through the wrong surface fails as an AttributeError.
+                    # Sound because a model name maps to one provider, enforced
+                    # at construction. Unchecked, so a wrong-surface call fails
+                    # as an AttributeError.
                     deployment = cast(
                         AnthropicDeployment,
                         self.sb.select_deployment(model=model, session_id=session_id),

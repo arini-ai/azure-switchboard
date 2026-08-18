@@ -51,11 +51,10 @@ class Model:
         Calculate the load weight of this client as a value between 0 and 1.
         Lower weight means this client is a better choice for new requests.
         """
-        # return full utilization if we're cooling down to avoid selection
+        # full utilization while cooling down keeps us out of selection
         if self.is_cooling():
             return 1
 
-        # Calculate token utilization (as a percentage of max)
         # Azure buckets tokens on a non-sliding 60 second window
         token_util = self.tpm_usage / self.tpm_limit if self.tpm_limit > 0 else 0
 
@@ -63,7 +62,6 @@ class Model:
         # Limits are enforced proportionally to the 60s limit in 1-10s sliding windows
         request_util = self.rpm_usage / self.rpm_limit if self.rpm_limit > 0 else 0
 
-        # Use the higher of the two utilizations as the weight
         # Add a small random factor to prevent oscillation
         return round(max(token_util, request_util) + random.uniform(0, 0.01), 3)
 

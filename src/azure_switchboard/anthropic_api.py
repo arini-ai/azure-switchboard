@@ -42,9 +42,7 @@ class AnthropicConfig:
     models: list[Model] = field(default_factory=list)
 
     def get_client(self) -> AsyncAnthropicFoundry:
-        # The SDK declares these as mutually exclusive overloads: a `resource`
-        # to derive the Foundry URL from, or an explicit `base_url`. base_url
-        # wins when both are set.
+        # The SDK types these as mutually exclusive overloads; base_url wins.
         if self.base_url:
             return AsyncAnthropicFoundry(
                 base_url=self.base_url,
@@ -103,7 +101,6 @@ class AnthropicDeployment(DeploymentBase):
                     model=model, stream=True, **kwargs
                 )
 
-                # streaming util gets updated inside _AsyncMessageStreamWrapper
                 return _AsyncMessageStreamWrapper(
                     stream=response_stream,
                     deployment=self,
@@ -185,9 +182,8 @@ class AnthropicDeployment(DeploymentBase):
         self._set_span_attributes(usage)
 
     def _estimate_token_usage(self, kwargs: dict) -> int:
-        # loose estimate of token cost, mirroring the chat path's ~4 chars per
-        # token heuristic. Unlike chat, content may be a list of blocks and the
-        # system prompt lives outside messages.
+        # ~4 chars per token, as in the chat path. Unlike chat, content may be
+        # a list of blocks and the system prompt lives outside messages.
         chars = _content_len(kwargs.get("system", ""))
         for m in kwargs.get("messages", []):
             chars += _content_len(m.get("content", ""))
@@ -226,10 +222,8 @@ class _AsyncMessageStreamWrapper(wrapt.ObjectProxy):
         self._self_model: Model = model
         self._self_offset: int = offset
         self._self_output_spent: int = 0
-        # Stream events are consumed after Switchboard.messages() returns, so
-        # the contextualized logger scope from messages() is no longer active
-        # here. Keep a bound logger on the wrapper to retain deployment/model
-        # context for mid-stream error logs.
+        # Events are consumed after create() returns, once its contextualize
+        # scope is gone, so bind the context for mid-stream error logs.
         self._self_logger = logger.bind(
             deployment=deployment.name,
             model=model.name,

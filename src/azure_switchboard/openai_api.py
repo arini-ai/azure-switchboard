@@ -94,7 +94,6 @@ class OpenAIDeployment(DeploymentBase):
                     **kwargs,
                 )
 
-                # streaming util gets updated inside _AsyncStreamWrapper
                 return _AsyncStreamWrapper(
                     stream=response_stream,
                     deployment=self,
@@ -178,12 +177,8 @@ class OpenAIDeployment(DeploymentBase):
             raise
 
     def _estimate_token_usage(self, kwargs: dict) -> int:
-        # loose estimate of token cost. were only considering
-        # input tokens for now, we can add output estimates as well later.
-        # openai says roughly 4 characters per token, so sum len of messages
-        # and divide by 4.
+        # ~4 chars per token, input only.
         t_input = sum(len(m.get("content", "")) for m in kwargs.get("messages", []))
-        # t_output = kwargs.get("max_tokens", 500)
         return t_input // 4
 
     def _set_span_attributes(self, usage: CompletionUsage) -> None:
@@ -209,10 +204,8 @@ class _AsyncStreamWrapper(wrapt.ObjectProxy):
         self._self_deployment: OpenAIDeployment = deployment
         self._self_model: Model = model
         self._self_offset: int = offset
-        # Stream chunks are consumed after Switchboard.create() returns, so the
-        # contextualized logger scope from create() is no longer active here.
-        # Keep a bound logger on the wrapper to retain deployment/model context
-        # for mid-stream error logs.
+        # Chunks are consumed after create() returns, once its contextualize
+        # scope is gone, so bind the context for mid-stream error logs.
         self._self_logger = logger.bind(
             deployment=deployment.name,
             model=model.name,

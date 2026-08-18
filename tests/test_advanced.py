@@ -16,5 +16,3 @@ class TestAdvanced:
 
         for _ in range(100):
             await switchboard.chat.completions.create(**COMPLETION_PARAMS)
-
-        # print(switchboard.get_usage())
