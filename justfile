@@ -17,6 +17,9 @@ alias tests := test
 lint *args='--fix':
   uv run ruff check . {{args}}
 
+typecheck:
+  uv run pyright
+
 bump-version *args='':
   uv run bumpver update {{args}}
 
