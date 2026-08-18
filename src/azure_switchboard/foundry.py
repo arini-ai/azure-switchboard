@@ -1,19 +1,19 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 
 from .anthropic_deployment import AnthropicDeployment
 from .exceptions import SwitchboardError
-from .model import UtilStats
+from .deployment import UtilStats
 from .openai_deployment import OpenAIDeployment
 
-# Every deployment speaks one of the APIs switchboard serves. ModelBase carries
+# Every deployment speaks one of the APIs switchboard serves. ModelDeployment carries
 # the quota and cooldown machinery they share and bounds the generic selection
-# code, but nothing is ever only a ModelBase, so a resource says so.
+# code, but nothing is ever only a ModelDeployment, so a resource says so.
 Deployment = OpenAIDeployment | AnthropicDeployment
 
 
@@ -57,29 +57,26 @@ class Foundry:
             self.add(model)
 
     def add(self, model: Deployment) -> None:
+        """Register a deployment and hand it the client it will use.
+
+        Deployments served from the same URL share a client, so two models of
+        one API on this resource share a connection pool while one that
+        overrides its endpoint gets its own.
+        """
         if model.name in self.models:
             raise SwitchboardError(f"{self.name}: duplicate model {model.name}")
         model.bind(self)
         self.models[model.name] = model
 
-    def openai_client(
-        self, url: str | None, build: Callable[[], AsyncOpenAI]
-    ) -> AsyncOpenAI:
-        """Share one client across the deployments served from the same URL.
-
-        Two deployments of this API on this resource share a connection pool;
-        one that overrides its endpoint gets its own.
-        """
-        if url not in self._openai_clients:
-            self._openai_clients[url] = build()
-        return self._openai_clients[url]
-
-    def anthropic_client(
-        self, url: str | None, build: Callable[[], AsyncAnthropic]
-    ) -> AsyncAnthropic:
-        if url not in self._anthropic_clients:
-            self._anthropic_clients[url] = build()
-        return self._anthropic_clients[url]
+        url = model.url
+        if isinstance(model, OpenAIDeployment):
+            if url not in self._openai_clients:
+                self._openai_clients[url] = model.new_client()
+            model.client = self._openai_clients[url]
+        else:
+            if url not in self._anthropic_clients:
+                self._anthropic_clients[url] = model.new_client()
+            model.client = self._anthropic_clients[url]
 
     def mark_down(self, seconds: float = 0.0) -> None:
         """Take the whole resource out of selection.
@@ -117,6 +114,10 @@ class FirstParty(Foundry):
     def __init__(
         self, api: str, *, timeout: float = 30.0, models: Iterable[Deployment] = ()
     ):
-        super().__init__(name=f"first-party-{api}", timeout=timeout, models=models)
+        # base has to be cleared before any deployment is added, since add()
+        # builds the client and a stale base would build the Foundry variant
+        super().__init__(name=f"first-party-{api}", timeout=timeout)
         # no resource to derive from; each SDK falls back to its own default
         self.base = None
+        for model in models:
+            self.add(model)

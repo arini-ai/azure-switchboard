@@ -13,7 +13,9 @@ class TestBinding:
             _ = model.foundry
 
     def test_unbound_deployment_has_no_client(self, model: OpenAIDeployment):
-        with pytest.raises(SwitchboardError, match="not bound to a foundry"):
+        """The client is assigned at registration, so there is nothing to read
+        until a Foundry has taken the deployment."""
+        with pytest.raises(AttributeError):
             _ = model.client
 
     def test_rebinding_to_another_foundry_is_rejected(self, model: OpenAIDeployment):

@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from azure_switchboard import Foundry, OpenAIDeployment, Switchboard, SwitchboardError
 from azure_switchboard.anthropic_deployment import AnthropicDeployment
-from azure_switchboard.model import ModelBase
+from azure_switchboard.deployment import ModelDeployment
 
 from .conftest import (
     COMPLETION_PARAMS,
@@ -283,7 +283,7 @@ class TestSwitchboard:
 
     async def test_foundry_must_hold_typed_deployments(self):
         resource = Foundry(name="odd", api_key="k")
-        resource.models["mystery"] = ModelBase(name="mystery")
+        resource.models["mystery"] = ModelDeployment(name="mystery")
         with pytest.raises(SwitchboardError, match="not an OpenAIDeployment"):
             Switchboard(foundries=[resource])
 

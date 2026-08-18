@@ -20,7 +20,7 @@ class UtilStats:
     rpm: str
 
 
-class ModelBase:
+class ModelDeployment:
     """A model deployment: its quota, its live utilization, and its cooldown.
 
     Subclasses bind an API spec to it, supplying the calls that speak to an

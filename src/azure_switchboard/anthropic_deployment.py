@@ -17,13 +17,16 @@ from anthropic.types.usage import Usage
 from loguru import logger
 from pydantic import BaseModel
 
-from .model import ModelBase
+from .deployment import ModelDeployment
 
 _T = TypeVar("_T", bound=BaseModel)
 
 
-class AnthropicDeployment(ModelBase):
+class AnthropicDeployment(ModelDeployment):
     """A model deployment speaking the Anthropic Messages API."""
+
+    # Assigned by Foundry.add, which shares one client per URL.
+    client: AsyncAnthropic
 
     @property
     def url(self) -> str | None:
@@ -32,24 +35,18 @@ class AnthropicDeployment(ModelBase):
         base = self.foundry.base
         return f"{base}anthropic/" if base else None
 
-    @property
-    def client(self) -> AsyncAnthropic:
+    def new_client(self) -> AsyncAnthropic:
         # AsyncAnthropicFoundry overrides auth to send Azure's api-key header,
         # so it is not interchangeable with the first-party client. No URL
         # means we are not on Foundry at all.
-        foundry, url = self.foundry, self.url
-        if url is None:
-            return foundry.anthropic_client(
-                None,
-                lambda: AsyncAnthropic(
-                    api_key=foundry.api_key, timeout=foundry.timeout
-                ),
+        if self.url is None:
+            return AsyncAnthropic(
+                api_key=self.foundry.api_key, timeout=self.foundry.timeout
             )
-        return foundry.anthropic_client(
-            url,
-            lambda: AsyncAnthropicFoundry(
-                base_url=url, api_key=foundry.api_key, timeout=foundry.timeout
-            ),
+        return AsyncAnthropicFoundry(
+            base_url=self.url,
+            api_key=self.foundry.api_key,
+            timeout=self.foundry.timeout,
         )
 
     @overload

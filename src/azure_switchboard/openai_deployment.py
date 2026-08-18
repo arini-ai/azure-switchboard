@@ -20,13 +20,16 @@ from openai.types.chat import (
 from openai.types.completion_usage import CompletionUsage
 from pydantic import BaseModel
 
-from .model import ModelBase
+from .deployment import ModelDeployment
 
 _T = TypeVar("_T", bound=BaseModel)
 
 
-class OpenAIDeployment(ModelBase):
+class OpenAIDeployment(ModelDeployment):
     """A model deployment speaking the Chat Completions API."""
+
+    # Assigned by Foundry.add, which shares one client per URL.
+    client: AsyncOpenAI
 
     @property
     def url(self) -> str | None:
@@ -35,14 +38,11 @@ class OpenAIDeployment(ModelBase):
         base = self.foundry.base
         return f"{base}openai/v1/" if base else None
 
-    @property
-    def client(self) -> AsyncOpenAI:
-        foundry, url = self.foundry, self.url
-        return foundry.openai_client(
-            url,
-            lambda: AsyncOpenAI(
-                api_key=foundry.api_key, base_url=url, timeout=foundry.timeout
-            ),
+    def new_client(self) -> AsyncOpenAI:
+        return AsyncOpenAI(
+            api_key=self.foundry.api_key,
+            base_url=self.url,
+            timeout=self.foundry.timeout,
         )
 
     @overload

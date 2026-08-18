@@ -29,12 +29,12 @@ from tenacity import (
 from .anthropic_deployment import AnthropicDeployment
 from .exceptions import SwitchboardError
 from .foundry import FirstParty, Foundry
-from .model import ModelBase, UtilStats
+from .deployment import ModelDeployment, UtilStats
 from .openai_deployment import OpenAIDeployment
 
 _T = TypeVar("_T", bound=BaseModel)
 _R = TypeVar("_R")
-_M = TypeVar("_M", bound=ModelBase)
+_M = TypeVar("_M", bound=ModelDeployment)
 
 meter = metrics.get_meter("azure_switchboard.switchboard")
 deployment_util = meter.create_gauge(
