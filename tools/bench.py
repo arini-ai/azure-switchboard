@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 #
 # To run this, use:
-#   uv run api_demo.py
+#   just bench
 #
-# // script
+# /// script
 # requires-python = ">=3.10"
 # dependencies = [
 #     "azure-switchboard",
@@ -23,16 +23,19 @@ from azure_switchboard import Foundry, OpenAIDeployment, Switchboard
 
 
 async def bench(args: argparse.Namespace) -> None:
+    # one real resource, registered N times under distinct names so selection
+    # has something to distribute across; each points back at the real endpoint
+    endpoint = f"https://{os.environ['AZURE_FOUNDRY']}.services.ai.azure.com/openai/v1/"
     resources = [
         Foundry(
             name=f"bench_{n}",
-            api_key=os.environ["AZURE_OPENAI_API_KEY"],
+            api_key=os.environ["AZURE_API_KEY"],
             models=[
                 OpenAIDeployment(
-                    name="gpt-4o-mini",
+                    name=os.getenv("BENCH_MODEL", "gpt-4o-mini"),
                     tpm=30000,
                     rpm=300,
-                    endpoint=f"{os.environ['AZURE_OPENAI_ENDPOINT']}/openai/v1/",
+                    endpoint=endpoint,
                 )
             ],
         )
@@ -52,7 +55,7 @@ async def bench(args: argparse.Namespace) -> None:
             async with inflight_requests:
                 start = time.perf_counter()
                 await switchboard.chat.completions.create(
-                    model="gpt-4o-mini",
+                    model=os.getenv("BENCH_MODEL", "gpt-4o-mini"),
                     messages=[
                         {
                             "role": "user",
@@ -110,9 +113,9 @@ def print_usage_histogram(data: dict, width=30, bins=10, absolute=False):
     """
     # Extract the utilization values from the usage data
     all_utils = []
-    for model in data.values():
-        for metrics in model.values():
-            all_utils.append(metrics.get("util"))
+    for resource in data.values():
+        for stats in resource.values():
+            all_utils.append(stats.util)
 
     if not all_utils:
         print("No utilization data available")

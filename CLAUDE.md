@@ -17,8 +17,9 @@
 - Lint: `just lint` or `uv run ruff check . --fix`
 - Format: `uv run ruff format .`
 - Typecheck: `just typecheck` or `uv run pyright` (scoped to `src/`; runs in CI)
-- Demo: `just demo` or `uv run --env-file .env tools/api_demo.py`
-- Benchmark: `just bench` or `uv run --env-file .env tools/bench.py -v -r 1000 -d 10 -e 500`
+- Demo: `just demo` or `uv run tools/readme_example.py`
+- Benchmark: `just bench` (needs AZURE_FOUNDRY + AZURE_API_KEY)
+- Live wiring check: `just smoke` (same credentials; real inference, nothing mocked)
 - OpenTelemetry demo: `just otel`
 - Bump version: `just bump-version`
 - Pre-commit hooks: `just pre-commit`

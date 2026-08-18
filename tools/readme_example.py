@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # To run this, use:
-#   uv run --env-file .env tools/readme_example.py
+#   just demo
 #
 # /// script
 # requires-python = ">=3.10"
