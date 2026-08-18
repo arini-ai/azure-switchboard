@@ -12,14 +12,9 @@ uv add azure-switchboard
 
 ## Overview
 
-`azure-switchboard` is a Python 3 asyncio library that provides an API-compatible client loadbalancer for Chat Completions and the Anthropic Messages API. You name a model; switchboard picks the deployment underneath, distributing requests across healthy ones using the [power of two random choices](https://www.eecs.harvard.edu/~michaelm/postscripts/handbook2001.pdf) method.
+`azure-switchboard` is a Python 3 asyncio library that spreads Chat Completions and Anthropic Messages traffic across the deployments you already have, with no coordination between client instances. You ask for a model; it picks a healthy deployment of that model using [power of two random choices](https://www.eecs.harvard.edu/~michaelm/postscripts/handbook2001.pdf), tracks what each one is carrying, and routes around the ones that start refusing.
 
-The model mirrors Azure's own:
-
-- A **`Foundry`** is a resource: an endpoint, a credential, and the deployments it hosts.
-- An **`OpenAIDeployment`** or **`AnthropicDeployment`** is a deployment: a model instance with its own TPM/RPM allocation, speaking one API.
-
-Because the API is a property of the deployment rather than the resource, one Foundry can serve both — reached at `sb.chat.completions` and `sb.messages` respectively, on one credential and one connection pool per API.
+List the Azure resources you have and the models deployed on them:
 
 ```python
 from azure_switchboard import AnthropicDeployment, Foundry, OpenAIDeployment, Switchboard
@@ -52,19 +47,7 @@ async with sb:
     )
 ```
 
-Endpoints derive from the resource name as `https://{name}.services.ai.azure.com`, onto which each deployment appends its API path — `/openai/v1/` or `/anthropic/`. Pass `endpoint=` on a deployment to override the whole URL: for a legacy `<resource>.openai.azure.com` host, or a non-Azure one.
-
-`Foundry` is the Azure specialization of `Resource`, which is what derives that
-endpoint. For a host that derives nothing — an OpenAI-compatible gateway, say —
-use `Resource` directly and give each deployment an explicit `endpoint`:
-
-```python
-Switchboard(resources=[
-    Resource(name="gateway", api_key=..., models=[
-        OpenAIDeployment("gpt-4o-mini", endpoint="https://gateway.internal/v1/"),
-    ]),
-])
-```
+You get the endpoint for free from the resource name, and a resource can host models of both kinds on one credential — so the thing you configure matches the thing you pay for.
 
 ## Features
 
@@ -79,7 +62,7 @@ Switchboard(resources=[
   | `anthropic.messages.parse`       | `sb.messages.parse`          | `ParsedMessage[T]`          |
   | `anthropic.messages.stream`      | `sb.messages.stream`         | `AsyncMessageStream`        |
 
-- **Multi-Provider**: OpenAI and Anthropic deployments coexist on one resource and in one Switchboard. Each API gets its own pool, so the calling surface resolves a model name — one pool may hold a name the other also holds. Within a single resource, deployment names are unique, as they are in Azure.
+- **Multi-Provider**: GPT and Claude deployments live side by side in one Switchboard, sharing utilization tracking, affinity and failover. Nothing about your OpenAI setup changes when you add a Claude deployment to it.
 - **Coordination-Free**: The default Two Random Choices algorithm does not require coordination between client instances to achieve excellent load distribution characteristics.
 - **Utilization-Aware**: TPM/RPM utilization is tracked per deployment for use during selection.
 - **Batteries Included**:
@@ -92,10 +75,9 @@ Switchboard(resources=[
 
 ## Migrating from 2026.8.0
 
-The configuration API was replaced wholesale. Previously a "deployment" owned the
-endpoint and credential and listed models inside it, and the API spec was fixed by
-which config class you chose — so one Azure resource serving both a GPT and a Claude
-model had to be registered twice, splitting its quota accounting in two.
+The configuration API was replaced wholesale. The old shape made you register an Azure
+resource twice to serve both a GPT and a Claude model from it, which split its quota
+accounting in two; now one resource holds both.
 
 ```python
 # before
@@ -356,7 +338,17 @@ Distribution overhead scales ~linearly with the number of deployments.
 | `endpoint`         | Full base URL, overriding the one derived from the resource name     | Derived       |
 | `default_cooldown` | Cooldown duration (seconds) after this deployment is marked down     | 10.0          |
 
-`OpenAIDeployment` appends `/openai/v1/` to the resource endpoint and is served at `sb.chat.completions`; `AnthropicDeployment` appends `/anthropic/` and is served at `sb.messages`.
+`OpenAIDeployment` is served at `sb.chat.completions` and reached at `<resource>/openai/v1/`; `AnthropicDeployment` at `sb.messages` and `<resource>/anthropic/`. Set `endpoint` to point a deployment somewhere else — a legacy `<resource>.openai.azure.com` host, or a non-Azure one.
+
+For a host with no Azure endpoint to derive, use `Resource` in place of `Foundry` and give each deployment an explicit `endpoint`:
+
+```python
+Switchboard(resources=[
+    Resource(name="gateway", api_key=..., models=[
+        OpenAIDeployment("gpt-4o-mini", endpoint="https://gateway.internal/v1/"),
+    ]),
+])
+```
 
 ### switchboard.Switchboard Parameters
 
@@ -370,18 +362,15 @@ Distribution overhead scales ~linearly with the number of deployments.
 | `openai_fallback`    | Fall back to the OpenAI API, keyed from `OPENAI_API_KEY`                                           | False                |
 | `anthropic_fallback` | Fall back to the Anthropic API, keyed from `ANTHROPIC_API_KEY`                                     | False                |
 
-Every candidate passed to a selector is a deployment of the requested model, so the model name is not an input to the choice.
-
-There is no public entry point for selecting a deployment without calling one. Selection happens inside `create`/`parse`, and each surface mirrors its SDK, which has no such method. To see which resource a session is pinned to, read `sb.sessions[session_id]`.
+A selector only ever sees deployments of the model that was asked for, so it picks between them on utilization alone. To see which resource a session is pinned to, read `sb.sessions[session_id]`.
 
 `max_tokens` is required by the Messages API and is passed through unchanged — switchboard does not supply a default.
 
 ### Streaming
 
-Both SDKs offer two streaming entry points, and switchboard mirrors both.
+Both SDKs offer two streaming entry points, and both work here.
 
-`create(stream=True)` returns the raw event stream, and usage is tapped per event so
-utilization stays fresh mid-stream:
+`create(stream=True)` gives you the raw events:
 
 ```python
 stream = await sb.messages.create(model=..., max_tokens=1024, messages=[...], stream=True)
@@ -389,9 +378,9 @@ async for event in stream:
     ...
 ```
 
-`stream()` returns the SDK's accumulating helper, whose terminal `Message` /
-`ChatCompletion` carries assembled content, tool-use blocks and final usage. It is a
-context manager and not a coroutine, exactly as the SDKs' own are:
+`stream()` gives you the SDK's accumulating helper, so you get the events _and_ a
+finished `Message` or `ChatCompletion` with content, tool-use blocks and usage already
+assembled — no reassembling it yourself:
 
 ```python
 async with sb.messages.stream(model=..., max_tokens=1024, messages=[...]) as s:
@@ -400,22 +389,20 @@ async with sb.messages.stream(model=..., max_tokens=1024, messages=[...]) as s:
     final = await s.get_final_message()
 ```
 
-A caller here may never iterate — awaiting `get_final_message()` alone is enough — so
-usage is not tapped per event on this path. It is charged once from what the stream
-accumulated, which is correct either way.
-
-Selection, session affinity, fallback and failover apply when the stream is opened,
-so a deployment that fails to open is marked down and another is tried. A failure
-part-way through an open stream cannot be retried, which is the same limit
-`create(stream=True)` has.
+Either way, utilization is tracked and a deployment that fails to open is skipped in
+favour of another. A stream that dies part-way through cannot be retried.
 
 ### First-Party Fallback
 
-With `openai_fallback=True` or `anthropic_fallback=True`, the vendor's own API is what selection reaches for once a pool has nothing healthy left — including for models configured on no foundry at all. It is not part of a pool and never competes with a healthy deployment; it participates in the existing failover loop, so an Azure deployment that returns a 429 marks itself down and the retry lands first-party. The fallback can itself be marked down, so a rate-limited vendor API is not hammered either. Credentials come from the SDKs' own environment variables.
+`openai_fallback=True` / `anthropic_fallback=True` keeps you serving when your Azure
+capacity is exhausted: requests spill over to the vendor's own API, using the
+credential from `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`. It never competes with a
+healthy deployment — it is only reached when nothing else is left — and it covers
+models you have not deployed on Azure at all, so you can call something new without
+provisioning it first. Configure a fallback and you can skip `resources` entirely.
 
-Foundries may be omitted entirely if a fallback is configured.
-
-Token accounting differs slightly by provider. The Messages API has no `total_tokens`, so utilization is charged as `input_tokens + output_tokens`. When streaming, input tokens arrive on `message_start` and a running output total on each `message_delta`; the stream wrapper spends the difference so utilization stays fresh mid-stream.
+A fallback that cannot authenticate fails when you construct the `Switchboard`, not
+during the outage it exists to cover.
 
 ### Cooldown Scope
 
