@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from typing import Literal, TypeVar, cast, overload
 
 import wrapt
-from loguru import logger
 from openai import (
     APIConnectionError,
     APITimeoutError,
@@ -19,11 +19,15 @@ from openai.types.chat import (
     ParsedChatCompletion,
 )
 from openai.types.completion_usage import CompletionUsage
+from opentelemetry.trace import Span
 from pydantic import BaseModel
 
+from . import telemetry
 from .deployment import ModelDeployment
 
 _T = TypeVar("_T", bound=BaseModel)
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAIDeployment(ModelDeployment):
@@ -74,7 +78,7 @@ class OpenAIDeployment(ModelDeployment):
 
         try:
             if stream:
-                logger.trace("Creating streaming completion")
+                logger.debug("creating streaming completion on %s", self.name)
                 stream_options = kwargs.pop("stream_options", {"include_usage": True})
                 response_stream = await self.client.chat.completions.create(
                     model=self.name,
@@ -89,7 +93,7 @@ class OpenAIDeployment(ModelDeployment):
                     offset=_preflight_estimate,
                 )
 
-            logger.trace("Creating chat completion")
+            logger.debug("creating chat completion on %s", self.name)
             response = cast(
                 ChatCompletion,
                 await self.client.chat.completions.create(model=self.name, **kwargs),
@@ -98,7 +102,7 @@ class OpenAIDeployment(ModelDeployment):
             if response.usage:
                 # dont double-count our preflight estimate
                 self.spend_tokens(response.usage.total_tokens - _preflight_estimate)
-                self._set_span_attributes(response.usage)
+                self._record_usage(response.usage)
 
             return response
 
@@ -117,7 +121,7 @@ class OpenAIDeployment(ModelDeployment):
         self.spend_request()
 
         try:
-            logger.trace("Opening completion stream")
+            logger.debug("opening completion stream on %s", self.name)
             # popped before the call: relying on a keyword being evaluated
             # before the ** unpacking beside it is needlessly subtle
             stream_options = kwargs.pop("stream_options", {"include_usage": True})
@@ -130,12 +134,17 @@ class OpenAIDeployment(ModelDeployment):
             self._handle_error(e, "stream")
             raise
 
-    def reconcile_stream(self, stream: AsyncChatCompletionStream, offset: int) -> None:
+    def reconcile_stream(
+        self,
+        stream: AsyncChatCompletionStream,
+        offset: int,
+        span: Span | None = None,
+    ) -> None:
         """Charge what the stream actually accumulated against the estimate."""
         usage = stream.current_completion_snapshot.usage
         if usage:
             self.spend_tokens(usage.total_tokens - offset)
-            self._set_span_attributes(usage)
+            self._record_usage(usage, span)
 
     async def parse(
         self, *, response_format: type[_T], **kwargs
@@ -150,14 +159,14 @@ class OpenAIDeployment(ModelDeployment):
         self.spend_request()
 
         try:
-            logger.trace("Creating parsed completion")
+            logger.debug("creating parsed completion on %s", self.name)
             response = await self.client.chat.completions.parse(
                 model=self.name, response_format=response_format, **kwargs
             )
 
             if response.usage:
                 self.spend_tokens(response.usage.total_tokens - _preflight_estimate)
-                self._set_span_attributes(response.usage)
+                self._record_usage(response.usage)
 
             return response
         except Exception as e:
@@ -169,17 +178,27 @@ class OpenAIDeployment(ModelDeployment):
         t_input = sum(len(m.get("content", "")) for m in kwargs.get("messages", []))
         return t_input // 4
 
-    def _set_span_attributes(self, usage: CompletionUsage) -> None:
+    def _record_usage(self, usage: CompletionUsage, span: Span | None = None) -> None:
         prompt = usage.prompt_tokens_details
         completion = usage.completion_tokens_details
-        self._record_token_details(
+        telemetry.record_usage(
+            self,
+            span,
+            input=usage.prompt_tokens,
+            output=usage.completion_tokens,
             cached=prompt.cached_tokens if prompt else None,
             reasoning=completion.reasoning_tokens if completion else None,
         )
 
 
 class _AsyncStreamWrapper(wrapt.ObjectProxy):
-    """Wrap an openai.AsyncStream to track usage"""
+    """Wrap an openai.AsyncStream to track usage.
+
+    Chunks are consumed after create() returns, so the attempt span that opened
+    the stream is long closed by the time usage lands. This owns a child of it
+    that stays open until the last chunk, which is also the only span whose
+    duration means anything for a stream.
+    """
 
     def __init__(
         self,
@@ -190,12 +209,7 @@ class _AsyncStreamWrapper(wrapt.ObjectProxy):
         super().__init__(stream)
         self._self_model: OpenAIDeployment = model
         self._self_offset: int = offset
-        # Chunks are consumed after create() returns, once its contextualize
-        # scope is gone, so bind the context for mid-stream error logs.
-        self._self_logger = logger.bind(
-            resource=model.resource.name,
-            model=model.name,
-        )
+        self._self_span = telemetry.start_stream_span(model)
 
     async def __aiter__(self) -> AsyncIterator[ChatCompletionChunk]:
         try:
@@ -207,9 +221,12 @@ class _AsyncStreamWrapper(wrapt.ObjectProxy):
                         # dont double-count our preflight estimate
                         chunk.usage.total_tokens - self._self_offset
                     )
-                    self._self_model._set_span_attributes(chunk.usage)
+                    self._self_model._record_usage(chunk.usage, self._self_span)
 
                 yield chunk
         except Exception as e:
-            self._self_model._handle_error(e, "stream", log=self._self_logger)
+            self._self_model._handle_error(e, "stream")
+            telemetry.end_stream_span(self._self_span, e)
             raise
+        else:
+            telemetry.end_stream_span(self._self_span)

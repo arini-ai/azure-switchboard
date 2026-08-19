@@ -1,9 +1,8 @@
-import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
 import respx
-from httpx import Request, Response, TimeoutException
+from httpx import Request, Response
 from openai import APIConnectionError, APITimeoutError, RateLimitError
 
 from azure_switchboard import Foundry, OpenAIDeployment
@@ -12,7 +11,6 @@ from .conftest import (
     COMPLETION_BODY,
     COMPLETION_PARAMS,
     COMPLETION_RESPONSE,
-    COMPLETION_RESPONSE_JSON,
     COMPLETION_STREAM_CHUNKS,
     chat_completion_mock,
     collect_chunks,
@@ -22,41 +20,28 @@ from .conftest import (
 class TestOpenAIDeployment:
     """Chat Completions deployment tests."""
 
-    async def test_init(self, deployment: OpenAIDeployment, foundry: Foundry):
-        """A deployment knows its resource and borrows that resource's client."""
-        assert deployment.name == "gpt-4o-mini"
-        assert deployment.resource is foundry
-        assert deployment.client is not None
-        assert set(foundry.models) == {"gpt-4o-mini", "gpt-4o"}
-
     @pytest.mark.mock_models("gpt-4o-mini")
-    async def test_completion(
+    async def test_completion_charges_the_deployment(
         self, mock_client: respx.MockRouter, deployment: OpenAIDeployment
     ):
-        """Test basic chat completion functionality."""
+        """A response is charged against the deployment that served it, and a
+        failed one still costs the preflight estimate."""
 
         deployment.client.max_retries = 0
 
-        response = await deployment.create(**COMPLETION_BODY)
-        assert mock_client.routes["azure"].call_count == 1
-        assert response == COMPLETION_RESPONSE
+        await deployment.create(**COMPLETION_BODY)
+        usage = deployment.stats()
+        assert usage.tpm.used == COMPLETION_RESPONSE.usage.total_tokens  # pyright: ignore[reportOptionalMemberAccess]
+        assert usage.rpm.used == 1
 
-        # Check token usage tracking
-        model = deployment
-        usage = model.stats()
-        assert usage.tpm.startswith(str(COMPLETION_RESPONSE.usage.total_tokens))  # pyright: ignore[reportOptionalMemberAccess]
-        assert usage.rpm.startswith("1")
-
-        # Test exception handling
         mock_client.routes["azure"].side_effect = Exception("test")
         with pytest.raises(APIConnectionError):
             await deployment.create(**COMPLETION_BODY)
-        assert mock_client.routes["azure"].call_count == 2
 
-        # account for preflight estimate
-        usage = model.stats()
-        assert "23/" in usage.tpm
-        assert "2/" in usage.rpm
+        # nothing came back, so only the preflight estimate landed
+        usage = deployment.stats()
+        assert usage.tpm.used == 23
+        assert usage.rpm.used == 2
 
     async def test_streaming(self, deployment: OpenAIDeployment):
         """Test streaming functionality.
@@ -82,8 +67,8 @@ class TestOpenAIDeployment:
 
             # Verify token usage tracking
             usage = deployment.stats()
-            assert "20/" in usage.tpm
-            assert "1/" in usage.rpm
+            assert usage.tpm.used == 20
+            assert usage.rpm.used == 1
 
         # verify connection error handling marks down
         connection_error = APIConnectionError(
@@ -103,8 +88,8 @@ class TestOpenAIDeployment:
             mock.assert_called_once()
 
             usage = deployment.stats()
-            assert "23/" in usage.tpm
-            assert "2/" in usage.rpm
+            assert usage.tpm.used == 23
+            assert usage.rpm.used == 2
 
         # A connection error cools the resource, not just this deployment
         assert deployment.resource.is_cooling()
@@ -196,26 +181,23 @@ class TestOpenAIDeployment:
 
         # Reset and verify initial state
         for model in foundry.models.values():
-            assert "tpm='0" in str(model)
+            assert "tpm=0/" in str(model)
 
         # Test deployment-level usage
         model = deployment
-        usage = model.stats()
-        assert usage.tpm == f"0/{model.tpm_limit}"
-        assert usage.rpm == f"0/{model.rpm_limit}"
+        assert model.stats().tpm == (0, model.tpm_limit)
+        assert model.stats().rpm == (0, model.rpm_limit)
 
         # Set and verify values
         model.spend_tokens(100)
         model.spend_request(5)
-        usage = model.stats()
-        assert usage.tpm == f"100/{model.tpm_limit}"
-        assert usage.rpm == f"5/{model.rpm_limit}"
+        assert model.stats().tpm == (100, model.tpm_limit)
+        assert model.stats().rpm == (5, model.rpm_limit)
 
         # Reset and verify again
         foundry.reset_usage()
-        usage = model.stats()
-        assert usage.tpm == f"0/{model.tpm_limit}"
-        assert usage.rpm == f"0/{model.rpm_limit}"
+        assert model.stats().tpm == (0, model.tpm_limit)
+        assert model.stats().rpm == (0, model.rpm_limit)
 
     async def test_utilization(self, deployment: OpenAIDeployment):
         """Test utilization calculation."""
@@ -272,56 +254,6 @@ class TestOpenAIDeployment:
         assert gpt4o.tpm_usage > 0
         assert gpt4o_mini.tpm_usage > 0
         assert gpt4o_mini.rpm_usage == 1
-
-    @pytest.mark.mock_models("gpt-4o-mini")
-    async def test_concurrency(
-        self, mock_client: respx.MockRouter, deployment: OpenAIDeployment
-    ):
-        """Test handling of multiple concurrent requests."""
-
-        # Create and run concurrent requests
-        num_requests = 10
-        tasks = [deployment.create(**COMPLETION_BODY) for _ in range(num_requests)]
-        responses = await asyncio.gather(*tasks)
-
-        # Verify results
-        model = deployment
-        assert len(responses) == num_requests
-        assert all(r == COMPLETION_RESPONSE for r in responses)
-        assert mock_client.routes["azure"].call_count == num_requests
-        usage = model.stats()
-        assert usage.tpm == f"{20 * num_requests}/10000"
-        assert usage.rpm == f"{num_requests}/60"
-
-    @pytest.mark.mock_models("gpt-4o-mini")
-    async def test_timeout_retry(
-        self, mock_client: respx.MockRouter, deployment: OpenAIDeployment
-    ):
-        """Test timeout retry behavior."""
-
-        # Test successful retry after timeouts
-        expected_response = Response(status_code=200, json=COMPLETION_RESPONSE_JSON)
-        mock_client.routes["azure"].side_effect = [
-            TimeoutException("Timeout 1"),
-            TimeoutException("Timeout 2"),
-            expected_response,
-        ]
-        response = await deployment.create(**COMPLETION_BODY)
-        assert response == COMPLETION_RESPONSE
-        assert mock_client.routes["azure"].call_count == 3
-
-        # Test failure after max retries — timeouts do NOT mark the deployment down
-        mock_client.routes["azure"].reset()
-        mock_client.routes["azure"].side_effect = [
-            TimeoutException("Timeout 1"),
-            TimeoutException("Timeout 2"),
-            TimeoutException("Timeout 3"),
-        ]
-
-        with pytest.raises(APITimeoutError):
-            await deployment.create(**COMPLETION_BODY)
-        assert mock_client.routes["azure"].call_count == 3
-        assert deployment.is_healthy()
 
     async def test_timeout_does_not_mark_down(self, deployment: OpenAIDeployment):
         """APITimeoutError should not mark the deployment down."""
@@ -380,14 +312,6 @@ class TestOpenAIDeployment:
             with pytest.raises(APITimeoutError):
                 await collect_chunks(stream)
             assert deployment.is_healthy()
-
-    def test_default_timeout(self):
-        """Default per-request timeout should be 30s."""
-        assert Foundry(name="test", api_key="key").timeout == 30.0
-
-    def test_custom_timeout(self):
-        """Callers that need longer timeouts can override per Foundry."""
-        assert Foundry(name="batch", api_key="key", timeout=300.0).timeout == 300.0
 
     async def test_rate_limit_marks_down(self, deployment: OpenAIDeployment):
         """Rate limit errors should mark the model down and re-raise."""

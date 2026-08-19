@@ -1,24 +1,32 @@
 from __future__ import annotations
 
+import logging
 import random
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, NamedTuple
 
-from loguru import logger
-from opentelemetry import trace
-
+from . import telemetry
 from .exceptions import SwitchboardError
 
 if TYPE_CHECKING:
     from .resource import Resource
 
+logger = logging.getLogger(__name__)
+
+
+class Quota(NamedTuple):
+    """How much of a rate limit is spent. A limit of 0 means unenforced."""
+
+    used: int
+    limit: int
+
 
 @dataclass(frozen=True)
 class UtilStats:
     util: float
-    tpm: str
-    rpm: str
+    tpm: Quota
+    rpm: Quota
 
 
 class Cooldown:
@@ -98,39 +106,71 @@ class ModelDeployment(Cooldown):
         raise NotImplementedError
 
     # Each API's SDK raises its own classes for these, so subclasses name
-    # theirs and _handle_error is written once.
+    # theirs and the error handling is written once.
     ratelimit_error: ClassVar[type[Exception]]
     timeout_error: ClassVar[type[Exception]]
     connection_error: ClassVar[type[Exception]]
 
-    def _handle_error(self, exc: Exception, op: str, log=logger) -> None:
+    def error_reason(self, exc: Exception) -> str:
+        """Classify an upstream failure, in this API's exception vocabulary.
+
+        The timeout test has to come before the connection one: in both SDKs
+        the timeout error subclasses the connection error, so testing
+        connection first would call every timeout a connection failure.
+        """
+        if isinstance(exc, self.ratelimit_error):
+            return "ratelimit"
+        if isinstance(exc, self.timeout_error):
+            return "timeout"
+        if isinstance(exc, self.connection_error):
+            return "connection"
+        return "error"
+
+    def _handle_error(self, exc: Exception, op: str) -> None:
         """Scope a cooldown to what the error actually implicates.
 
         A 429 is one deployment's quota; a connection error is the whole
         resource. Timeouts during upstream-wide slowdowns are uncorrelated with
         which deployment was chosen, so they cool nothing.
-
-        The timeout branch has to come before the connection one: in both SDKs
-        the timeout error subclasses the connection error, so testing
-        connection first would cool the whole resource on every timeout.
         """
-        if isinstance(exc, self.ratelimit_error):
-            log.exception(f"Marking down model for rate limit on {op}")
+        reason = self.error_reason(exc)
+        where = f"{self.resource.name}/{self.name}"
+
+        if reason == "ratelimit":
+            logger.warning("rate limited on %s during %s; cooling it", where, op)
             self.mark_down()
-        elif isinstance(exc, self.timeout_error):
-            log.warning(f"Upstream timeout on {op}; not marking down")
-        elif isinstance(exc, self.connection_error):
-            log.exception(f"Marking down resource for connection error on {op}")
+        elif reason == "timeout":
+            logger.warning(
+                "upstream timeout on %s during %s; cooling nothing", where, op
+            )
+        elif reason == "connection":
+            logger.warning(
+                "cannot reach %s during %s; cooling the whole resource", where, op
+            )
             self.resource.mark_down()
+        else:
+            return
+
+        if reason != "timeout":
+            telemetry.cooldowns.add(
+                1,
+                {
+                    "model": self.name,
+                    "resource": self.resource.name,
+                    "reason": reason,
+                },
+            )
 
     def is_healthy(self) -> bool:
-        return self.util < 1
+        return self.load < 1
 
     @property
-    def util(self) -> float:
-        """
-        Calculate the load weight of this model as a value between 0 and 1.
-        Lower weight means this model is a better choice for new requests.
+    def load(self) -> float:
+        """How much of this deployment's quota is spoken for, from 0 to 1.
+
+        The tighter of the two limits wins, and it can exceed 1 when a window
+        overruns. This is the number worth reporting; `util` is the number
+        worth selecting on.
         """
         # full utilization while cooling down keeps us out of selection. A
         # cooling resource takes every model on it out with it: a connection
@@ -145,8 +185,21 @@ class ModelDeployment(Cooldown):
         # Limits are enforced proportionally to the 60s limit in 1-10s sliding windows
         request_util = self.rpm_usage / self.rpm_limit if self.rpm_limit > 0 else 0
 
-        # Add a small random factor to prevent oscillation
-        return round(max(token_util, request_util) + random.uniform(0, 0.01), 3)
+        return max(token_util, request_util)
+
+    @property
+    def util(self) -> float:
+        """Selection weight: load, jittered.
+
+        Lower is a better choice for new requests. Without the jitter, idle
+        deployments tie at zero and the same one keeps winning the comparison.
+        """
+        load = self.load
+        # a deployment that is out is all the way out; jitter there would round
+        # a cooling deployment back under 1 and into selection
+        if load >= 1:
+            return load
+        return round(load + random.uniform(0, 0.01), 3)
 
     def reset_usage(self) -> None:
         """Call periodically to reset usage counters"""
@@ -156,9 +209,9 @@ class ModelDeployment(Cooldown):
 
     def stats(self) -> UtilStats:
         return UtilStats(
-            util=self.util,
-            tpm=f"{self.tpm_usage}/{self.tpm_limit}",
-            rpm=f"{self.rpm_usage}/{self.rpm_limit}",
+            util=self.load,
+            tpm=Quota(self.tpm_usage, self.tpm_limit),
+            rpm=Quota(self.rpm_usage, self.rpm_limit),
         )
 
     def spend_request(self, n: int = 1) -> None:
@@ -166,20 +219,6 @@ class ModelDeployment(Cooldown):
 
     def spend_tokens(self, n: int) -> None:
         self.tpm_usage += n
-
-    def _record_token_details(
-        self, *, cached: int | None = None, reasoning: int | None = None
-    ) -> None:
-        """Record token details on the active span.
-
-        Both providers report cached and reasoning tokens, under different
-        field names; subclasses extract, this normalizes onto gen_ai.* attrs.
-        """
-        span = trace.get_current_span()
-        if cached:
-            span.set_attribute("gen_ai.usage.cached_tokens", cached)
-        if reasoning:
-            span.set_attribute("gen_ai.usage.reasoning_tokens", reasoning)
 
     def __repr__(self) -> str:
         # util reads the resource's cooldown, which an unregistered deployment
@@ -190,5 +229,7 @@ class ModelDeployment(Cooldown):
         stats = self.stats()
         return (
             f"{type(self).__name__}<{self.name}>"
-            f"(util={stats.util} tpm='{stats.tpm}' rpm='{stats.rpm}')"
+            f"(util={stats.util:.3f}"
+            f" tpm={stats.tpm.used}/{stats.tpm.limit}"
+            f" rpm={stats.rpm.used}/{stats.rpm.limit})"
         )

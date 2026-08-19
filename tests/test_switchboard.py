@@ -48,7 +48,7 @@ class TestSwitchboard:
 
         assert any(
             filter(
-                lambda d: d.get("gpt-4o-mini").rpm == "1/60",  # pyright: ignore[reportAttributeAccessIssue]
+                lambda d: d.get("gpt-4o-mini").rpm == (1, 60),  # pyright: ignore[reportAttributeAccessIssue]
                 switchboard.stats().values(),
             )
         )

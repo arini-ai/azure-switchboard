@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from typing import Literal, TypeVar, cast, overload
 
@@ -15,12 +16,15 @@ from anthropic import (
 from anthropic.lib.streaming import AsyncMessageStream
 from anthropic.types import Message, ParsedMessage, RawMessageStreamEvent
 from anthropic.types.usage import Usage
-from loguru import logger
+from opentelemetry.trace import Span
 from pydantic import BaseModel
 
+from . import telemetry
 from .deployment import ModelDeployment
 
 _T = TypeVar("_T", bound=BaseModel)
+
+logger = logging.getLogger(__name__)
 
 
 class AnthropicDeployment(ModelDeployment):
@@ -78,7 +82,7 @@ class AnthropicDeployment(ModelDeployment):
 
         try:
             if stream:
-                logger.trace("Creating streaming message")
+                logger.debug("creating streaming message on %s", self.name)
                 response_stream = await self.client.messages.create(
                     model=self.name, stream=True, **kwargs
                 )
@@ -89,7 +93,7 @@ class AnthropicDeployment(ModelDeployment):
                     offset=_preflight_estimate,
                 )
 
-            logger.trace("Creating message")
+            logger.debug("creating message on %s", self.name)
             response = cast(
                 Message,
                 await self.client.messages.create(model=self.name, **kwargs),
@@ -112,7 +116,7 @@ class AnthropicDeployment(ModelDeployment):
         self.spend_request()
 
         try:
-            logger.trace("Opening message stream")
+            logger.debug("opening message stream on %s", self.name)
             return await self.client.messages.stream(
                 model=self.name, **kwargs
             ).__aenter__()
@@ -120,7 +124,12 @@ class AnthropicDeployment(ModelDeployment):
             self._handle_error(e, "stream")
             raise
 
-    def reconcile_stream(self, stream: AsyncMessageStream, offset: int) -> None:
+    def reconcile_stream(
+        self,
+        stream: AsyncMessageStream,
+        offset: int,
+        span: Span | None = None,
+    ) -> None:
         """Charge what the stream actually accumulated against the estimate."""
         try:
             usage = stream.current_message_snapshot.usage
@@ -128,7 +137,7 @@ class AnthropicDeployment(ModelDeployment):
             # the SDK asserts on the snapshot before the first event lands, so
             # nothing was consumed and the preflight estimate stands
             return
-        self._reconcile_usage(usage, offset)
+        self._reconcile_usage(usage, offset, span)
 
     async def parse(self, *, output_format: type[_T], **kwargs) -> ParsedMessage[_T]:
         """
@@ -141,7 +150,7 @@ class AnthropicDeployment(ModelDeployment):
         self.spend_request()
 
         try:
-            logger.trace("Creating parsed message")
+            logger.debug("creating parsed message on %s", self.name)
             response = await self.client.messages.parse(
                 model=self.name, output_format=output_format, **kwargs
             )
@@ -151,7 +160,9 @@ class AnthropicDeployment(ModelDeployment):
             self._handle_error(e, "parse")
             raise
 
-    def _reconcile_usage(self, usage: Usage | None, offset: int) -> None:
+    def _reconcile_usage(
+        self, usage: Usage | None, offset: int, span: Span | None = None
+    ) -> None:
         """Charge real usage against the preflight estimate.
 
         The Messages API reports input and output separately; there is no
@@ -161,7 +172,7 @@ class AnthropicDeployment(ModelDeployment):
             return
         # dont double-count our preflight estimate
         self.spend_tokens(usage.input_tokens + usage.output_tokens - offset)
-        self._set_span_attributes(usage)
+        self._record_usage(usage, span)
 
     def _estimate_token_usage(self, kwargs: dict) -> int:
         # ~4 chars per token, as in the chat path. Unlike chat, content may be
@@ -171,11 +182,23 @@ class AnthropicDeployment(ModelDeployment):
             chars += _content_len(m.get("content", ""))
         return chars // 4
 
-    def _set_span_attributes(self, usage: Usage) -> None:
+    def _record_usage(
+        self,
+        usage: Usage,
+        span: Span | None = None,
+        *,
+        output: int | None = None,
+    ) -> None:
         # named fields rather than getattr, so a field that goes away is a type
         # error instead of an attribute that silently reports nothing
         details = usage.output_tokens_details
-        self._record_token_details(
+        telemetry.record_usage(
+            self,
+            span,
+            input=usage.input_tokens,
+            # streaming reports a running output total on later events, so the
+            # caller passes the delta rather than this snapshot's value
+            output=usage.output_tokens if output is None else output,
             cached=usage.cache_read_input_tokens,
             reasoning=details.thinking_tokens if details else None,
         )
@@ -191,7 +214,13 @@ def _content_len(content: object) -> int:
 
 
 class _AsyncMessageStreamWrapper(wrapt.ObjectProxy):
-    """Wrap an anthropic.AsyncStream to track usage"""
+    """Wrap an anthropic.AsyncStream to track usage.
+
+    Events are consumed after create() returns, so the attempt span that opened
+    the stream is long closed by the time usage lands. This owns a child of it
+    that stays open until the last event, which is also the only span whose
+    duration means anything for a stream.
+    """
 
     def __init__(
         self,
@@ -203,12 +232,7 @@ class _AsyncMessageStreamWrapper(wrapt.ObjectProxy):
         self._self_model: AnthropicDeployment = model
         self._self_offset: int = offset
         self._self_output_spent: int = 0
-        # Events are consumed after create() returns, once its contextualize
-        # scope is gone, so bind the context for mid-stream error logs.
-        self._self_logger = logger.bind(
-            resource=model.resource.name,
-            model=model.name,
-        )
+        self._self_span = telemetry.start_stream_span(model)
 
     async def __aiter__(self) -> AsyncIterator[RawMessageStreamEvent]:
         try:
@@ -221,14 +245,27 @@ class _AsyncMessageStreamWrapper(wrapt.ObjectProxy):
                         # dont double-count our preflight estimate
                         usage.input_tokens - self._self_offset
                     )
-                    self._self_model._set_span_attributes(usage)
+                    # output is charged from the deltas below, not from here
+                    self._self_model._record_usage(usage, self._self_span, output=0)
                 elif event.type == "message_delta" and event.usage:
                     output = event.usage.output_tokens or 0
                     # output_tokens is cumulative — only spend what's new
-                    self._self_model.spend_tokens(output - self._self_output_spent)
+                    delta = output - self._self_output_spent
+                    self._self_model.spend_tokens(delta)
                     self._self_output_spent = output
+                    telemetry.tokens.add(
+                        delta,
+                        {
+                            "model": self._self_model.name,
+                            "resource": self._self_model.resource.name,
+                            "kind": "output",
+                        },
+                    )
 
                 yield event
         except Exception as e:
-            self._self_model._handle_error(e, "stream", log=self._self_logger)
+            self._self_model._handle_error(e, "stream")
+            telemetry.end_stream_span(self._self_span, e)
             raise
+        else:
+            telemetry.end_stream_span(self._self_span)

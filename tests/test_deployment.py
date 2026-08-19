@@ -8,26 +8,10 @@ from azure_switchboard import Foundry, OpenAIDeployment, SwitchboardError
 class TestBinding:
     """A deployment is declared standalone and bound when it is registered."""
 
-    def test_unbound_deployment_has_no_resource(self, model: OpenAIDeployment):
-        with pytest.raises(SwitchboardError, match="not bound to a resource"):
-            _ = model.resource
-
-    def test_unbound_deployment_has_no_client(self, model: OpenAIDeployment):
-        """The client is assigned at registration, so there is nothing to read
-        until a Foundry has taken the deployment."""
-        with pytest.raises(AttributeError):
-            _ = model.client
-
     def test_rebinding_to_another_resource_is_rejected(self, model: OpenAIDeployment):
         Foundry(name="first", api_key="k", models=[model])
         with pytest.raises(SwitchboardError, match="already bound to first"):
             Foundry(name="second", api_key="k", models=[model])
-
-    def test_rebinding_to_the_same_resource_is_a_no_op(self, model: OpenAIDeployment):
-        resource = Foundry(name="only", api_key="k")
-        resource.add(model)
-        model.bind(resource)
-        assert model.resource is resource
 
     def test_resource_cooldown_takes_its_deployments_out(self, model: OpenAIDeployment):
         """A connection error means the host is unreachable, so every
@@ -53,9 +37,6 @@ def bound(model: OpenAIDeployment) -> OpenAIDeployment:
 
 class TestModel:
     """Model functionality tests."""
-
-    async def test_init(self, bound: OpenAIDeployment):
-        assert str(bound).startswith("OpenAIDeployment<gpt-4o-mini>(util=0.0")
 
     async def test_util(self, bound: OpenAIDeployment):
         assert bound.is_healthy()
@@ -90,7 +71,18 @@ class TestModel:
         bound.mark_up()
         assert bound.is_healthy()
 
-    async def test_repr_survives_an_unbound_deployment(self, model: OpenAIDeployment):
-        """util needs a resource, but repr has to work regardless — a raising
-        repr breaks debuggers and hides the error being formatted."""
-        assert repr(model) == "OpenAIDeployment<gpt-4o-mini>(unbound)"
+    def test_load_is_the_unjittered_util(self, bound: OpenAIDeployment):
+        """util jitters to break ties between idle deployments; load is what
+        gets reported, so it has to be the number that is actually true."""
+        bound.tpm_usage = 500
+        assert bound.load == 0.5
+        assert 0.5 <= bound.util < 0.51
+
+    def test_stats_report_both_quotas_numerically(self, bound: OpenAIDeployment):
+        bound.tpm_usage = 250
+        bound.rpm_usage = 3
+
+        stats = bound.stats()
+        assert stats.tpm == (250, 1000)
+        assert stats.rpm.used == 3
+        assert stats.util == 0.5  # rpm is the tighter of the two

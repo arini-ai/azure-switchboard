@@ -20,7 +20,7 @@
 - Demo: `just demo` or `uv run tools/readme_example.py`
 - Benchmark: `just bench` (needs AZURE_FOUNDRY + AZURE_API_KEY)
 - Live wiring check: `just smoke` (same credentials; real inference, nothing mocked)
-- OpenTelemetry demo: `just otel`
+- OpenTelemetry demo: `just otel-collector` (or `just otel-viewer`) alongside `just otel-run`
 - Bump version: `just bump-version`
 - Pre-commit hooks: `just pre-commit`
 - Clean: `just clean`
@@ -43,7 +43,6 @@
 ### Runtime
 
 - openai>=2.0.0
-- loguru>=0.7.3
 - opentelemetry-api>=1.30.0
 - tenacity>=9.0.0
 - wrapt>=1.17.2
@@ -67,6 +66,7 @@
   - `deployment.py`: `ModelDeployment`, the provider-agnostic deployment: quota, utilization, cooldown; plus `Cooldown`, shared with `Resource`
   - `openai_deployment.py`: `OpenAIDeployment`, a deployment speaking Chat Completions
   - `anthropic_deployment.py`: `AnthropicDeployment`, a deployment speaking the Messages API
+  - `telemetry.py`: the tracer, every metric instrument, and the observable gauges that read live utilization off a weak set of switchboards
 - `tests/`: Comprehensive test suite
 - `tools/`: Demo and benchmark utilities
 
@@ -80,5 +80,5 @@
 - Cooldowns scoped by error: 429 cools one deployment, connection errors cool the whole resource, timeouts cool nothing
 - Session affinity to a resource, for efficient prompt caching
 - Automatic failover with customizable retry policies
-- OpenTelemetry integration for monitoring
+- OpenTelemetry: a span per call with a child per failover attempt; counters for requests, tokens, failovers and cooldowns; observable gauges for utilization and healthy-deployment counts
 - Lightweight implementation (~1k LOC) with minimal dependencies
