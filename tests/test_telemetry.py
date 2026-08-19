@@ -19,12 +19,22 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
 
-from azure_switchboard import Foundry, OpenAIDeployment, Switchboard, SwitchboardError
+from azure_switchboard import (
+    AnthropicDeployment,
+    Foundry,
+    OpenAIDeployment,
+    Switchboard,
+    SwitchboardError,
+)
+from azure_switchboard import telemetry
 
 from .conftest import (
     COMPLETION_BODY,
     COMPLETION_PARAMS,
     COMPLETION_RESPONSE,
+    COMPLETION_STREAM_CHUNKS,
+    MESSAGE_BODY,
+    MESSAGE_STREAM_EVENTS,
     chat_completion_mock,
 )
 
@@ -139,7 +149,9 @@ class TestDispatchSpans:
         )
 
         assert first.status.status_code is StatusCode.ERROR
-        assert first.events[0].name == "exception"
+        # exactly one: the span context manager records escaping exceptions, so
+        # recording it by hand as well would double every failure
+        assert [e.name for e in first.events] == ["exception"]
         assert second.status.status_code is not StatusCode.ERROR
         # the call as a whole succeeded, so only the attempt is marked failed
         assert call.status.status_code is not StatusCode.ERROR
@@ -154,6 +166,23 @@ class TestDispatchSpans:
 
         assert named(spans, "chat nonexistent")
         assert not named(spans, "attempt")
+
+
+class _SDKStream:
+    """Mirrors what the SDKs hand back: iterable, and closed rather than
+    aclosed -- both openai.AsyncStream and anthropic.AsyncStream define
+    `async def close()` and no aclose."""
+
+    def __init__(self, chunks):
+        self._chunks = chunks
+        self.closed = False
+
+    async def __aiter__(self):
+        for chunk in self._chunks:
+            yield chunk
+
+    async def close(self):
+        self.closed = True
 
 
 class TestStreamSpans:
@@ -198,6 +227,64 @@ class TestStreamSpans:
         assert stream_span.parent.span_id == attempt.context.span_id  # pyright: ignore[reportOptionalMemberAccess]
         # and it is still the longer of the two: the attempt only opened it
         assert stream_span.end_time > attempt.end_time  # pyright: ignore[reportOptionalOperand]
+
+    async def test_a_consumer_that_stops_early_still_closes_the_span(
+        self, deployment: OpenAIDeployment, spans: InMemorySpanExporter
+    ):
+        """Abandoning the iterator unwinds it with GeneratorExit, which is not
+        an Exception -- only a finally catches that."""
+        with patch.object(
+            deployment.client.chat.completions,
+            "create",
+            side_effect=chat_completion_mock(),
+        ):
+            stream = await deployment.create(stream=True, **COMPLETION_BODY)
+            chunks = stream.__aiter__()
+            await chunks.__anext__()
+            assert not named(spans, "stream"), "still open part-way through"
+
+            await chunks.aclose()
+
+        (span,) = named(spans, "stream")
+        assert span.status.status_code is not StatusCode.ERROR
+
+    async def test_closing_a_stream_nobody_iterated_closes_the_span(
+        self, deployment: OpenAIDeployment, spans: InMemorySpanExporter
+    ):
+        """The span opens with the stream, so a stream that is opened and then
+        closed unread must not leave one recording forever."""
+        inner = _SDKStream(COMPLETION_STREAM_CHUNKS)
+        with patch.object(
+            deployment.client.chat.completions,
+            "create",
+            new=AsyncMock(return_value=inner),
+        ):
+            stream = await deployment.create(stream=True, **COMPLETION_BODY)
+
+        assert not named(spans, "stream")
+        await stream.close()
+
+        assert inner.closed, "the underlying stream is closed too"
+        assert len(named(spans, "stream")) == 1
+
+    async def test_closing_a_messages_stream_closes_the_span_too(
+        self, anthropic_deployment: AnthropicDeployment, spans: InMemorySpanExporter
+    ):
+        """The messages wrapper is the twin of the chat one, so it has to end
+        its span on the same paths."""
+        inner = _SDKStream(MESSAGE_STREAM_EVENTS)
+        with patch.object(
+            anthropic_deployment.client.messages,
+            "create",
+            new=AsyncMock(return_value=inner),
+        ):
+            stream = await anthropic_deployment.create(stream=True, **MESSAGE_BODY)
+
+        assert not named(spans, "stream")
+        await stream.close()
+
+        assert inner.closed
+        assert len(named(spans, "stream")) == 1
 
     async def test_a_stream_that_fails_mid_body_closes_its_span_as_an_error(
         self, deployment: OpenAIDeployment, spans: InMemorySpanExporter
@@ -298,17 +385,36 @@ class TestObservableGauges:
             )
             assert total("switchboard.utilization", model="gauge-health-model") == 1
 
-    async def test_a_discarded_switchboard_stops_being_reported(self):
-        resource = Foundry(
-            name="gauge-gone",
+    async def test_nothing_is_reported_before_a_switchboard_exists(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Importing the package registers the callbacks, so a collection that
+        lands before the app builds its switchboard must not raise."""
+        monkeypatch.setattr(telemetry, "_tracked", None)
+        assert not points("switchboard.utilization")
+        assert not points("switchboard.deployments.healthy")
+
+    async def test_a_new_switchboard_takes_the_gauges_over(self):
+        """Summing two pools would report one pool's spare capacity as the
+        other's health, and no-healthy-left is the reading that matters."""
+        first = Foundry(
+            name="gauge-first",
             api_key="k",
-            models=[OpenAIDeployment(name="gauge-gone-model", tpm=1000, rpm=100)],
+            models=[OpenAIDeployment(name="gauge-shared-model", tpm=1000, rpm=100)],
         )
-        sb = Switchboard([resource], ratelimit_window=0)
-        assert points("switchboard.utilization", resource="gauge-gone")
+        second = Foundry(
+            name="gauge-second",
+            api_key="k",
+            models=[OpenAIDeployment(name="gauge-shared-model", tpm=1000, rpm=100)],
+        )
 
-        del sb
-        import gc
+        Switchboard([first], ratelimit_window=0)
+        assert points("switchboard.utilization", resource="gauge-first")
 
-        gc.collect()
-        assert not points("switchboard.utilization", resource="gauge-gone")
+        Switchboard([second], ratelimit_window=0)
+        assert points("switchboard.utilization", resource="gauge-second")
+        assert not points("switchboard.utilization", resource="gauge-first")
+
+        # the second pool alone decides the model's health
+        second.mark_down()
+        assert total("switchboard.deployments.healthy", model="gauge-shared-model") == 0

@@ -22,7 +22,7 @@ from anthropic.types import Message, ParsedMessage, RawMessageStreamEvent
 from openai import AsyncOpenAI, AsyncStream
 from openai.lib.streaming.chat import AsyncChatCompletionStream
 from openai.types.chat import ChatCompletion, ChatCompletionChunk, ParsedChatCompletion
-from opentelemetry.trace import Span, Status, StatusCode
+from opentelemetry.trace import Span
 from pydantic import BaseModel
 from tenacity import (
     AsyncRetrying,
@@ -121,7 +121,7 @@ class Switchboard:
 
         self.ratelimit_window = ratelimit_window
 
-        # held weakly, so this is not what keeps the switchboard alive
+        # the gauges read utilization straight off these resources
         telemetry.track(self)
 
     @cached_property
@@ -261,14 +261,15 @@ class Switchboard:
                             "switchboard.model": deployment.name,
                             "switchboard.load": deployment.load,
                         },
-                    ) as span:
+                    ):
                         started = time.perf_counter()
                         try:
                             response = await call(deployment)
                         except Exception as e:
+                            # the span records the exception and sets an error
+                            # status as it escapes; doing it here too would put
+                            # the same event on the span twice
                             reason = deployment.error_reason(e)
-                            span.set_status(Status(StatusCode.ERROR, str(e)))
-                            span.record_exception(e)
                             self._record_attempt(dimensions, started, "error")
                             raise
                         self._record_attempt(dimensions, started, "success")

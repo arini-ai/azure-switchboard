@@ -11,7 +11,6 @@ A deployment's name is the model name and is unique within a resource, so
 
 from __future__ import annotations
 
-import weakref
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
@@ -53,24 +52,29 @@ duration = meter.create_histogram(
 )
 
 
-# Switchboard is used as a singleton, but the OTel API has no way to unregister
-# an observable gauge's callback -- so the callbacks read through a weak set
-# rather than pinning whatever switchboard existed when the module was
-# imported. A discarded one drops out on collection instead of leaking its
-# resources and reporting forever.
-_live: weakref.WeakSet[Switchboard] = weakref.WeakSet()
+# The gauges read the switchboard that is currently serving. One switchboard
+# lives as long as the app around it, so this is a reference to a live object
+# rather than a registry needing cleanup -- and the OTel API has no way to
+# unregister an observable gauge's callback anyway.
+#
+# A second switchboard takes the gauges over rather than being added to them:
+# summing two pools would report one pool's spare capacity as the other's
+# health, and a pool with nothing healthy left is the reading that matters.
+_tracked: Switchboard | None = None
 
 
 def track(switchboard: Switchboard) -> None:
-    """Expose a switchboard's deployments to the observable gauges."""
-    _live.add(switchboard)
+    """Point the observable gauges at a switchboard."""
+    global _tracked
+    _tracked = switchboard
 
 
 def _deployments() -> Iterable[tuple[str, ModelDeployment]]:
-    for switchboard in list(_live):
-        for resource in switchboard._all_resources():
-            for deployment in resource.models.values():
-                yield resource.name, deployment
+    if _tracked is None:
+        return
+    for resource in _tracked._all_resources():
+        for deployment in resource.models.values():
+            yield resource.name, deployment
 
 
 def _observe_utilization(options: CallbackOptions) -> Iterable[Observation]:

@@ -235,6 +235,7 @@ class _AsyncMessageStreamWrapper(wrapt.ObjectProxy):
         self._self_span = telemetry.start_stream_span(model)
 
     async def __aiter__(self) -> AsyncIterator[RawMessageStreamEvent]:
+        error: Exception | None = None
         try:
             async for event in self.__wrapped__:
                 # Usage arrives in two places: message_start carries the input
@@ -264,8 +265,25 @@ class _AsyncMessageStreamWrapper(wrapt.ObjectProxy):
 
                 yield event
         except Exception as e:
+            error = e
             self._self_model._handle_error(e, "stream")
-            telemetry.end_stream_span(self._self_span, e)
             raise
-        else:
-            telemetry.end_stream_span(self._self_span)
+        finally:
+            # A consumer that breaks out of the loop or is cancelled leaves
+            # through GeneratorExit or CancelledError, neither of which is an
+            # Exception -- so the span is closed here rather than per branch,
+            # and an abandoned stream does not leave one open forever.
+            self._end_span(error)
+
+    def _end_span(self, error: Exception | None = None) -> None:
+        # a span that has already ended stops recording, which makes this safe
+        # to reach from both iteration and close()
+        if self._self_span.is_recording():
+            telemetry.end_stream_span(self._self_span, error)
+
+    async def close(self) -> None:
+        """Closing the stream finishes it, iterated or not."""
+        try:
+            await self.__wrapped__.close()
+        finally:
+            self._end_span()
