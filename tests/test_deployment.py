@@ -134,8 +134,14 @@ class TestStats:
 
     def test_repr_shows_both_quotas(self, bound: OpenAIDeployment):
         bound.spend_tokens(250)
-        assert repr(bound) == (
-            "OpenAIDeployment<gpt-4o-mini>(util=0.250 tpm=250/1000 rpm=0/6)"
+        assert repr(bound) == "OpenAIDeployment<gpt-4o-mini>(tpm=250/1000 rpm=0/6)"
+
+    def test_repr_works_before_a_deployment_is_registered(self):
+        """It reports no load, so it needs no resource -- and a __repr__ that
+        raised would break debuggers and hide the error being formatted."""
+        assert (
+            repr(OpenAIDeployment(name="gpt-4o", tpm=1000))
+            == "OpenAIDeployment<gpt-4o>(tpm=0/1000 rpm=0/0)"
         )
 
     def test_resetting_a_resource_resets_every_deployment_on_it(self):

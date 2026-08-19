@@ -52,7 +52,12 @@ def named(exporter: InMemorySpanExporter, name: str) -> list[ReadableSpan]:
 def points(instrument: str, **match) -> list:
     """Data points of an instrument whose attributes include `match`."""
     found = []
-    for resource in _reader.get_metrics_data().resource_metrics:  # pyright: ignore[reportOptionalMemberAccess]
+    # None when this worker has recorded nothing at all, which is a legitimate
+    # answer to "no points match" rather than a failure
+    data = _reader.get_metrics_data()
+    if data is None:
+        return found
+    for resource in data.resource_metrics:
         for scope in resource.scope_metrics:
             for metric in scope.metrics:
                 if metric.name != instrument:

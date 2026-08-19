@@ -78,22 +78,16 @@ class ModelDeployment(Cooldown):
         self.tpm_usage: int = 0
         self.rpm_usage: int = 0
 
-        self._resource: Resource | None = None
+    # Assigned when a Resource registers this deployment, as its client is.
+    # Reaching for either before then is an AttributeError, which says what
+    # went wrong without this class carrying a branch for a half-built object.
+    resource: Resource
 
     def bind(self, resource: Resource) -> None:
-        if self._resource is not None and self._resource is not resource:
-            raise SwitchboardError(
-                f"{self.name} is already bound to {self._resource.name}"
-            )
-        self._resource = resource
-
-    @property
-    def resource(self) -> Resource:
-        if self._resource is None:
-            raise SwitchboardError(
-                f"{self.name} is not bound to a resource; pass it to Foundry(models=[...])"
-            )
-        return self._resource
+        bound = getattr(self, "resource", None)
+        if bound is not None and bound is not resource:
+            raise SwitchboardError(f"{self.name} is already bound to {bound.name}")
+        self.resource = resource
 
     # Subclasses supply `url` -- where this deployment is served. An explicit
     # endpoint wins; otherwise it is the resource's base with that API's path
@@ -217,15 +211,12 @@ class ModelDeployment(Cooldown):
         self.tpm_usage += n
 
     def __repr__(self) -> str:
-        # util reads the resource's cooldown, which an unregistered deployment
-        # has no way to reach. repr has to describe one anyway: raising here
-        # would break debuggers and swallow whatever error was being formatted.
-        if self._resource is None:
-            return f"{type(self).__name__}<{self.name}>(unbound)"
-        stats = self.stats()
+        # The spent counters, not load: load reads the resource's cooldown, and
+        # a deployment that is not registered yet still has to be printable --
+        # a raising __repr__ breaks debuggers and swallows whatever error was
+        # being formatted. stats() is there for anyone who wants the load.
         return (
             f"{type(self).__name__}<{self.name}>"
-            f"(util={stats.util:.3f}"
-            f" tpm={stats.tpm.used}/{stats.tpm.limit}"
-            f" rpm={stats.rpm.used}/{stats.rpm.limit})"
+            f"(tpm={self.tpm_usage}/{self.tpm_limit}"
+            f" rpm={self.rpm_usage}/{self.rpm_limit})"
         )
