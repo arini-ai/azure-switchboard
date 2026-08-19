@@ -275,9 +275,10 @@ class Switchboard:
                         return response
                 n += 1
 
-        # unreachable while the policy reraises, which the default does; an
-        # explicit failure beats returning None if that is ever swapped out
-        raise SwitchboardError(f"Failover exhausted for {model}")
+        # Unreachable: the retrying generator always returns or raises. It
+        # stays because the declared return type has no room for None, and it
+        # is excluded from coverage because nothing can exercise it.
+        raise SwitchboardError(f"Failover exhausted for {model}")  # pragma: no cover
 
     @staticmethod
     def _record_attempt(dimensions: dict, started: float, outcome: str) -> None:
@@ -519,8 +520,9 @@ class _ChatStream:
         return self._stream
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
-        if not (self._deployment and self._stream):
-            return
+        # __aenter__ sets all three or raises, and an __aenter__ that raises
+        # means this never runs
+        assert self._deployment and self._stream and self._span
         try:
             # accounting must not be able to leak the connection
             self._deployment.reconcile_stream(self._stream, self._offset, self._span)
@@ -571,8 +573,9 @@ class _MessagesStream:
         return self._stream
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
-        if not (self._deployment and self._stream):
-            return
+        # __aenter__ sets all three or raises, and an __aenter__ that raises
+        # means this never runs
+        assert self._deployment and self._stream and self._span
         try:
             # accounting must not be able to leak the connection
             self._deployment.reconcile_stream(self._stream, self._offset, self._span)

@@ -95,15 +95,11 @@ class ModelDeployment(Cooldown):
             )
         return self._resource
 
-    @property
-    def url(self) -> str | None:
-        """Where this deployment is served.
-
-        An explicit endpoint wins. Otherwise it is the resource's base with
-        this API's path appended — and None when the resource has no base, so
-        the SDK falls back to its vendor default.
-        """
-        raise NotImplementedError
+    # Subclasses supply `url` -- where this deployment is served. An explicit
+    # endpoint wins; otherwise it is the resource's base with that API's path
+    # appended, and None when the resource has no base, so the SDK falls back
+    # to its vendor default. Not declared here: nothing is ever only a
+    # ModelDeployment, and a stub would only be reachable by never calling it.
 
     # Each API's SDK raises its own classes for these, so subclasses name
     # theirs and the error handling is written once.

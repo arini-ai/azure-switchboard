@@ -123,10 +123,8 @@ def start_stream_span(deployment: ModelDeployment) -> Span:
     )
 
 
-def end_stream_span(span: Span | None, exc: BaseException | None = None) -> None:
+def end_stream_span(span: Span, exc: BaseException | None = None) -> None:
     """Close a stream span, recording whatever ended it."""
-    if span is None:
-        return
     if exc is not None:
         span.record_exception(exc)
         span.set_status(Status(StatusCode.ERROR, str(exc)))
