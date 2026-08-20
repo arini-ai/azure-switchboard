@@ -5,6 +5,8 @@ import pytest
 import respx
 from anthropic import APIConnectionError, RateLimitError
 from httpx import Request, Response
+from openai import APIConnectionError as OpenAIConnectionError
+from openai import RateLimitError as OpenAIRateLimitError
 from pydantic import BaseModel
 
 from azure_switchboard import Foundry, OpenAIDeployment, Switchboard, SwitchboardError
@@ -17,6 +19,7 @@ from .conftest import (
     COMPLETION_PARAMS,
     COMPLETION_RESPONSE,
     MESSAGE_PARAMS,
+    MESSAGE_RESPONSE,
     anthropic_foundry,
     chat_completion_mock,
     collect_chunks,
@@ -48,7 +51,7 @@ class TestSwitchboard:
 
         assert any(
             filter(
-                lambda d: d.get("gpt-4o-mini").rpm == "1/60",  # pyright: ignore[reportAttributeAccessIssue]
+                lambda d: d.get("gpt-4o-mini").rpm == (1, 60),  # pyright: ignore[reportAttributeAccessIssue]
                 switchboard.stats().values(),
             )
         )
@@ -602,6 +605,19 @@ class TestMixedPoolDispatch:
         chat_mock.assert_called_once()
         msg_mock.assert_called_once()
 
+    async def test_parse_chat_routes_to_the_chat_api(self, mixed: Switchboard):
+        with patch(
+            "azure_switchboard.openai_deployment.OpenAIDeployment.parse",
+            side_effect=chat_completion_mock(),
+        ) as mock:
+            await mixed.chat.completions.parse(
+                model="gpt-4o-mini",
+                response_format=Weather,
+                messages=[{"role": "user", "content": "Weather in Paris?"}],
+            )
+        mock.assert_called_once()
+        assert mock.call_args.kwargs["response_format"] is Weather
+
     async def test_parse_messages_routes_to_the_messages_api(self, mixed: Switchboard):
         with patch(
             "azure_switchboard.anthropic_deployment.AnthropicDeployment.parse",
@@ -847,14 +863,18 @@ class _FakeManager:
 
 
 class _FakeStream:
-    """Minimal AsyncMessageStream stand-in: closes, and snapshots nothing."""
+    """Minimal AsyncMessageStream stand-in. Twin of _FakeCompletionStream."""
 
-    def __init__(self):
+    def __init__(self, usage=None):
         self.closed = False
+        self._usage = usage
 
     @property
     def current_message_snapshot(self):
-        raise AssertionError("nothing consumed")
+        if self._usage is None:
+            # what the SDK does before the first event lands
+            raise AssertionError("nothing consumed")
+        return MESSAGE_RESPONSE.model_copy(update={"usage": self._usage})
 
     async def close(self):
         self.closed = True
@@ -862,7 +882,33 @@ class _FakeStream:
 
 class TestStreamSurface:
     """The stream() path runs the same dispatch as create/parse, so opening
-    fails over and the exit path still scopes cooldowns."""
+    fails over and the exit path still scopes cooldowns.
+
+    Mirrored class for class by TestChatStreamSurface below.
+    """
+
+    async def test_open_and_reconcile(self, anthropic_switchboard: Switchboard):
+        stream = _FakeStream(usage=MESSAGE_RESPONSE.usage)
+
+        async def opener(self, **kwargs):
+            return stream
+
+        with patch(
+            "azure_switchboard.anthropic_deployment.AnthropicDeployment.open_stream",
+            new=opener,
+        ):
+            async with anthropic_switchboard.messages.stream(
+                model="claude-sonnet-5", max_tokens=8, messages=[]
+            ) as s:
+                assert s is stream
+
+        assert stream.closed
+        spent = [
+            d
+            for d in anthropic_switchboard.messages._pool["claude-sonnet-5"]
+            if d.tpm_usage > 0
+        ]
+        assert len(spent) == 1, "the serving deployment should be charged"
 
     async def test_failure_to_open_fails_over(self, anthropic_switchboard: Switchboard):
         opened: list[str] = []
@@ -979,11 +1025,34 @@ class TestChatStreamSurface:
         ]
         assert len(spent) == 1, "the serving deployment should be charged"
 
+    async def test_failure_to_open_fails_over(self, switchboard: Switchboard):
+        opened: list[str] = []
+
+        async def flaky(self, **kwargs):
+            opened.append(self.resource.name)
+            if len(opened) == 1:
+                error = OpenAIConnectionError(request=Request("POST", "https://x/"))
+                # the real open_stream scopes the cooldown before re-raising,
+                # which is what takes this resource out of the retry
+                self._handle_error(error, "stream")
+                raise error
+            return _FakeCompletionStream()
+
+        with patch(
+            "azure_switchboard.openai_deployment.OpenAIDeployment.open_stream",
+            new=flaky,
+        ):
+            async with switchboard.chat.completions.stream(
+                model="gpt-4o-mini", messages=[]
+            ) as s:
+                assert isinstance(s, _FakeCompletionStream)
+
+        assert len(opened) == 2, "a deployment that fails to open should be retried"
+        assert opened[0] != opened[1], "the retry should land on another resource"
+
     async def test_connection_error_on_open_cools_the_resource(
         self, deployment: OpenAIDeployment
     ):
-        from openai import APIConnectionError as OpenAIConnectionError
-
         error = OpenAIConnectionError(request=Request("POST", "https://x/"))
         with patch.object(
             deployment.client.chat.completions,
@@ -995,6 +1064,39 @@ class TestChatStreamSurface:
 
         assert deployment.resource.is_cooling()
         assert not deployment.is_cooling()
+
+    async def test_body_failure_is_scoped_and_the_stream_still_closes(
+        self, switchboard: Switchboard
+    ):
+        """A 429 raised inside the `async with` body cools that deployment,
+        and the stream is closed either way."""
+        stream = _FakeCompletionStream()
+        error = OpenAIRateLimitError(
+            "rate limited",
+            response=Response(429, request=Request("POST", "https://x/")),
+            body=None,
+        )
+
+        async def opener(self, **kwargs):
+            return stream
+
+        with patch(
+            "azure_switchboard.openai_deployment.OpenAIDeployment.open_stream",
+            new=opener,
+        ):
+            with pytest.raises(OpenAIRateLimitError):
+                async with switchboard.chat.completions.stream(
+                    model="gpt-4o-mini", messages=[]
+                ):
+                    raise error
+
+        assert stream.closed, "the stream must be closed even when the body raises"
+        cooled = [
+            d
+            for d in switchboard.chat.completions._pool["gpt-4o-mini"]
+            if d.is_cooling()
+        ]
+        assert len(cooled) == 1, "a 429 cools the one deployment that served it"
 
 
 class TestFallbackCredentials:

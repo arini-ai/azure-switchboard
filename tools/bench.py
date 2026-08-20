@@ -3,13 +3,6 @@
 # To run this, use:
 #   just bench
 #
-# /// script
-# requires-python = ">=3.10"
-# dependencies = [
-#     "azure-switchboard",
-#     "rich",
-# ]
-# ///
 
 import argparse
 import asyncio

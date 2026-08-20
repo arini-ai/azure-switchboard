@@ -37,6 +37,7 @@ from azure_switchboard import (
     OpenAIDeployment,
     Switchboard,
 )
+from azure_switchboard.deployment import ModelDeployment
 
 
 def select_openai(
@@ -68,6 +69,18 @@ def select_anthropic(
         session_id=session_id,
         fallback=lambda: surface._fallback(model),
     )
+
+
+def assert_cooldown_scope(deployment: ModelDeployment, scope: str | None) -> None:
+    """A 429 is one deployment's quota; a connection error is the whole host;
+    a timeout implicates nothing.
+
+    Both APIs answer to this, so both suites assert it the same way.
+    """
+    assert deployment.is_cooling() is (scope == "model")
+    assert deployment.resource.is_cooling() is (scope == "resource")
+    # either scope takes this deployment out of selection
+    assert deployment.is_healthy() is (scope is None)
 
 
 async def collect_chunks(

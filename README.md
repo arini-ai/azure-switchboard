@@ -59,8 +59,8 @@ The endpoint is inferrable from the Foundry resource name or can be overriden ex
   - **Automatic Failover**: Retries are controlled by a tenacity `AsyncRetrying` policy (`failover_policy`).
   - **First-Party Fallback**: Set `openai_fallback=True` / `anthropic_fallback=True` to back the pool with the vendors' own APIs once nothing healthy is left.
   - **Pluggable Selection**: Custom selection algorithms can be provided by passing a callable to the `selector` parameter on the Switchboard constructor.
-  - **OpenTelemetry Integration**: Built-in metrics for request routing and healthy deployment counts.
-- **Lightweight**: Small codebase with minimal dependencies: `openai`, `anthropic`, `loguru`, `tenacity`, `wrapt`, and `opentelemetry-api`.
+  - **OpenTelemetry Integration**: Every call is a span, with a child per failover attempt naming the resource that served it. Traffic, tokens, latency, failovers, cooldowns, and live utilization come out as metrics — enough to see which region is carrying the pool and which one is quietly failing.
+- **Lightweight**: Small codebase with minimal dependencies: `openai`, `anthropic`, `tenacity`, `wrapt`, and `opentelemetry-api`.
 
 ## Runnable Example
 
@@ -77,10 +77,10 @@ Distributing 1000 requests across 10 deployments
 Max inflight requests: 1000
 
 {
-    'bench_0': {'gpt-5.4-mini': UtilStats(util=0.337, tpm='8388/30000', rpm='100/300')},
-    'bench_1': {'gpt-5.4-mini': UtilStats(util=0.331, tpm='8251/30000', rpm='99/300')},
+    'bench_0': {'gpt-5.4-mini': UtilStats(util=0.337, tpm=Quota(used=8388, limit=30000), rpm=Quota(used=100, limit=300))},
+    'bench_1': {'gpt-5.4-mini': UtilStats(util=0.331, tpm=Quota(used=8251, limit=30000), rpm=Quota(used=99, limit=300))},
     ...
-    'bench_9': {'gpt-5.4-mini': UtilStats(util=0.342, tpm='8435/30000', rpm='100/300')}
+    'bench_9': {'gpt-5.4-mini': UtilStats(util=0.342, tpm=Quota(used=8435, limit=30000), rpm=Quota(used=100, limit=300))}
 }
 
 Utilization Distribution:

@@ -5,12 +5,6 @@
 # To run this, use:
 #   just smoke
 #
-# /// script
-# requires-python = ">=3.10"
-# dependencies = [
-#     "azure-switchboard",
-# ]
-# ///
 
 import asyncio
 import os
@@ -158,12 +152,12 @@ async def usage_tracking(sb: Switchboard) -> None:
     stats = sb.stats()[resource]
     check(
         "chat deployment spent tokens",
-        not stats[CHAT_MODEL].tpm.startswith("0/"),
+        stats[CHAT_MODEL].tpm.used > 0,
         stats[CHAT_MODEL].tpm,
     )
     check(
         "messages deployment spent tokens",
-        not stats[MESSAGES_MODEL].tpm.startswith("0/"),
+        stats[MESSAGES_MODEL].tpm.used > 0,
         stats[MESSAGES_MODEL].tpm,
     )
 

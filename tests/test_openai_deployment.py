@@ -1,418 +1,240 @@
-import asyncio
+"""Everything specific to the Chat Completions deployment.
+
+Mirrors tests/test_anthropic_deployment.py class for class: the two are
+symmetric implementations, so what is asserted about one is asserted about the
+other. Quota arithmetic and cooldown mechanics are shared by every deployment
+and live in test_deployment.py instead.
+"""
+
 from unittest.mock import AsyncMock, patch
 
 import pytest
-import respx
-from httpx import Request, Response, TimeoutException
-from openai import APIConnectionError, APITimeoutError, RateLimitError
+from httpx import Request, Response
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    AsyncOpenAI,
+    RateLimitError,
+)
 
 from azure_switchboard import Foundry, OpenAIDeployment
+from azure_switchboard.resource import Resource
 
 from .conftest import (
     COMPLETION_BODY,
-    COMPLETION_PARAMS,
     COMPLETION_RESPONSE,
-    COMPLETION_RESPONSE_JSON,
     COMPLETION_STREAM_CHUNKS,
+    PARSED_COMPLETION_BODY,
+    PARSED_RESPONSE,
+    WeatherResult,
+    assert_cooldown_scope,
     chat_completion_mock,
     collect_chunks,
+    openai_foundry,
 )
 
 
+def _request() -> Request:
+    return Request("POST", "https://test.services.ai.azure.com/openai/v1/completions")
+
+
+def _rate_limit() -> RateLimitError:
+    return RateLimitError(
+        "rate limited",
+        response=Response(429, request=_request()),
+        body=None,
+    )
+
+
+COOLDOWN_CASES = [
+    (_rate_limit(), "model"),
+    (APIConnectionError(request=_request()), "resource"),
+    (APITimeoutError(request=_request()), None),
+]
+COOLDOWN_IDS = ["rate_limit", "connection", "timeout"]
+
+
+class TestOpenAIEndpoint:
+    def test_resource_name_builds_the_chat_url(self):
+        deployment = openai_foundry("my-res").models["gpt-4o-mini"]
+        assert str(deployment.client.base_url).startswith(
+            "https://my-res.services.ai.azure.com/openai/v1"
+        )
+
+    def test_endpoint_override_wins(self):
+        resource = Foundry(
+            name="d",
+            api_key="k",
+            models=[
+                OpenAIDeployment(
+                    name="gpt-4o-mini", endpoint="https://custom.example/openai/v1/"
+                )
+            ],
+        )
+        client = resource.models["gpt-4o-mini"].client
+        assert "custom.example" in str(client.base_url)
+
+    def test_first_party_deployment_derives_no_url(self, monkeypatch):
+        """A Resource with no base derives no URL, so the SDK falls back to its
+        vendor default."""
+        monkeypatch.setenv("OPENAI_API_KEY", "k")
+        resource = Resource("first-party-openai", models=[OpenAIDeployment("gpt-4o")])
+        deployment = resource.models["gpt-4o"]
+        assert deployment.url is None
+        assert type(deployment.client) is AsyncOpenAI
+
+
 class TestOpenAIDeployment:
-    """Chat Completions deployment tests."""
-
-    async def test_init(self, deployment: OpenAIDeployment, foundry: Foundry):
-        """A deployment knows its resource and borrows that resource's client."""
-        assert deployment.name == "gpt-4o-mini"
-        assert deployment.resource is foundry
-        assert deployment.client is not None
-        assert set(foundry.models) == {"gpt-4o-mini", "gpt-4o"}
-
     @pytest.mark.mock_models("gpt-4o-mini")
-    async def test_completion(
-        self, mock_client: respx.MockRouter, deployment: OpenAIDeployment
-    ):
-        """Test basic chat completion functionality."""
+    async def test_create_charges_the_deployment(self, deployment: OpenAIDeployment):
+        await deployment.create(**COMPLETION_BODY)
 
-        deployment.client.max_retries = 0
+        usage = deployment.stats()
+        assert usage.tpm.used == COMPLETION_RESPONSE.usage.total_tokens  # pyright: ignore[reportOptionalMemberAccess]
+        assert usage.rpm.used == 1
 
-        response = await deployment.create(**COMPLETION_BODY)
-        assert mock_client.routes["azure"].call_count == 1
-        assert response == COMPLETION_RESPONSE
-
-        # Check token usage tracking
-        model = deployment
-        usage = model.stats()
-        assert usage.tpm.startswith(str(COMPLETION_RESPONSE.usage.total_tokens))  # pyright: ignore[reportOptionalMemberAccess]
-        assert usage.rpm.startswith("1")
-
-        # Test exception handling
-        mock_client.routes["azure"].side_effect = Exception("test")
-        with pytest.raises(APIConnectionError):
-            await deployment.create(**COMPLETION_BODY)
-        assert mock_client.routes["azure"].call_count == 2
-
-        # account for preflight estimate
-        usage = model.stats()
-        assert "23/" in usage.tpm
-        assert "2/" in usage.rpm
-
-    async def test_streaming(self, deployment: OpenAIDeployment):
-        """Test streaming functionality.
-
-        It's annoying to try to mock HTTP streaming responses so we cheat
-        a little bit with an AsyncMock.
-        """
-
-        deployment.client.max_retries = 0
-
+    async def test_streaming_accumulates_usage(self, deployment: OpenAIDeployment):
+        """Only the final chunk carries usage, so it is tapped as chunks pass."""
         with patch.object(
             deployment.client.chat.completions,
             "create",
             side_effect=chat_completion_mock(),
-        ) as mock:
-            stream = await deployment.create(stream=True, **COMPLETION_BODY)
-            mock.assert_called_once()
-
-            # verify basic behavior
-            received_chunks, content = await collect_chunks(stream)
-            assert len(received_chunks) == len(COMPLETION_STREAM_CHUNKS)
-            assert content == "Hello, world!"
-
-            # Verify token usage tracking
-            usage = deployment.stats()
-            assert "20/" in usage.tpm
-            assert "1/" in usage.rpm
-
-        # verify connection error handling marks down
-        connection_error = APIConnectionError(
-            request=Request(
-                "POST", "https://test.openai.azure.com/openai/v1/chat/completions"
-            )
-        )
-        with patch.object(
-            deployment.client.chat.completions,
-            "create",
-            side_effect=connection_error,
-        ) as mock:
-            with pytest.raises(APIConnectionError):
-                stream = await deployment.create(stream=True, **COMPLETION_BODY)
-                async for _ in stream:
-                    pass
-            mock.assert_called_once()
-
-            usage = deployment.stats()
-            assert "23/" in usage.tpm
-            assert "2/" in usage.rpm
-
-        # A connection error cools the resource, not just this deployment
-        assert deployment.resource.is_cooling()
-        assert not deployment.is_cooling()
-        deployment.resource.mark_up()
-
-        # Test midstream exception handling — generic exceptions do NOT mark down
-        with patch.object(
-            deployment.client.chat.completions,
-            "create",
-            side_effect=chat_completion_mock(),
-        ) as mock:
-            stream = await deployment.create(stream=True, **COMPLETION_BODY)
-
-            with patch.object(
-                stream._self_model,  # type: ignore[reportAttributeAccessIssue]
-                "spend_tokens",
-                side_effect=Exception("asyncstream error"),
-            ):
-                with pytest.raises(Exception, match="asyncstream error"):
-                    await collect_chunks(stream)
-                assert mock.call_count == 1
-                assert deployment.is_healthy()
-
-        # Test midstream connection error marks down
-        connection_error = APIConnectionError(
-            request=Request(
-                "POST", "https://test.openai.azure.com/openai/v1/chat/completions"
-            )
-        )
-
-        async def connection_error_stream():
-            yield COMPLETION_STREAM_CHUNKS[0]
-            raise connection_error
-
-        with patch.object(
-            deployment.client.chat.completions,
-            "create",
-            new=AsyncMock(return_value=connection_error_stream()),
-        ) as mock:
-            stream = await deployment.create(stream=True, **COMPLETION_BODY)
-            with pytest.raises(APIConnectionError):
-                await collect_chunks(stream)
-            assert mock.call_count == 1
-            assert not deployment.is_healthy()
-
-        deployment.mark_up()
-
-        # Test midstream rate limit handling
-        rate_limit_error = RateLimitError(
-            "rate limited",
-            response=Response(
-                status_code=429,
-                request=Request(
-                    "POST", "https://test.openai.azure.com/openai/v1/chat/completions"
-                ),
-            ),
-            body={"error": {"message": "rate limited"}},
-        )
-
-        async def rate_limited_stream():
-            yield COMPLETION_STREAM_CHUNKS[0]
-            raise rate_limit_error
-
-        with patch.object(
-            deployment.client.chat.completions,
-            "create",
-            new=AsyncMock(return_value=rate_limited_stream()),
-        ) as mock:
-            stream = await deployment.create(stream=True, **COMPLETION_BODY)
-            with pytest.raises(RateLimitError):
-                await collect_chunks(stream)
-            assert mock.call_count == 1
-            assert not deployment.is_healthy()
-
-    async def test_mark_down(self, deployment: OpenAIDeployment):
-        """Test model-level cooldown functionality."""
-
-        model = deployment
-
-        model.mark_down()
-        assert not model.is_healthy()
-
-        model.mark_up()
-        assert model.is_healthy()
-
-    async def test_usage(self, deployment: OpenAIDeployment, foundry: Foundry):
-        """Test deployment-level counters"""
-
-        # Reset and verify initial state
-        for model in foundry.models.values():
-            assert "tpm='0" in str(model)
-
-        # Test deployment-level usage
-        model = deployment
-        usage = model.stats()
-        assert usage.tpm == f"0/{model.tpm_limit}"
-        assert usage.rpm == f"0/{model.rpm_limit}"
-
-        # Set and verify values
-        model.spend_tokens(100)
-        model.spend_request(5)
-        usage = model.stats()
-        assert usage.tpm == f"100/{model.tpm_limit}"
-        assert usage.rpm == f"5/{model.rpm_limit}"
-
-        # Reset and verify again
-        foundry.reset_usage()
-        usage = model.stats()
-        assert usage.tpm == f"0/{model.tpm_limit}"
-        assert usage.rpm == f"0/{model.rpm_limit}"
-
-    async def test_utilization(self, deployment: OpenAIDeployment):
-        """Test utilization calculation."""
-
-        model = deployment
-
-        # Check initial utilization (nonzero due to random splay)
-        initial_util = model.util
-        assert 0 <= initial_util < 0.02
-
-        # Test token-based utilization
-        model.spend_tokens(5000)  # 50% of TPM limit
-        util_with_tokens = model.util
-        assert 0.5 <= util_with_tokens < 0.52
-
-        # Test request-based utilization
-        model.reset_usage()
-        model.spend_request(30)  # 50% of RPM limit
-        util_with_requests = model.util
-        assert 0.5 <= util_with_requests < 0.52
-
-        # Test combined utilization (should take max of the two)
-        model.reset_usage()
-        model.spend_tokens(6000)  # 60% of TPM
-        model.spend_request(30)  # 50% of RPM
-        util_with_both = model.util
-        assert 0.6 <= util_with_both < 0.62
-
-        # Test unhealthy client
-        model.mark_down()
-        assert model.util == 1
-
-    @pytest.mark.mock_models("gpt-4o-mini", "gpt-4o")
-    async def test_multiple_models(
-        self, mock_client: respx.MockRouter, foundry: Foundry
-    ):
-        """Deployments on one resource keep separate usage counters."""
-
-        gpt4o = foundry.models["gpt-4o"]
-        gpt4o_mini = foundry.models["gpt-4o-mini"]
-        deployment = gpt4o_mini
-
-        _ = await gpt4o.create(messages=COMPLETION_PARAMS["messages"])
-        assert mock_client.routes["azure"].call_count == 1
-        assert gpt4o.rpm_usage == 1
-        assert gpt4o.tpm_usage > 0
-        assert gpt4o_mini.tpm_usage == 0
-        assert gpt4o_mini.rpm_usage == 0
-
-        _ = await deployment.create(**COMPLETION_BODY)
-        assert mock_client.routes["azure"].call_count == 2
-
-        assert gpt4o.rpm_usage == 1
-        assert gpt4o.tpm_usage > 0
-        assert gpt4o_mini.tpm_usage > 0
-        assert gpt4o_mini.rpm_usage == 1
-
-    @pytest.mark.mock_models("gpt-4o-mini")
-    async def test_concurrency(
-        self, mock_client: respx.MockRouter, deployment: OpenAIDeployment
-    ):
-        """Test handling of multiple concurrent requests."""
-
-        # Create and run concurrent requests
-        num_requests = 10
-        tasks = [deployment.create(**COMPLETION_BODY) for _ in range(num_requests)]
-        responses = await asyncio.gather(*tasks)
-
-        # Verify results
-        model = deployment
-        assert len(responses) == num_requests
-        assert all(r == COMPLETION_RESPONSE for r in responses)
-        assert mock_client.routes["azure"].call_count == num_requests
-        usage = model.stats()
-        assert usage.tpm == f"{20 * num_requests}/10000"
-        assert usage.rpm == f"{num_requests}/60"
-
-    @pytest.mark.mock_models("gpt-4o-mini")
-    async def test_timeout_retry(
-        self, mock_client: respx.MockRouter, deployment: OpenAIDeployment
-    ):
-        """Test timeout retry behavior."""
-
-        # Test successful retry after timeouts
-        expected_response = Response(status_code=200, json=COMPLETION_RESPONSE_JSON)
-        mock_client.routes["azure"].side_effect = [
-            TimeoutException("Timeout 1"),
-            TimeoutException("Timeout 2"),
-            expected_response,
-        ]
-        response = await deployment.create(**COMPLETION_BODY)
-        assert response == COMPLETION_RESPONSE
-        assert mock_client.routes["azure"].call_count == 3
-
-        # Test failure after max retries — timeouts do NOT mark the deployment down
-        mock_client.routes["azure"].reset()
-        mock_client.routes["azure"].side_effect = [
-            TimeoutException("Timeout 1"),
-            TimeoutException("Timeout 2"),
-            TimeoutException("Timeout 3"),
-        ]
-
-        with pytest.raises(APITimeoutError):
-            await deployment.create(**COMPLETION_BODY)
-        assert mock_client.routes["azure"].call_count == 3
-        assert deployment.is_healthy()
-
-    async def test_timeout_does_not_mark_down(self, deployment: OpenAIDeployment):
-        """APITimeoutError should not mark the deployment down."""
-
-        deployment.client.max_retries = 0
-        timeout_error = APITimeoutError(
-            request=Request(
-                "POST", "https://test.openai.azure.com/openai/v1/chat/completions"
-            )
-        )
-
-        with patch.object(
-            deployment.client.chat.completions,
-            "create",
-            side_effect=timeout_error,
         ):
-            with pytest.raises(APITimeoutError):
-                await deployment.create(**COMPLETION_BODY)
-            assert deployment.is_healthy()
+            stream = await deployment.create(stream=True, **COMPLETION_BODY)
+            received, content = await collect_chunks(stream)
 
-        # Repeated timeouts should not pin utilization to 1
-        for _ in range(5):
-            with patch.object(
-                deployment.client.chat.completions,
-                "create",
-                side_effect=timeout_error,
-            ):
-                with pytest.raises(APITimeoutError):
-                    await deployment.create(**COMPLETION_BODY)
+        assert len(received) == len(COMPLETION_STREAM_CHUNKS)
+        assert content == "Hello, world!"
 
-        assert deployment.is_healthy()
-        assert deployment.util < 1
+        usage = deployment.stats()
+        assert usage.tpm.used == 20
+        assert usage.rpm.used == 1
 
-    async def test_timeout_does_not_mark_down_stream(
+    async def test_parse_charges_the_deployment(self, deployment: OpenAIDeployment):
+        """Structured output is charged the same as any other response."""
+        with patch.object(
+            deployment.client.chat.completions,
+            "parse",
+            new=AsyncMock(return_value=PARSED_RESPONSE),
+        ):
+            parsed = await deployment.parse(**PARSED_COMPLETION_BODY)
+
+        assert parsed.choices[0].message.parsed == WeatherResult(
+            city="Paris", temperature=18.5, unit="celsius"
+        )
+        assert deployment.stats().tpm.used == PARSED_RESPONSE.usage.total_tokens  # pyright: ignore[reportOptionalMemberAccess]
+        assert deployment.stats().rpm.used == 1
+
+    async def test_response_without_usage_only_spends_the_estimate(
         self, deployment: OpenAIDeployment
     ):
-        """Mid-stream APITimeoutError should not mark the deployment down."""
+        """Some responses carry no usage block; the preflight estimate stands."""
+        no_usage = COMPLETION_RESPONSE.model_copy(update={"usage": None})
+        with patch.object(
+            deployment.client.chat.completions,
+            "create",
+            new=AsyncMock(return_value=no_usage),
+        ):
+            await deployment.create(**COMPLETION_BODY)
 
-        deployment.client.max_retries = 0
-        timeout_error = APITimeoutError(
-            request=Request(
-                "POST", "https://test.openai.azure.com/openai/v1/chat/completions"
-            )
-        )
+        # "Hello, world!" is 13 chars -> 3 tokens
+        assert deployment.tpm_usage == 3
 
-        async def timeout_stream():
-            yield COMPLETION_STREAM_CHUNKS[0]
-            raise timeout_error
+
+class TestOpenAIErrorHandling:
+    """Mirrors the messages path: rate limits cool a deployment, connection
+    errors cool its whole resource, timeouts cool nothing."""
+
+    @pytest.mark.parametrize("error,scope", COOLDOWN_CASES, ids=COOLDOWN_IDS)
+    async def test_cooldown_policy(self, deployment: OpenAIDeployment, error, scope):
+        with patch.object(
+            deployment.client.chat.completions, "create", side_effect=error
+        ):
+            with pytest.raises(type(error)):
+                await deployment.create(**COMPLETION_BODY)
+        assert_cooldown_scope(deployment, scope)
+
+    @pytest.mark.parametrize("error,scope", COOLDOWN_CASES, ids=COOLDOWN_IDS)
+    async def test_cooldown_policy_on_stream(
+        self, deployment: OpenAIDeployment, error, scope
+    ):
+        async def _raising_stream(*args, **kwargs):
+            raise error
+            yield  # pragma: no cover
 
         with patch.object(
             deployment.client.chat.completions,
             "create",
-            new=AsyncMock(return_value=timeout_stream()),
+            new=AsyncMock(side_effect=lambda *a, **k: _raising_stream()),
         ):
             stream = await deployment.create(stream=True, **COMPLETION_BODY)
-            with pytest.raises(APITimeoutError):
+            with pytest.raises(type(error)):
                 await collect_chunks(stream)
-            assert deployment.is_healthy()
+        assert_cooldown_scope(deployment, scope)
 
-    def test_default_timeout(self):
-        """Default per-request timeout should be 30s."""
-        assert Foundry(name="test", api_key="key").timeout == 30.0
+    @pytest.mark.parametrize("error,scope", COOLDOWN_CASES, ids=COOLDOWN_IDS)
+    async def test_cooldown_policy_on_parse(
+        self, deployment: OpenAIDeployment, error, scope
+    ):
+        with patch.object(
+            deployment.client.chat.completions, "parse", side_effect=error
+        ):
+            with pytest.raises(type(error)):
+                await deployment.parse(
+                    response_format=WeatherResult,
+                    messages=[{"role": "user", "content": "hi"}],
+                )
+        assert_cooldown_scope(deployment, scope)
 
-    def test_custom_timeout(self):
-        """Callers that need longer timeouts can override per Foundry."""
-        assert Foundry(name="batch", api_key="key", timeout=300.0).timeout == 300.0
-
-    async def test_rate_limit_marks_down(self, deployment: OpenAIDeployment):
-        """Rate limit errors should mark the model down and re-raise."""
-
-        deployment.client.max_retries = 0
-        rate_limit_error = RateLimitError(
-            "rate limited",
-            response=Response(
-                status_code=429,
-                request=Request(
-                    "POST", "https://test.openai.azure.com/openai/v1/chat/completions"
-                ),
-            ),
-            body={"error": {"message": "rate limited"}},
-        )
-
+    async def test_an_error_the_sdk_does_not_name_cools_nothing(
+        self, deployment: OpenAIDeployment
+    ):
+        """A failure in our own accounting is not the upstream's fault."""
         with patch.object(
             deployment.client.chat.completions,
             "create",
-            side_effect=rate_limit_error,
-        ) as mock:
-            with pytest.raises(RateLimitError):
+            side_effect=chat_completion_mock(),
+        ):
+            stream = await deployment.create(stream=True, **COMPLETION_BODY)
+            with patch.object(
+                deployment, "spend_tokens", side_effect=Exception("accounting")
+            ):
+                with pytest.raises(Exception, match="accounting"):
+                    await collect_chunks(stream)
+
+        assert_cooldown_scope(deployment, None)
+
+
+class TestOpenAITokenEstimate:
+    """Charged before the request goes out, so concurrent selections see it."""
+
+    def test_estimate_counts_message_content(self, deployment: OpenAIDeployment):
+        estimate = deployment._estimate_token_usage(
+            {
+                "messages": [
+                    {"role": "user", "content": "u" * 40},
+                    {"role": "assistant", "content": "a" * 40},
+                ]
+            }
+        )
+        assert estimate == 20  # 80 chars // 4
+
+    async def test_a_failed_request_still_costs_the_estimate(
+        self, deployment: OpenAIDeployment
+    ):
+        """It is spent before the call goes out, so a failure leaves it charged
+        rather than refunded."""
+        with patch.object(
+            deployment.client.chat.completions,
+            "create",
+            side_effect=APITimeoutError(request=_request()),
+        ):
+            with pytest.raises(APITimeoutError):
                 await deployment.create(**COMPLETION_BODY)
-            assert mock.call_count == 1
-            assert not deployment.is_healthy()
+
+        # "Hello, world!" is 13 chars -> 3 tokens
+        assert deployment.tpm_usage == 3
+        assert deployment.rpm_usage == 1
 
 
 class TestOpenAIStreamHelper:

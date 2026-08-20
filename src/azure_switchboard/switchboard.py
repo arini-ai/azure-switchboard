@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
+import time
 from collections import OrderedDict
 from functools import cached_property
 from typing import (
@@ -17,11 +19,10 @@ from anthropic import AsyncAnthropic
 from anthropic import AsyncStream as AsyncAnthropicStream
 from anthropic.lib.streaming import AsyncMessageStream
 from anthropic.types import Message, ParsedMessage, RawMessageStreamEvent
-from loguru import logger
 from openai import AsyncOpenAI, AsyncStream
 from openai.lib.streaming.chat import AsyncChatCompletionStream
 from openai.types.chat import ChatCompletion, ChatCompletionChunk, ParsedChatCompletion
-from opentelemetry import metrics
+from opentelemetry.trace import Span
 from pydantic import BaseModel
 from tenacity import (
     AsyncRetrying,
@@ -29,6 +30,7 @@ from tenacity import (
     stop_after_attempt,
 )
 
+from . import telemetry
 from .anthropic_deployment import AnthropicDeployment
 from .exceptions import SwitchboardError
 from .resource import Resource
@@ -39,17 +41,7 @@ _T = TypeVar("_T", bound=BaseModel)
 _R = TypeVar("_R")
 _M = TypeVar("_M", bound=ModelDeployment)
 
-meter = metrics.get_meter("azure_switchboard.switchboard")
-healthy_deployments_gauge = meter.create_gauge(
-    name="healthy_deployments_count",
-    description="Number of healthy deployments available for a model",
-    unit="1",
-)
-request_counter = meter.create_counter(
-    name="requests",
-    description="Number of requests sent through the switchboard",
-    unit="1",
-)
+logger = logging.getLogger(__name__)
 
 
 class Selector(Protocol):
@@ -129,6 +121,9 @@ class Switchboard:
 
         self.ratelimit_window = ratelimit_window
 
+        # the gauges read utilization straight off these resources
+        telemetry.track(self)
+
     @cached_property
     def chat(self) -> _Chat:
         return _Chat(self)
@@ -202,20 +197,20 @@ class Switchboard:
             ]
             if preferred:
                 return self.selector(preferred)
-            logger.warning(f"{model} is unhealthy on {pinned.name}, reselecting")
+            logger.warning("%s is unhealthy on %s; reselecting", model, pinned.name)
 
         eligible = [m for m in candidates if m.is_healthy()]
-        # recorded before the early return, since zero is the value worth alerting on
-        healthy_deployments_gauge.set(len(eligible), {"model": model})
 
         if not eligible:
             if (first_party := fallback()) and first_party.is_healthy():
-                logger.warning(f"No healthy deployments for {model}, using first-party")
+                logger.warning(
+                    "no healthy deployments for %s; using first-party", model
+                )
                 return first_party
             raise SwitchboardError(f"No deployments available for {model}")
 
         selected = self.selector(eligible)
-        logger.trace(f"Selected deployment: {selected.resource.name}/{selected.name}")
+        logger.debug("selected %s/%s", selected.resource.name, selected.name)
 
         if session_id:
             self.sessions[session_id] = selected.resource
@@ -231,26 +226,66 @@ class Switchboard:
         fallback: Callable[[], _M | None],
         call: Callable[[_M], Awaitable[_R]],
     ) -> _R:
-        with logger.contextualize(model=model, session_id=session_id):
+        with telemetry.tracer.start_as_current_span(
+            f"chat {model}",
+            attributes={
+                "gen_ai.operation.name": "chat",
+                "gen_ai.request.model": model,
+            },
+        ) as call_span:
+            if session_id:
+                call_span.set_attribute("switchboard.session_id", session_id)
+
+            n = 0
+            reason = ""
             # failover_policy is copied so concurrent requests
             # dont share retry state
             async for attempt in self.failover_policy.copy():
                 with attempt:
+                    if n:
+                        # counted here rather than where the error was raised:
+                        # a failed last attempt is not a failover, and only the
+                        # next trip round the loop proves one happened
+                        telemetry.failovers.add(1, {"model": model, "reason": reason})
+
                     deployment = self._select(
                         pool, model=model, session_id=session_id, fallback=fallback
                     )
-                    with logger.contextualize(resource=deployment.resource.name):
-                        logger.trace("Sending request")
-                        response = await call(deployment)
-                    request_counter.add(
-                        1,
-                        {"model": model, "resource": deployment.resource.name},
-                    )
-                    return response
+                    dimensions = {"model": model, "resource": deployment.resource.name}
 
-        # unreachable while the policy reraises, which the default does; an
-        # explicit failure beats returning None if that is ever swapped out
-        raise SwitchboardError(f"Failover exhausted for {model}")
+                    with telemetry.tracer.start_as_current_span(
+                        "attempt",
+                        attributes={
+                            "switchboard.attempt": n,
+                            "switchboard.resource": deployment.resource.name,
+                            "switchboard.model": deployment.name,
+                            "switchboard.load": deployment.load,
+                        },
+                    ):
+                        started = time.perf_counter()
+                        try:
+                            response = await call(deployment)
+                        except Exception as e:
+                            # the span records the exception and sets an error
+                            # status as it escapes; doing it here too would put
+                            # the same event on the span twice
+                            reason = deployment.error_reason(e)
+                            self._record_attempt(dimensions, started, "error")
+                            raise
+                        self._record_attempt(dimensions, started, "success")
+                        return response
+                n += 1
+
+        # Unreachable: the retrying generator always returns or raises. It
+        # stays because the declared return type has no room for None, and it
+        # is excluded from coverage because nothing can exercise it.
+        raise SwitchboardError(f"Failover exhausted for {model}")  # pragma: no cover
+
+    @staticmethod
+    def _record_attempt(dimensions: dict, started: float, outcome: str) -> None:
+        attributes = {**dimensions, "outcome": outcome}
+        telemetry.duration.record(time.perf_counter() - started, attributes)
+        telemetry.requests.add(1, attributes)
 
     def __repr__(self) -> str:
         return f"Switchboard({self.resources})"
@@ -460,15 +495,21 @@ class _ChatStream:
         self._kwargs = kwargs
         self._deployment: OpenAIDeployment | None = None
         self._stream: AsyncChatCompletionStream | None = None
+        self._span: Span | None = None
         self._offset = 0
 
     async def __aenter__(self) -> AsyncChatCompletionStream:
         surface = self._surface
 
-        def call(d: OpenAIDeployment):
+        # a coroutine rather than a plain callable so the stream span is opened
+        # only once the stream is, while the attempt span is still current and
+        # can parent it
+        async def call(d: OpenAIDeployment) -> AsyncChatCompletionStream:
             self._deployment = d
             self._offset = d._estimate_token_usage(self._kwargs)
-            return d.open_stream(**self._kwargs)
+            stream = await d.open_stream(**self._kwargs)
+            self._span = telemetry.start_stream_span(d)
+            return stream
 
         self._stream = await surface.sb._dispatch(
             surface._pool,
@@ -480,13 +521,15 @@ class _ChatStream:
         return self._stream
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
-        if not (self._deployment and self._stream):
-            return
+        # __aenter__ sets all three or raises, and an __aenter__ that raises
+        # means this never runs
+        assert self._deployment and self._stream and self._span
         try:
             # accounting must not be able to leak the connection
-            self._deployment.reconcile_stream(self._stream, self._offset)
+            self._deployment.reconcile_stream(self._stream, self._offset, self._span)
             if exc is not None:
                 self._deployment._handle_error(exc, "stream")
+            telemetry.end_stream_span(self._span, exc)
         finally:
             await self._stream.close()
 
@@ -508,15 +551,18 @@ class _MessagesStream:
         self._kwargs = kwargs
         self._deployment: AnthropicDeployment | None = None
         self._stream: AsyncMessageStream | None = None
+        self._span: Span | None = None
         self._offset = 0
 
     async def __aenter__(self) -> AsyncMessageStream:
         surface = self._surface
 
-        def call(d: AnthropicDeployment):
+        async def call(d: AnthropicDeployment) -> AsyncMessageStream:
             self._deployment = d
             self._offset = d._estimate_token_usage(self._kwargs)
-            return d.open_stream(**self._kwargs)
+            stream = await d.open_stream(**self._kwargs)
+            self._span = telemetry.start_stream_span(d)
+            return stream
 
         self._stream = await surface.sb._dispatch(
             surface._pool,
@@ -528,13 +574,15 @@ class _MessagesStream:
         return self._stream
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
-        if not (self._deployment and self._stream):
-            return
+        # __aenter__ sets all three or raises, and an __aenter__ that raises
+        # means this never runs
+        assert self._deployment and self._stream and self._span
         try:
             # accounting must not be able to leak the connection
-            self._deployment.reconcile_stream(self._stream, self._offset)
+            self._deployment.reconcile_stream(self._stream, self._offset, self._span)
             if exc is not None:
                 self._deployment._handle_error(exc, "stream")
+            telemetry.end_stream_span(self._span, exc)
         finally:
             await self._stream.close()
 
