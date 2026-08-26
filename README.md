@@ -1,6 +1,6 @@
 # Azure Switchboard
 
-Batteries-included, coordination-free client loadbalancing for Azure AI Foundry — OpenAI and Anthropic models alike.
+`azure-switchboard` is a lightweight, coordination-free client load balancer for inference traffic against models hosted on Azure Foundry. It can be used as a drop-in replacement for the `openai` or `anthropic` SDKs and uses the [power of two random choices](https://www.eecs.harvard.edu/~michaelm/postscripts/handbook2001.pdf) algorithm to achieve stable, uniform load distribution between clients and across deployments without requiring clients to synchronize to track utilization. This is especially useful when deployments are not uniform in terms of quotas/ratelimits or model availability, for example, if your Azure account draws from multiple subscriptions, or when some models are only available/deployed in a subset of regions and not others.
 
 ```bash
 uv add azure-switchboard
@@ -10,11 +10,7 @@ uv add azure-switchboard
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![CI](https://github.com/arini-ai/azure-switchboard/actions/workflows/ci.yaml/badge.svg?branch=master)](https://github.com/arini-ai/azure-switchboard/actions/workflows/ci.yaml)
 
-## Overview
-
-`azure-switchboard` is a Python 3 library that implements a client-only, coordination-free loadbalancer for OpenAI/Anthropic models hosted on Azure Foundry. It can be used as a drop-in replacement for the openai or anthropic SDKs and lets you spread inference traffic across model deployments in multiple Azure Foundry resources. Coordination-freedom is achieved via the [power of two random choices](https://www.eecs.harvard.edu/~michaelm/postscripts/handbook2001.pdf) algorithm. See below for performance benchmarks.
-
-List the Azure resources you have and the models deployed on them:
+## Example
 
 ```python
 from azure_switchboard import AnthropicDeployment, Foundry, OpenAIDeployment, Switchboard
@@ -47,24 +43,26 @@ async with sb:
     )
 ```
 
-The endpoint is inferrable from the Foundry resource name or can be overriden explicitly on a per-deployment basis. Usage, ratelimiting, and cooldown status is tracked per-deployment (tpm/rpm) and per-resource (network-level errors) and overloaded models or resources can be configured to fall back to first-party providers if the appropriate API keys are available in the environment.
+The endpoint is inferrable from the Foundry resource name or can be overridden explicitly on a per-deployment basis.
+
+See [tools/readme_example.py](https://github.com/arini-ai/azure-switchboard/blob/master/tools/readme_example.py) for a runnable example.
 
 ## Features
 
 - **Multi-Provider**: supports both the OpenAI Chat Completions API and the Anthropic Messages API. Non-OpenAI models that support the OpenAI API spec can be used via the OpenAIDeployment class.
 - **Coordination-Free**: The default Two Random Choices algorithm does not require coordination between client instances to achieve excellent load distribution characteristics. See benchmarks for additional details.
-- **Utilization-Aware**: TPM/RPM utilization is tracked per deployment for use during selection.
-- **Batteries Included**:
-  - **Session Affinity**: Provide a `session_id` to route requests in the same session to the same resource, so a session spanning several models keeps one prompt cache warm.
-  - **Automatic Failover**: Retries are controlled by a tenacity `AsyncRetrying` policy (`failover_policy`).
-  - **First-Party Fallback**: Set `openai_fallback=True` / `anthropic_fallback=True` to back the pool with the vendors' own APIs once nothing healthy is left.
-  - **Pluggable Selection**: Custom selection algorithms can be provided by passing a callable to the `selector` parameter on the Switchboard constructor.
-  - **OpenTelemetry Integration**: Every call is a span, with a child per failover attempt naming the resource that served it. Traffic, tokens, latency, failovers, cooldowns, and live utilization come out as metrics — enough to see which region is carrying the pool and which one is quietly failing.
-- **Lightweight**: Small codebase with minimal dependencies: `openai`, `anthropic`, `tenacity`, `wrapt`, and `opentelemetry-api`.
+- **Automatic Failover**: Failed requests are automatically retried on alternate deployments for the same model per a configurable retry policy, or, if enabled, to the first-party API if no healthy Foundry deployments are available.
+- **Session Affinity**: A `session_id` can be provided to route requests in the same session to the same resource, to optimize for prompt caching.
+- **Pluggable Selection**: Custom selection algorithms can be provided by passing a callable to the `selector` parameter on the Switchboard constructor.
+- **Telemetry**: OpenTelemetry captures request spans and metrics for tokens, latency, failovers, cooldowns, and live utilization tagged by resource.
 
-## Runnable Example
+## Retry Behavior
 
-See [tools/readme_example.py](https://github.com/arini-ai/azure-switchboard/blob/master/tools/readme_example.py).
+Switchboard tracks utilization by deployment (tpm/rpm usage on a given model in a given Foundry) and health by resource (non-429 errors from the Foundry endpoint). If an individual model on a given Foundry resource is overloaded or ratelimited, requests for that model will be routed to deployments of the same model on other available Foundries. If the resource as a whole is unhealthy, it gets marked down entirely and excluded from selection until its cooldown period has expired.
+
+Switchboard does not replace the SDK-default retry policy. For example, the `openai` SDK defaults to retrying a failing request 3 times before giving up. Switchboard's failover occurs after the SDK's internal retries are exhausted, according to its own failover policy, which defaults to 2 attempts. This means that out of the box a total of 6 attempts will be made to complete a request. Suppose Switchboard is configured with 3 deployments for an OpenAI model and a custom failover policy of 3 attempts. If two of those three deployments turn out to be unhealthy (and we get unlucky with the selection ordering), at least 7 requests will be attempted: 3 requests from the OpenAI SDK to the first deployment that was selected, another 3 requests from the OpenAI SDK to the second deployment that was selected after Switchboard's first failover attempt, and at least one request to the third deployment that was selected after Switchboard's second failover attempt. If the third deployment also fails, `SwitchboardError` is raised.
+
+The retry policies of both the internal SDK and Switchboard can be configured to trade off between resilience and latency.
 
 ## Benchmarks
 
@@ -116,23 +114,6 @@ git clone https://github.com/arini-ai/azure-switchboard
 cd azure-switchboard
 
 just install
-```
-
-### Running tests
-
-```bash
-just test        # unit tests; every upstream is mocked
-just typecheck   # pyright over src/, as CI runs it
-```
-
-### Release
-
-This library uses CalVer for versioning. On push to master, if tests pass, a package is automatically built, released, and uploaded to PyPI.
-
-Locally, the package can be built with uv:
-
-```bash
-uv build
 ```
 
 ## Contributing
