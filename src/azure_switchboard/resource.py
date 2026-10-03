@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import Literal
 
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
@@ -14,6 +15,9 @@ from .openai_deployment import OpenAIDeployment
 # carries the quota machinery they share and bounds the generic selection code,
 # but nothing is ever only a ModelDeployment, so a resource says so.
 Deployment = OpenAIDeployment | AnthropicDeployment
+
+# Who serves a resource's deployments: Azure Foundry, or a vendor's own API.
+Provider = Literal["azure", "openai", "anthropic"]
 
 
 class Resource(Cooldown):
@@ -30,6 +34,7 @@ class Resource(Cooldown):
         self,
         name: str,
         *,
+        provider: Provider,
         base: str | None = None,
         api_key: str | None = None,
         timeout: float = 30.0,
@@ -39,6 +44,8 @@ class Resource(Cooldown):
         super().__init__(default_cooldown)
         self.name = name
         self.base = base
+        # reported as gen_ai.provider.name
+        self.provider = provider
         self.api_key = api_key
         self.timeout = timeout
 
@@ -120,6 +127,7 @@ class Foundry(Resource):
         super().__init__(
             name,
             base=f"https://{name}.services.ai.azure.com",
+            provider="azure",
             api_key=api_key,
             timeout=timeout,
             models=models,

@@ -784,7 +784,9 @@ class TestMixedPoolConstruction:
         assigning it afterwards, when the models would already be bound.
         """
         assert (
-            Resource("plain", models=[OpenAIDeployment("gpt-4o")]).models["gpt-4o"].url
+            Resource("plain", provider="openai", models=[OpenAIDeployment("gpt-4o")])
+            .models["gpt-4o"]
+            .url
             is None
         )
         assert (
@@ -823,7 +825,7 @@ class TestSessionLRU:
 
     def test_a_read_refreshes_the_entry(self):
         sessions = _LRUDict(max_size=2)
-        a, b, c = (Resource(n) for n in "abc")
+        a, b, c = (Resource(n, provider="azure") for n in "abc")
         sessions["a"] = a
         sessions["b"] = b
 

@@ -78,7 +78,11 @@ class TestOpenAIEndpoint:
         """A Resource with no base derives no URL, so the SDK falls back to its
         vendor default."""
         monkeypatch.setenv("OPENAI_API_KEY", "k")
-        resource = Resource("first-party-openai", models=[OpenAIDeployment("gpt-4o")])
+        resource = Resource(
+            "first-party-openai",
+            provider="openai",
+            models=[OpenAIDeployment("gpt-4o")],
+        )
         deployment = resource.models["gpt-4o"]
         assert deployment.url is None
         assert type(deployment.client) is AsyncOpenAI
