@@ -14,7 +14,7 @@ from httpx import Request, Response
 from pydantic import BaseModel
 
 from azure_switchboard import AnthropicDeployment, Foundry
-from azure_switchboard.anthropic_deployment import _content_len
+from azure_switchboard.anthropic_deployment import _content_len, _estimate_token_usage
 from azure_switchboard.resource import Resource
 
 from .conftest import (
@@ -83,7 +83,9 @@ class TestAnthropicEndpoint:
         vendor default and the plain client is the right one."""
         monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
         resource = Resource(
-            "first-party-anthropic", models=[AnthropicDeployment("claude-sonnet-5")]
+            "first-party-anthropic",
+            provider="anthropic",
+            models=[AnthropicDeployment("claude-sonnet-5")],
         )
         deployment = resource.models["claude-sonnet-5"]
         assert deployment.url is None
@@ -238,22 +240,18 @@ class TestAnthropicTokenEstimate:
         assert _content_len([{"type": "image", "source": {}}]) == 0
         assert _content_len(None) == 0
 
-    def test_estimate_counts_blocks_and_system(
-        self, anthropic_deployment: AnthropicDeployment
-    ):
-        estimate = anthropic_deployment._estimate_token_usage(
-            {
-                "system": "s" * 40,
-                "messages": [
-                    {"role": "user", "content": "u" * 40},
-                    {
-                        "role": "assistant",
-                        "content": [{"type": "text", "text": "a" * 40}],
-                    },
-                ],
-            }
+    def test_estimate_counts_blocks_and_system(self):
+        estimate = _estimate_token_usage(
+            system="s" * 40,
+            messages=[
+                {"role": "user", "content": "u" * 40},
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "a" * 40}],
+                },
+            ],
         )
-        assert estimate == 30  # 120 chars // 4
+        assert estimate == 40  # 120 chars // 3
 
     async def test_a_failed_request_still_costs_the_estimate(
         self, anthropic_deployment: AnthropicDeployment

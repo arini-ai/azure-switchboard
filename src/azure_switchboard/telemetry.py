@@ -11,7 +11,9 @@ A deployment's name is the model name and is unique within a resource, so
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
 from opentelemetry import metrics, trace
@@ -24,6 +26,10 @@ if TYPE_CHECKING:
 
 tracer = trace.get_tracer("azure_switchboard")
 meter = metrics.get_meter("azure_switchboard")
+
+# The span of the call in flight, so usage recorded deep inside an attempt can
+# also land on the span above it.
+call_span: ContextVar[Span | None] = ContextVar("switchboard_call_span", default=None)
 
 requests = meter.create_counter(
     name="switchboard.requests",
@@ -110,6 +116,21 @@ meter.create_observable_gauge(
 )
 
 
+@contextmanager
+def in_call(span: Span) -> Iterator[None]:
+    token = call_span.set(span)
+    try:
+        yield
+    finally:
+        call_span.reset(token)
+
+
+def provider_attributes(deployment: ModelDeployment) -> dict[str, str]:
+    """Who actually serves the call. Known only once a deployment is selected,
+    so it is set per attempt rather than where the call span opens."""
+    return {"gen_ai.provider.name": deployment.resource.provider}
+
+
 def start_stream_span(deployment: ModelDeployment) -> Span:
     """Open a span for a stream that outlives the call which opened it.
 
@@ -123,6 +144,7 @@ def start_stream_span(deployment: ModelDeployment) -> Span:
         attributes={
             "switchboard.resource": deployment.resource.name,
             "switchboard.model": deployment.name,
+            **provider_attributes(deployment),
         },
     )
 
@@ -152,9 +174,12 @@ def record_usage(
     rather than addends.
 
     `span` is explicit because a stream's usage lands long after the span that
-    opened it stopped being current.
+    opened it stopped being current. Without one, usage goes on the attempt and
+    on the call above it, which is the span observability backends price.
     """
-    span = span or trace.get_current_span()
+    spans = [span] if span else [trace.get_current_span()]
+    if not span and (call := call_span.get()):
+        spans.append(call)
     attributes = {"model": deployment.name, "resource": deployment.resource.name}
 
     for kind, count in (
@@ -166,7 +191,12 @@ def record_usage(
         if count:
             tokens.add(count, {**attributes, "kind": kind})
 
-    if cached:
-        span.set_attribute("gen_ai.usage.cached_tokens", cached)
-    if reasoning:
-        span.set_attribute("gen_ai.usage.reasoning_tokens", reasoning)
+    for s in spans:
+        for name, count in (
+            ("input_tokens", input),
+            ("output_tokens", output),
+            ("cached_tokens", cached),
+            ("reasoning_tokens", reasoning),
+        ):
+            if count:
+                s.set_attribute(f"gen_ai.usage.{name}", count)

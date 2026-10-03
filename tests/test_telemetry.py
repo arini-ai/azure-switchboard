@@ -32,6 +32,7 @@ from .conftest import (
     COMPLETION_BODY,
     COMPLETION_PARAMS,
     COMPLETION_RESPONSE,
+    COMPLETION_RESPONSE_JSON,
     COMPLETION_STREAM_CHUNKS,
     MESSAGE_BODY,
     MESSAGE_STREAM_EVENTS,
@@ -123,6 +124,39 @@ class TestDispatchSpans:
         assert attempt.attributes["switchboard.attempt"] == 0  # pyright: ignore[reportOptionalSubscript]
         assert attempt.attributes["switchboard.resource"] in switchboard.resources  # pyright: ignore[reportOptionalSubscript]
 
+    @pytest.mark.mock_models("gpt-4o-mini")
+    async def test_the_call_carries_provider_and_token_counts(
+        self, switchboard: Switchboard, spans: InMemorySpanExporter
+    ):
+        """Cost tooling prices the root span, so usage has to land there as
+        well as on the attempt that produced it."""
+        await switchboard.chat.completions.create(**COMPLETION_PARAMS)
+
+        usage = COMPLETION_RESPONSE_JSON["usage"]
+        (call,) = named(spans, "chat gpt-4o-mini")
+        (attempt,) = named(spans, "attempt")
+        for span in (call, attempt):
+            assert span.attributes["gen_ai.provider.name"] == "azure"  # pyright: ignore[reportOptionalSubscript]
+            assert (
+                span.attributes["gen_ai.usage.input_tokens"] == usage["prompt_tokens"]
+            )  # pyright: ignore[reportOptionalSubscript]
+            assert (
+                span.attributes["gen_ai.usage.output_tokens"]
+                == usage["completion_tokens"]
+            )  # pyright: ignore[reportOptionalSubscript]
+
+    async def test_first_party_fallback_is_attributed_to_the_vendor(
+        self, spans: InMemorySpanExporter
+    ):
+        sb = Switchboard(resources=[], openai_fallback=True)
+        with patch.object(
+            AsyncCompletions, "create", new=AsyncMock(return_value=COMPLETION_RESPONSE)
+        ):
+            await sb.chat.completions.create(**COMPLETION_PARAMS)
+
+        (call,) = named(spans, "chat gpt-4o-mini")
+        assert call.attributes["gen_ai.provider.name"] == "openai"  # pyright: ignore[reportOptionalSubscript]
+
     async def test_a_session_id_is_recorded_on_the_call(
         self, switchboard: Switchboard, spans: InMemorySpanExporter
     ):
@@ -206,6 +240,25 @@ class TestStreamSpans:
         assert span.attributes["switchboard.model"] == "gpt-4o-mini"  # pyright: ignore[reportOptionalSubscript]
         # only reachable because the span was still open when the usage chunk landed
         assert span.attributes["gen_ai.usage.cached_tokens"] > 0  # pyright: ignore[reportOptionalSubscript, reportOperatorIssue]
+
+    async def test_a_messages_stream_reports_running_totals_on_its_span(
+        self, anthropic_deployment: AnthropicDeployment, spans: InMemorySpanExporter
+    ):
+        """Input arrives on message_start and output on the deltas, which are
+        cumulative -- the span must end on the final total, not a sum."""
+        inner = _SDKStream(MESSAGE_STREAM_EVENTS)
+        with patch.object(
+            anthropic_deployment.client.messages,
+            "create",
+            new=AsyncMock(return_value=inner),
+        ):
+            stream = await anthropic_deployment.create(stream=True, **MESSAGE_BODY)
+            async for _ in stream:
+                pass
+
+        (span,) = named(spans, "stream")
+        assert span.attributes["gen_ai.usage.input_tokens"] == 12  # pyright: ignore[reportOptionalSubscript]
+        assert span.attributes["gen_ai.usage.output_tokens"] == 9  # pyright: ignore[reportOptionalSubscript]
 
     async def test_the_stream_span_hangs_off_the_attempt_that_opened_it(
         self, switchboard: Switchboard, spans: InMemorySpanExporter

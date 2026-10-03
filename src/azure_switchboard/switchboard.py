@@ -226,13 +226,16 @@ class Switchboard:
         fallback: Callable[[], _M | None],
         call: Callable[[_M], Awaitable[_R]],
     ) -> _R:
-        with telemetry.tracer.start_as_current_span(
-            f"chat {model}",
-            attributes={
-                "gen_ai.operation.name": "chat",
-                "gen_ai.request.model": model,
-            },
-        ) as call_span:
+        with (
+            telemetry.tracer.start_as_current_span(
+                f"chat {model}",
+                attributes={
+                    "gen_ai.operation.name": "chat",
+                    "gen_ai.request.model": model,
+                },
+            ) as call_span,
+            telemetry.in_call(call_span),
+        ):
             if session_id:
                 call_span.set_attribute("switchboard.session_id", session_id)
 
@@ -252,6 +255,10 @@ class Switchboard:
                         pool, model=model, session_id=session_id, fallback=fallback
                     )
                     dimensions = {"model": model, "resource": deployment.resource.name}
+                    provider = telemetry.provider_attributes(deployment)
+                    # the last attempt wins, so a failover from Azure to
+                    # first-party leaves the call attributed to who answered
+                    call_span.set_attributes(provider)
 
                     with telemetry.tracer.start_as_current_span(
                         "attempt",
@@ -260,6 +267,7 @@ class Switchboard:
                             "switchboard.resource": deployment.resource.name,
                             "switchboard.model": deployment.name,
                             "switchboard.load": deployment.load,
+                            **provider,
                         },
                     ):
                         started = time.perf_counter()
@@ -308,7 +316,7 @@ class _Chat:
             # Not part of the pool: it is what selection reaches for once the
             # pool has nothing healthy left.
             self._first_party = (
-                Resource(name="first-party-openai")
+                Resource(name="first-party-openai", provider="openai")
                 if sb._openai_fallback_enabled
                 else None
             )
@@ -399,7 +407,7 @@ class _Messages:
                     self._pool.setdefault(model.name, []).append(model)
 
         self._first_party = (
-            Resource(name="first-party-anthropic")
+            Resource(name="first-party-anthropic", provider="anthropic")
             if sb._anthropic_fallback_enabled
             else None
         )
