@@ -254,6 +254,7 @@ class _AsyncMessageStreamWrapper(wrapt.ObjectProxy):
                     delta = output - self._self_output_spent
                     self._self_model.spend_tokens(delta)
                     self._self_output_spent = output
+                    self._self_span.set_attribute("gen_ai.usage.output_tokens", output)
                     telemetry.tokens.add(
                         delta,
                         {
